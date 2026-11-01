@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
@@ -18,7 +18,12 @@ afterEach(async () => {
   globalThis.Worker = originalWorker;
   delete window.matchMedia;
 });
-
+function clickAt(target, x, y) {
+  const event = new window.MouseEvent("click", { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, detail: 1 });
+  let dispatched;
+  act(() => { dispatched = target.dispatchEvent(event); });
+  return dispatched;
+}
 // Relative links and images resolve against the Markdown file's directory, so the same
 // document behaves differently inside the session's workspace (/ws) and outside it.
 const GUIDE = [
@@ -74,6 +79,12 @@ test("relative links and images in a workspace Markdown file still open and load
   const { container, getByText } = await renderPreview("/ws/docs/guide.md", opened);
 
   assert.match(container.querySelector('img[alt="diagram"]')?.getAttribute("src") ?? "", /^\/api\/files\/.*img\/rel\.png\?.*sessionId=s1/);
-  assert.equal(fireEvent.click(getByText("other"), { button: 0 }), false);
+  const other = getByText("other");
+  fireEvent.pointerDown(other, { pointerType: "touch", clientX: 10, clientY: 10 });
+  fireEvent.pointerMove(other, { pointerType: "touch", clientX: 10, clientY: 30 });
+  assert.equal(clickAt(other, 10, 30), false);
+  assert.deepEqual(opened, [], "a preview scroll/drag must not open a linked file");
+
+  assert.equal(clickAt(other, 10, 10), false);
   assert.deepEqual(opened, ["/ws/docs/other.md"]);
 });

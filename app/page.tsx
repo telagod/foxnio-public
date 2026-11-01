@@ -14,7 +14,7 @@ export default async function Home() {
 
 function RouteLoadingFallback() {
   return (
-    <div className="route-fallback" role="status" aria-busy="true" aria-label="Loading omp web">
+    <div className="route-fallback" role="status" aria-busy="true" aria-label="Loading foxnio">
       <aside className="route-fallback-sidebar" aria-hidden="true">
         <div className="skeleton route-fallback-sidebar-title" />
         <div className="skeleton route-fallback-sidebar-button" />

@@ -2,8 +2,15 @@
 
 import { useEffect } from "react";
 
-const SWIPE_DISTANCE = 32;
+// A drawer swipe is a deliberate, mostly horizontal pull. Vertical chat or file
+// list scrolling always carries some sideways drift, so a short or diagonal drag
+// must stay with the browser's scroller instead of opening or closing a panel.
+const SWIPE_DISTANCE = 56;
 const DIRECTION_SLOP = 12;
+/** Horizontal travel must be at least this multiple of vertical travel (about 26 degrees from the x axis). */
+const HORIZONTAL_RATIO = 2;
+/** Vertical travel past this before a swipe is claimed marks the touch as a scroll for good. */
+const VERTICAL_LOCK = 36;
 
 type Options = {
   enabled: boolean;
@@ -56,11 +63,17 @@ export function useMobileSidebarGestures({ enabled, leftOpen, rightOpen, onLeftO
       const dx = event.touches[0].clientX - gesture.x;
       const dy = Math.abs(event.touches[0].clientY - gesture.y);
       if (!gesture.claimed) {
+        // Direction lock: once the finger has travelled this far vertically the
+        // touch is a scroll, however far it later drifts sideways.
+        if (dy > VERTICAL_LOCK) {
+          cancel();
+          return;
+        }
         // Do not seize a near-diagonal wobble before there is enough travel to navigate.
         if (Math.abs(dx) < SWIPE_DISTANCE) return;
-        // Like mature swipe recognizers, stay pending through thumb drift and
-        // classify net displacement by its dominant axis, not a straight-line cone.
-        if (Math.abs(dx) <= dy) return;
+        // Stay pending through thumb drift, but only claim a clearly horizontal
+        // pull; a diagonal one is a scroll that wandered.
+        if (Math.abs(dx) < dy * HORIZONTAL_RATIO) return;
         if ((rightOpen && dx < 0) || (!rightOpen && leftOpen && dx > 0)) return;
         // Let code blocks, tab strips and other horizontal scrollers keep their pans.
         for (let element: Element | null = gesture.target; element; element = element.parentElement) {
@@ -95,7 +108,7 @@ export function useMobileSidebarGestures({ enabled, leftOpen, rightOpen, onLeftO
       // unclaimed so ordinary vertical panning is still available.
       if (allowedDirection && (current.claimed || (horizontal && Math.abs(dx) >= DIRECTION_SLOP)) && event.cancelable) event.preventDefault();
       if (!current.claimed) return;
-      if (Math.abs(dx) < SWIPE_DISTANCE || Math.abs(dx) <= dy) return;
+      if (Math.abs(dx) < SWIPE_DISTANCE || Math.abs(dx) < dy * HORIZONTAL_RATIO) return;
       // Use overall release direction, allowing a small initial correction.
       if (rightOpen) {
         if (dx > 0) onRightOpenChange(false);

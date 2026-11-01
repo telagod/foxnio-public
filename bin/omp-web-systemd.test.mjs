@@ -58,13 +58,13 @@ test("writeServiceEnv creates the parent directory and a private file", () => {
 
 test("buildUnit points at the generated env file and keeps runtime settings out of the unit", () => {
   const unit = buildUnit({
-    ompwebBin: "/usr/local/bin/ompweb",
+    ompwebBin: "/usr/local/bin/foxnio",
     env: { OMP_WEB_OMP_BIN: "/home/u/.bun/bin/omp" },
     home: "/home/u",
     envPath: "/home/u/.omp/agent/web-service.env",
   });
 
-  assert.match(unit, /ExecStart=\/usr\/local\/bin\/ompweb\n/);
+  assert.match(unit, /ExecStart=\/usr\/local\/bin\/foxnio\n/);
   assert.match(unit, /WorkingDirectory=%h/);
   assert.match(unit, /EnvironmentFile=\/home\/u\/\.omp\/agent\/web-service\.env/);
   assert.doesNotMatch(unit, /PORT=/);
@@ -99,7 +99,7 @@ test("buildUnit adds the launcher interpreter dir for Bun/npm installs of omp", 
     assert.equal(launcherInterpreterDir(path.join(fakeBinDir, "omp"), { PATH: "/usr/bin" }), null);
 
     const unit = buildUnit({
-      ompwebBin: "/usr/local/bin/ompweb",
+      ompwebBin: "/usr/local/bin/foxnio",
       env: { OMP_WEB_OMP_BIN: path.join(fakeBinDir, "omp") },
       home: "/home/u",
       envPath: "/home/u/.omp/agent/web-service.env",
@@ -120,14 +120,14 @@ test("unit helpers escape systemd values and paths", () => {
   assert.equal(escapeUnitValue('quo"te\\'), 'quo\\"te\\\\');
   assert.equal(escapeUnitPath("/home/user name/web-service.env"), "/home/user\\x20name/web-service.env");
   assert.equal(escapeUnitPath("/home/100%name/web-service.env"), "/home/100%%name/web-service.env");
-  assert.equal(formatExecStart("/usr/local/bin/ompweb"), "/usr/local/bin/ompweb");
-  assert.equal(formatExecStart("/home/user name/ompweb"), '"/home/user name/ompweb"');
+  assert.equal(formatExecStart("/usr/local/bin/foxnio"), "/usr/local/bin/foxnio");
+  assert.equal(formatExecStart("/home/user name/foxnio"), '"/home/user name/foxnio"');
 });
 
 test("resolveOmpwebBin honors an executable override", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ompweb-systemd-"));
   try {
-    const fake = path.join(dir, "ompweb");
+    const fake = path.join(dir, "foxnio");
     writeFileSync(fake, "#!/bin/sh\n", { mode: 0o755 });
     assert.equal(resolveOmpwebBin({ OMP_WEB_SYSTEMD_BIN: fake }), fake);
   } finally {
@@ -149,7 +149,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
   try {
     const home = path.join(dir, "home");
     const binDir = path.join(dir, "bin");
-    const fakeOmpweb = path.join(binDir, "ompweb");
+    const fakeOmpweb = path.join(binDir, "foxnio");
     const fakeSystemctl = path.join(binDir, "systemctl");
     mkdirSync(home, { recursive: true });
     mkdirSync(binDir, { recursive: true });
@@ -179,7 +179,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
     assert.equal(result.status, 0, result.stderr);
 
     const envPath = path.join(home, ".omp", "agent", "web-service.env");
-    const unitPath = path.join(home, ".config", "systemd", "user", "ompweb.service");
+    const unitPath = path.join(home, ".config", "systemd", "user", "foxnio.service");
     const written = parseServiceEnv(readFileSync(envPath, "utf8"));
     // The installer hashes OMP_WEB_PASSWORD: only the hash may reach the env
     // file, and omp-web refuses to start on a plaintext password (issue #239).
@@ -208,7 +208,7 @@ test("install writes a pre-hashed password unchanged and rejects a broken one", 
   try {
     const home = path.join(dir, "home");
     const binDir = path.join(dir, "bin");
-    const fakeOmpweb = path.join(binDir, "ompweb");
+    const fakeOmpweb = path.join(binDir, "foxnio");
     const fakeSystemctl = path.join(binDir, "systemctl");
     mkdirSync(home, { recursive: true });
     mkdirSync(binDir, { recursive: true });
@@ -251,7 +251,7 @@ test("install fails loudly when the omp launcher interpreter is missing", () => 
   const dir = mkdtempSync(path.join(tmpdir(), "ompweb-systemd-missing-interp-"));
   try {
     const binDir = path.join(dir, "bin");
-    const fakeOmpweb = path.join(binDir, "ompweb");
+    const fakeOmpweb = path.join(binDir, "foxnio");
     mkdirSync(binDir, { recursive: true });
     writeFileSync(fakeOmpweb, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     // Launcher script needing an interpreter that is nowhere on PATH.
@@ -278,7 +278,7 @@ test("install fails loudly when the omp launcher interpreter is missing", () => 
   }
 });
 
-test("main ompweb bin forwards the systemd subcommand", () => {
+test("main foxnio bin forwards the systemd subcommand", () => {
   const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web.js"), "systemd", "--version"], {
     encoding: "utf8",
   });

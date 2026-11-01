@@ -6,6 +6,7 @@ import { WebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } fr
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
+import { parseAdvisorChoice } from "@/lib/advisor-default";
 
 export const dynamic = "force-dynamic";
 const MAX_MCP_REQUEST_BYTES = 1024 * 1024;
@@ -81,10 +82,10 @@ export async function GET(request: Request) {
     };
     const sessionId = params.get("sessionId");
     const includeLive = params.get("live") !== "0";
-    // Advisor opinion for a fresh spawn only (same ?advisor=1 convention as
-    // /api/agent/[id]): an alive child is reused as-is below, never replaced —
+    // Advisor choice for a fresh spawn only (same ?advisor=on|off convention as
+    // /api/agent/[id]): an alive child is reused as-is below, never switched —
     // listing servers must stay side-effect-free.
-    const advisor = params.get("advisor") === "1";
+    const advisor = parseAdvisorChoice(params.get("advisor"));
     let liveServers: ReturnType<typeof parseMcpListOutput> | undefined;
     let liveError: string | undefined;
     if (includeLive && sessionId) {

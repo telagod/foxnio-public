@@ -293,7 +293,7 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
   // POST /api/agent/[id], which starts the wrapper before this attaches.
   const existing = getRpcSession(sessionId);
   const session = existing?.isAlive() ? existing : undefined;
-  if (!session) return { ok: false, status: 409, error: "Session is not managed by omp-web", code: "session_not_managed" };
+  if (!session) return { ok: false, status: 409, error: "Session is not managed by foxnio", code: "session_not_managed" };
 
   handle.open();
   // onEvent can synchronously replay pending UI requests. Subscribe before

@@ -88,6 +88,8 @@ Desktop.ini
 native/tray/bin/
 native/tray/obj/
 bin/tray-publish/
+desktop/runtime/
+dist-desktop/
 *.pdb
 
 # npm packaging archives

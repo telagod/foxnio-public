@@ -112,7 +112,7 @@ test("expanded oversized user message can be collapsed again", (t) => {
 
   const view = render(React.createElement(MessageView, { message: { role: "user", content: "long\n\n".repeat(200) } }));
   const resize = () => act(() => { for (const observer of observers) observer.callback([]); });
-  fireEvent.click(view.getByRole("button", { name: "Show full input" }));
+  fireEvent.click(view.getByRole("button", { name: "Show 197 more lines" }));
   resize();
   const toggle = view.getByRole("button", { name: "Collapse input" });
   toggle.focus();
@@ -120,8 +120,60 @@ test("expanded oversized user message can be collapsed again", (t) => {
   // Before re-measuring, the same toggle must stay mounted and focused.
   assert.equal(document.activeElement, toggle);
   resize();
-  assert.equal(view.getByRole("button", { name: "Show full input" }), toggle);
+  assert.equal(view.getByRole("button", { name: "Show 197 more lines" }), toggle);
   assert.equal(document.activeElement, toggle);
+});
+
+test("long user message is clipped to a preview with a line-count toggle", (t) => {
+  const proto = window.HTMLElement.prototype;
+  const scrollHeight = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+  const clientHeight = Object.getOwnPropertyDescriptor(proto, "clientHeight");
+  // Capped bubbles overflow; an uncapped bubble fits its content.
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get() { return 600; } });
+  Object.defineProperty(proto, "clientHeight", {
+    configurable: true,
+    get() { return this.style.maxHeight === "none" ? 600 : 80; },
+  });
+  t.after(() => {
+    for (const [name, descriptor] of [["scrollHeight", scrollHeight], ["clientHeight", clientHeight]]) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+  });
+
+  const view = render(React.createElement(MessageView, { message: { role: "user", content: "a\nb\nc\nd\ne\nf" } }));
+  const bubble = () => view.container.querySelector(".chat-message-card");
+  assert.match(bubble().style.maxHeight, /^calc\(3 \*/);
+  assert.equal(bubble().style.overflowY, "hidden");
+  const toggle = view.getByRole("button", { name: "Show 3 more lines" });
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+  fireEvent.click(toggle);
+  assert.equal(bubble().style.maxHeight, "none");
+  assert.equal(bubble().style.overflowY, "auto");
+  assert.equal(view.getByRole("button", { name: "Collapse input" }).getAttribute("aria-expanded"), "true");
+});
+
+test("single long paragraph overflowing the preview falls back to the generic label", (t) => {
+  const proto = window.HTMLElement.prototype;
+  const scrollHeight = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+  const clientHeight = Object.getOwnPropertyDescriptor(proto, "clientHeight");
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get() { return 600; } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get() { return 80; } });
+  t.after(() => {
+    for (const [name, descriptor] of [["scrollHeight", scrollHeight], ["clientHeight", clientHeight]]) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+  });
+
+  const view = render(React.createElement(MessageView, { message: { role: "user", content: "word ".repeat(500) } }));
+  assert.ok(view.getByRole("button", { name: "Show full input" }));
+});
+
+test("user message that fits the preview has no toggle", () => {
+  const view = render(React.createElement(MessageView, { message: { role: "user", content: "one\ntwo\nthree" } }));
+  assert.equal(view.queryByRole("button", { name: /Show .*(lines|input)/ }), null);
 });
 
 test("expanded tool inputs follow streaming arguments without toggling output", () => {

@@ -166,6 +166,14 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
     (subagent.source !== "history" && subagent.status === "started" ? running : completed).push(subagent);
   }
   const runningCount = running.length;
+  // Idle header mirrors the todo panel ("done/total complete"). Only
+  // subagents that actually completed count as done: failed/aborted ones stay
+  // out so a partially failed roster never reads as fully finished. Roster
+  // entries in `completed` that are still "started" (stale history) are not done either.
+  const doneCount = completed.filter((subagent) => subagent.status === "completed").length;
+  const headerLabel = runningCount > 0
+    ? t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })
+    : t("chatWindow.subagentProgress", { done: doneCount, total: subagents.length });
 
   function renderChip(subagent: SubagentInfo) {
     const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
@@ -252,10 +260,10 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
         ) : null}
         <span
           className={`${liveStatus ? "" : "ml-auto "}inline-flex items-center gap-1.5`}
-          aria-label={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
-          title={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
+          aria-label={headerLabel}
+          title={headerLabel}
         >
-          <span>{runningCount}/{subagents.length}</span>
+          <span>{runningCount > 0 ? `${runningCount}/${subagents.length}` : headerLabel}</span>
         </span>
         <ChevronDown
           size={14}

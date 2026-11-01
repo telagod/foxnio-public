@@ -12,7 +12,7 @@ type Params = { params: Promise<{ provider: string }> };
 // a URL are rejected by omp's RPC mode). Keys therefore cannot be stored or
 // removed from the web UI.
 const API_KEY_WRITE_GUIDANCE =
-  "omp-web cannot manage stored API keys. Run `omp` in a terminal and use /login (or /logout), " +
+  "foxnio cannot manage stored API keys. Run `omp` in a terminal and use /login (or /logout), " +
   "set the provider's environment variable (e.g. OPENAI_API_KEY), or configure an apiKey on a " +
   "custom provider in ~/.omp/agent/models.yml.";
 
@@ -45,7 +45,7 @@ export async function GET(_req: Request, { params }: Params) {
 export async function POST(_req: Request, { params }: Params) {
   const { provider } = await params;
   return NextResponse.json(
-    { error: `Cannot store an API key for "${provider}" from omp-web. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_store_unsupported" },
+    { error: `Cannot store an API key for "${provider}" from foxnio. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_store_unsupported" },
     { status: 501 },
   );
 }
@@ -54,7 +54,7 @@ export async function POST(_req: Request, { params }: Params) {
 export async function DELETE(_req: Request, { params }: Params) {
   const { provider } = await params;
   return NextResponse.json(
-    { error: `Cannot remove the API key for "${provider}" from omp-web. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_remove_unsupported" },
+    { error: `Cannot remove the API key for "${provider}" from foxnio. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_remove_unsupported" },
     { status: 501 },
   );
 }

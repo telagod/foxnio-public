@@ -30,7 +30,7 @@ let
     hash = "sha256-c4lOBEjK6QqStsL4cyt7uay3uUxBi/9Vna1KGOHellk=";
   };
 
-  localFontsPatch = writeText "ompweb-local-fonts.patch" ''
+  localFontsPatch = writeText "foxnio-local-fonts.patch" ''
     diff --git a/app/layout.tsx b/app/layout.tsx
     --- a/app/layout.tsx
     +++ b/app/layout.tsx
@@ -117,7 +117,7 @@ let
   version = (builtins.fromJSON (builtins.readFile ../package.json)).version;
 in
 buildNpmPackage (finalAttrs: {
-  pname = "ompweb";
+  pname = "foxnio";
   inherit src version;
 
   patches = [ localFontsPatch ];
@@ -135,7 +135,9 @@ buildNpmPackage (finalAttrs: {
   # npmPackFlags = [ "--ignore-scripts" ];
 
   meta = {
-    description = "Local web UI for the oh-my-pi (omp) coding agent";
+    description = "foxnio: local web UI for the oh-my-pi (omp) coding agent (fork of ompweb)";
+    homepage = "https://github.com/telagod/foxnio-public";
     license = lib.licenses.mit;
+    mainProgram = "foxnio";
   };
 })

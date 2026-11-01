@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { getFileIcon } from "./FileIcons";
 import { Tooltip } from "./ui/primitives";
+import { useDragClickGuard } from "./ui/toast";
 import { translate, useI18n } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import {
@@ -299,6 +300,9 @@ const ExplorerRow = memo(function ExplorerRow({
   const containsGitChanges = node.isDir && (
     gitStatus !== undefined || changedDirectoryPaths.has(normalizedPath)
   );
+  // Rows grow to 44px on phones; the inline buttons follow so a thumb tap aimed
+  // at the row cannot land on a 24px action beside it.
+  const actionSize = rowHeight > 24 ? 36 : 24;
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
 
@@ -335,6 +339,9 @@ const ExplorerRow = memo(function ExplorerRow({
         background: isActiveFile ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
         borderRadius: "var(--radius-control)",
         userSelect: "none",
+        // Taps open files and folders through the native click, which the browser
+        // withholds when the touch was a scroll; this also drops the double-tap delay.
+        touchAction: "manipulation",
         boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : isActiveFile ? "inset 2px 0 0 var(--accent)" : "none",
         outline: "none",
         transition: `background var(--dur-fast) var(--ease-out-warm)`,
@@ -450,7 +457,7 @@ const ExplorerRow = memo(function ExplorerRow({
               justifyContent: "center",
               gap: 4,
               padding: "0 8px",
-              minWidth: 24, height: 24,
+              minWidth: actionSize, height: actionSize,
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-control)",
@@ -481,7 +488,7 @@ const ExplorerRow = memo(function ExplorerRow({
               justifyContent: "center",
               gap: 4,
               padding: "0 5px",
-              minWidth: 24, height: 24,
+              minWidth: actionSize, height: actionSize,
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-control)",
@@ -548,6 +555,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const clickGuard = useDragClickGuard();
   const loadingPathsRef = useRef<Set<string>>(new Set());
   const rootRequestRef = useRef(0);
   const expandedPathsRef = useRef<Set<string>>(new Set());
@@ -1358,6 +1366,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         aria-label={t("sessionSidebar.explorer")}
         aria-busy={loading || searchLoading}
         onScroll={handleTreeScroll}
+        onClickCapture={clickGuard.onClickCapture}
+        onPointerDown={clickGuard.onPointerDown}
+        onPointerMove={clickGuard.onPointerMove}
         style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "2px 4px", outline: "none" }}
       >
         {searchActive ? (

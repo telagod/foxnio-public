@@ -13,7 +13,7 @@ self.addEventListener("push", (event) => {
   }
   const shown = {
     type: data.type === "error" ? "error" : "info",
-    title: data.title || "omp web",
+    title: data.title || "foxnio",
     body: data.body || "",
     tag: data.tag || "",
     sessionId: data.sessionId || "",

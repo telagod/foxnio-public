@@ -24,13 +24,13 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   {
     name: "list_sessions",
     description:
-      "List omp-web sessions (ID, name, working directory, running or idle) so send_to_session can address one without the user copying IDs.",
+      "List foxnio sessions (ID, name, working directory, running or idle) so send_to_session can address one without the user copying IDs.",
     parameters: { type: "object", properties: {} },
   },
   {
     name: "new_session",
     description:
-      "Start a new omp-web session. The new session appears in the omp-web sidebar like any other session. Returns its session ID.",
+      "Start a new foxnio session. The new session appears in the foxnio sidebar like any other session. Returns its session ID.",
     parameters: {
       type: "object",
       properties: {
@@ -46,7 +46,7 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   {
     name: "send_to_session",
     description:
-      "Send a message to another omp-web session by ID. If the target is not running it is resumed first, as when a user opens it. The delivered message is prefixed with the sending session's ID so the target transcript shows where it came from.",
+      "Send a message to another foxnio session by ID. If the target is not running it is resumed first, as when a user opens it. The delivered message is prefixed with the sending session's ID so the target transcript shows where it came from.",
     parameters: {
       type: "object",
       properties: {
@@ -194,7 +194,7 @@ export class AgentToolGuard {
  * (user or target agent) can see where the message came from. The full
  * source ID is kept so it can be found in the sidebar. */
 export function formatAttributedMessage(sourceSessionId: string, message: string): string {
-  return `[From session ${sourceSessionId} via omp-web agent tools]: ${message}`;
+  return `[From session ${sourceSessionId} via foxnio agent tools]: ${message}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -286,7 +286,7 @@ export async function executeAgentTool(
   ctx: AgentToolContext,
 ): Promise<unknown> {
   if (!ctx.enabled) {
-    throw new Error("Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.");
+    throw new Error("Agent tools are disabled. Enable \"Agent tools\" in foxnio Settings (System & Updates) first.");
   }
   if (!AGENT_TOOL_NAMES.has(toolName)) throw new Error(`Unknown agent tool: ${toolName}.`);
   const record = asRecord(args);

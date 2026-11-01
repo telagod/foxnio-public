@@ -1,26 +1,28 @@
 {
-  "name": "@kahme247/ompweb",
+  "name": "@telagod/foxnio",
   "version": "0.6.0",
-  "description": "Web UI for the oh-my-pi (omp) coding agent",
-  "homepage": "https://github.com/kahme247/ompweb#readme",
+  "description": "foxnio: web UI for the oh-my-pi (omp) coding agent, a fork of ompweb focused on agent customization",
+  "homepage": "https://github.com/telagod/foxnio-public#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kahme247/ompweb.git"
+    "url": "git+https://github.com/telagod/foxnio-public.git"
   },
   "bugs": {
-    "url": "https://github.com/kahme247/ompweb/issues"
+    "url": "https://github.com/telagod/foxnio-public/issues"
   },
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"
   },
   "bin": {
-    "ompweb": "bin/omp-web.js",
-    "ompweb-tray": "bin/omp-web-tray.js",
-    "ompweb-tray-linux": "bin/linux-tray.js",
-    "ompweb-launchd": "bin/omp-web-launchd.js",
-    "ompweb-systemd": "bin/omp-web-systemd.js"
+    "foxnio": "bin/omp-web.js",
+    "foxnio-tray": "bin/omp-web-tray.js",
+    "foxnio-tray-linux": "bin/linux-tray.js",
+    "foxnio-launchd": "bin/omp-web-launchd.js",
+    "foxnio-systemd": "bin/omp-web-systemd.js"
   },
+  "main": "desktop/main.cjs",
+  "desktopName": "foxnio",
   "files": [
     "bin",
     "lib",
@@ -34,6 +36,7 @@
     "!.next/**/*.map",
     "public",
     "scripts",
+    "desktop",
     "next.config.ts",
     "package.json"
   ],
@@ -43,7 +46,7 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30177",
     "start:lan": "next start -H 0.0.0.0 -p 30177",
-    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs desktop/*.test.mjs desktop/*.test.cjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "tray:install": "node bin/omp-web-tray.js --install",
@@ -55,6 +58,10 @@
     "systemd:start": "node bin/omp-web-systemd.js start",
     "systemd:stop": "node bin/omp-web-systemd.js stop",
     "systemd:status": "node bin/omp-web-systemd.js status",
+    "desktop:prepare-runtime": "node desktop/prepare-runtime.mjs",
+    "desktop:preflight": "node desktop/preflight.cjs",
+    "desktop:dev": "electron .",
+    "desktop:dist": "npm run build && npm run desktop:prepare-runtime && npm run desktop:preflight && electron-builder --config desktop/electron-builder.yml --publish never",
     "prepack": "npm run build",
     "release:check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
@@ -93,6 +100,8 @@
     "@types/react-dom": "^19",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/web-push": "^3.6.4",
+    "electron": "^36.9.5",
+    "electron-builder": "^26.18.0",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "jsdom": "^29.1.1",

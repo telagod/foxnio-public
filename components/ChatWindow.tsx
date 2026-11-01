@@ -2,10 +2,10 @@
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
+import { ArrowDown, CheckCircle2, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { collectToolResults, foldCompletedTurn, formatTurnDuration, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow, type TurnSummary } from "@/lib/chat-transcript-plan";
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -38,6 +38,7 @@ import {
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
+import { isScrolledToBottom, type ScrollAnchor } from "@/lib/session-tabs";
 
 interface Props {
   session: SessionInfo | null;
@@ -46,6 +47,8 @@ interface Props {
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
   hideToolActivity?: boolean;
+  /** UI `foldCompletedTurns`: a finished turn collapses into one summary row above its final reply. */
+  foldCompletedTurns?: boolean;
   /** "Expand thinking blocks by default": open each thinking block on mount. */
   expandThinkingByDefault?: boolean;
   /** omp `hideThinkingBlock`: omit thinking from the transcript. */
@@ -69,6 +72,10 @@ interface Props {
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
+  /** Reading position to restore once the transcript loads (session tabs); read at mount only. */
+  initialScrollAnchor?: ScrollAnchor | null;
+  /** Reports where the reader is; `null` means at the bottom (session tabs). */
+  onScrollAnchorChange?: (sessionId: string, anchor: ScrollAnchor | null) => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -192,11 +199,21 @@ export function OmpRuntimeVersion() {
   );
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: () => ReactNode }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, summary, children }: { messageCount: number; toolCallCount: number; summary?: TurnSummary; children: () => ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
-  if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
+  // A completed turn reads "Completed 12 steps · 8 tool calls · 3 thinking blocks · 2m 41s".
+  const parts = summary
+    ? [tn("chatWindow.completedSteps", summary.steps)]
+    : [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
+  if (summary) {
+    if (summary.toolCalls > 0) parts.push(tn("chatWindow.toolCallCount", summary.toolCalls));
+    if (summary.thinkingBlocks > 0) parts.push(tn("chatWindow.thinkingBlockCount", summary.thinkingBlocks));
+    if (summary.durationMs !== undefined) parts.push(formatTurnDuration(summary.durationMs));
+  } else if (toolCallCount > 0) {
+    parts.push(tn("chatWindow.toolCallCount", toolCallCount));
+  }
+  const Icon = summary ? CheckCircle2 : Layers;
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -207,7 +224,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
         className="process-details-toggle"
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
-        <Layers
+        <Icon
           size={12}
           strokeWidth={1.8}
           aria-hidden="true"
@@ -278,6 +295,8 @@ interface CommittedTranscriptProps {
   toolCallsDefaultCollapsed: boolean;
   /** Fold a running turn's tool calls; off restores the flat live tail. */
   hideToolActivity: boolean;
+  /** Collapse each finished turn into one summary row above its final reply. */
+  foldCompletedTurns: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
   visibleCount: number;
@@ -299,7 +318,7 @@ interface CommittedTranscriptProps {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, foldCompletedTurns, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -372,15 +391,16 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // sessions pay element cost proportional to the visible window instead of
   // the whole transcript.
   const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }), [messages, hideThinkingBlock]);
+  // `sessionBusy` only goes true for a run omp-web owns, so a session driven
+  // by another `omp` process would never look running; the transcript-tail
+  // heuristic supplies that missing case.
+  const isRunningTurn = (row: Extract<TranscriptRow, { kind: "group" }>): boolean =>
+    (sessionBusy || externalRunActive || isStreaming) && row.endIndex === messages.length && row.userIndex === lastAnchorIdx;
   const isLiveTail = (row: TranscriptRow): boolean => {
     // With "Hide tool activity while working" on (the default) the running turn
     // folds like a finished one; off restores the flat tail.
     if (hideToolActivity) return false;
-    if (row.kind !== "group") return false;
-    // `sessionBusy` only goes true for a run omp-web owns, so a session driven
-    // by another `omp` process would never get a live tail; the transcript-tail
-    // heuristic supplies that missing case.
-    return (sessionBusy || externalRunActive || isStreaming) && row.endIndex === messages.length && row.userIndex === lastAnchorIdx;
+    return row.kind === "group" && isRunningTurn(row);
   };
 
   // Anchor the render window while the user is reading history: the plain
@@ -409,7 +429,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
       rendered.push(renderMessage(row.index));
       continue;
     }
-    const { userIndex: userIdx, endIndex: endIdx, segments } = row;
+    const { userIndex: userIdx, endIndex: endIdx } = row;
+    // Only a finished turn collapses to its summary; the running one keeps the live layout.
+    const segments = foldCompletedTurns && !isRunningTurn(row) ? foldCompletedTurn(messages, row) : row.segments;
 
     if (isLiveTail(row)) {
       // Live tail: render the running turn flat so streaming updates and tool
@@ -447,7 +469,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
           key={`activity-${userIdx}-${segmentIdx}`}
           ref={refIdx === undefined ? undefined : (el) => { messageRefs.current[refIdx] = el; }}
         >
-          <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}>
+          <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount} summary={segment.summary}>
             {() => renderActivityPieces(messages, segment.pieces, renderMessage)}
           </ProcessDetailsGroup>
         </div>,
@@ -471,7 +493,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, foldCompletedTurns = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, initialScrollAnchor, onScrollAnchorChange }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -519,7 +541,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
+    slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, advisorDefaultSource, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     skillDiagnostics, setSkillStartupDiagnostics,
     isAutoModelSelection,
@@ -527,7 +549,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef, initialScrollDoneRef, completionScrollAllowedRef,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage, promoteQueuedToSteer,
@@ -723,6 +745,56 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       if (raf !== null) cancelAnimationFrame(raf);
     };
   }, [loading, isEmptyNew, scrollContainerRef]);
+  // Per-session reading position for the session tabs. A tab switch remounts
+  // this window, so the scroller is rebuilt: the position is carried as an
+  // anchor (first visible message + its offset) rather than a raw scrollTop,
+  // which the windowed transcript would not reproduce.
+  const initialScrollAnchorRef = useRef(initialScrollAnchor ?? null);
+  const scrollAnchorResolvedRef = useRef(initialScrollAnchorRef.current === null);
+  useEffect(() => {
+    if (scrollAnchorResolvedRef.current || loading || messages.length === 0 || !initialScrollDoneRef.current) return;
+    const container = scrollContainerRef.current;
+    const anchor = initialScrollAnchorRef.current;
+    if (!container || !anchor) return;
+    scrollAnchorResolvedRef.current = true;
+    const row = container.querySelector<HTMLElement>(`[data-message-index="${anchor.messageIndex}"]`);
+    // Not in the rendered window (a very old position): stay at the bottom.
+    if (!row) return;
+    container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+    // The saved position was away from the bottom: do not follow the stream until the reader returns.
+    completionScrollAllowedRef.current = false;
+  }, [loading, messages.length, initialScrollDoneRef, completionScrollAllowedRef, scrollContainerRef]);
+  const scrollAnchorSessionId = session?.id ?? null;
+  useEffect(() => {
+    if (loading || isEmptyNew || !scrollAnchorSessionId || !onScrollAnchorChange) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    let raf: number | null = null;
+    const report = () => {
+      raf = null;
+      // Until the saved position is restored, the scroller's own position is not the reader's.
+      if (!scrollAnchorResolvedRef.current) return;
+      if (isScrolledToBottom(el.scrollTop, el.clientHeight, el.scrollHeight)) {
+        onScrollAnchorChange(scrollAnchorSessionId, null);
+        return;
+      }
+      const top = el.getBoundingClientRect().top;
+      for (const row of el.querySelectorAll<HTMLElement>("[data-message-index]")) {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom <= top) continue;
+        onScrollAnchorChange(scrollAnchorSessionId, { messageIndex: Number(row.dataset.messageIndex), offset: rect.top - top });
+        return;
+      }
+    };
+    const onScroll = () => {
+      if (raf === null) raf = requestAnimationFrame(report);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [loading, isEmptyNew, scrollAnchorSessionId, onScrollAnchorChange, scrollContainerRef]);
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -1101,6 +1173,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       activePlan={activePlan}
       advisorEnabled={advisorEnabled}
       onAdvisorChange={handleAdvisorChange}
+      advisorDefaultSource={advisorDefaultSource}
       advisorModel={advisorModelMeta}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
@@ -1238,7 +1311,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             >
               <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
                 <OmpWebLogo size={26} />
-                <span className="omp-wordmark" style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>omp web</span>
+                <span className="omp-wordmark" style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>foxnio</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -1332,6 +1405,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              foldCompletedTurns={foldCompletedTurns}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
               visibleCount={visibleCount}

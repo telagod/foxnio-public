@@ -15,11 +15,11 @@ const path = require("path");
 
 function printHelp() {
   console.log(`Usage: node bin/omp-web-tray.js [command] [options]
-       ompweb-tray [command] [options]
+       foxnio-tray [command] [options]
 
 Platform notes:
   Windows  System Tray shortcuts and background service
-  Linux    StatusNotifierItem tray (KDE Plasma and compatible) — see ompweb-systemd
+  Linux    StatusNotifierItem tray (KDE Plasma and compatible) — see foxnio-systemd
            for the systemd user service this tray manages
 
 Commands:

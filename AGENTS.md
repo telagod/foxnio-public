@@ -1,4 +1,4 @@
-# omp-web - Development Notes
+# foxnio - Development Notes
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ All live-agent features go through it; session browsing works without it.
 
 ## Architecture
 
-omp-web never imports `@oh-my-pi/*` or `@earendil-works/*` packages (they are
+foxnio never imports `@oh-my-pi/*` or `@earendil-works/*` packages (they are
 Bun-only and cannot run inside Node/Next). See `DESIGN.md` for the full porting
 contract.
 
@@ -83,7 +83,7 @@ app/api/
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
-  web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
+  web-settings/route.ts           GET/PUT foxnio's own server settings (auto-resume)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
@@ -115,7 +115,7 @@ lib/
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
   pi-types.ts          local structural types for agent/RPC objects
-  project-command-env.ts  child-process environments: strips PORT/NODE_ENV/NEXT_* and omp-web's secrets
+  project-command-env.ts  child-process environments: strips PORT/NODE_ENV/NEXT_* and foxnio's secrets
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
   project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
   notification-events.ts  shared: event/prefs/history-entry types, frame→event detector, renderNotification()
@@ -131,7 +131,7 @@ lib/
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
-  web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
+  web-settings.ts      foxnio server settings (~/.omp/agent/omp-web-settings.json)
   skills-service.ts    skill listing via `omp skill list --json`; pure-Node replica scan as fallback
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
@@ -206,19 +206,19 @@ hooks/
   the agent dir listing sessions that are mid-run; startup
   (`instrumentation.node.ts`) consumes it, restarts each session and sends
   `RESUME_PROMPT`.
-- Each instance writes only its own pid's list, so a second omp-web sharing
+- Each instance writes only its own pid's list, so a second foxnio sharing
   the agent dir (e.g. `npm run dev` beside an installed one) never resumes or
   overwrites sessions the other is running. Startup claims a list only when its
   pid is dead or the file predates the last boot, plus the legacy unsuffixed
   list. Same-boot pid reuse or a zombie writer leaves that list unresumed.
 - A service stop signals every process at once, so an omp child can die
-  before omp-web's own SIGTERM handler runs. A session whose process died
+  before foxnio's own SIGTERM handler runs. A session whose process died
   therefore stays listed for `EXIT_GRACE_MS`; the shutdown handler freezes the
   list (`markShuttingDown`) so those deaths count as interrupted, while a
-  crash with omp-web still up is dropped after the window.
+  crash with foxnio still up is dropped after the window.
 - Only session ids are stored; paths are re-resolved on resume.
 - Known limit: resume does not detect a terminal `omp --resume <id>` started
-  on the same session while omp-web was down; both would write the file.
+  on the same session while foxnio was down; both would write the file.
 
 ### Session moves (omp >= 18.5 ownership) and title generation
 - Only the first omp process to write a session file owns it; a non-owner moves
@@ -284,6 +284,14 @@ wait for that commit:
   finished turn. `AppShell` must pass `hideToolActivity` into `ChatWindow` for
   the switch to do anything. The fold row is the expand affordance, so a hidden
   tool call is one click away rather than gone.
+- A **finished** turn collapses further (`foldCompletedTurn` in
+  `lib/chat-transcript-plan.ts`, applied at render in `CommittedTranscript`):
+  everything before the trailing text segments becomes one `Completed N steps ·
+  N tool calls · N thinking blocks · duration` row (`TurnSummary`) above the
+  final reply. It never applies to the running turn (`isRunningTurn`), skips a
+  turn with a provider error on a folded message, and is switched by the UI
+  `foldCompletedTurns` setting (`omp-web:fold-completed-turns`, default on);
+  `AppShell` must pass it into `ChatWindow`.
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
   `message_end` drops the pending `message_update` (the committed message
@@ -358,7 +366,7 @@ during the wait.
 - Submitting during a run defaults to **Queue follow-up**
   (`lib/composer-prefs.ts`, `omp-web:submit-during-run`); only an explicitly
   stored choice overrides it, and an absent key yields `queue`.
-- omp-web's own `!!` shell command (`bashRunning`, set for the whole `bash`
+- foxnio's own `!!` shell command (`bashRunning`, set for the whole `bash`
   RPC) is the one state omp refuses a prompt in. The wrapper degrades instead
   of throwing (`queueWhileShellRunning` in `lib/rpc-manager.ts`): the frame is
   forwarded as omp's `follow_up` — never aborted, never reimplemented here —
@@ -417,7 +425,7 @@ during the wait.
   answers stream as `btw_delta` (text appended to the latest turn) and
   `btw_record` (full snapshot per lifecycle change) frames. omp persists the
   history per session (and re-reads it from disk when idle), so the TUI and
-  omp-web share topics. omp answers `btw` before that turn's frames; the
+  foxnio share topics. omp answers `btw` before that turn's frames; the
   running `btw_record` comes first.
 - `/btw <question>` and `/btw` are client builtins (`handleBuiltinSlashCommand`
   case `"btw"`). `ChatInput.sendSideQuestion` routes them there from both the
@@ -469,7 +477,7 @@ during the wait.
 - **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
   omp persists each subagent's transcript to the parent session's sibling
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
-  task toolResults keep `progress[]`/`results[]` snapshots. omp-web recovers
+  task toolResults keep `progress[]`/`results[]` snapshots. foxnio recovers
   the roster from disk (`extractSubagentHistory`, result fields win over the
   mid-run snapshot), so past/finished runs show in the composer panel after a
   reload. The transcript route pages the sibling file byte-wise (mirroring
@@ -493,7 +501,7 @@ during the wait.
   issue link) and never links omp's write-only `agent://all`. Because the
   shared sanitizer admits `agent:`, every `ReactMarkdown` host must drop
   rejected hrefs (`defaultUrlTransform(url) || undefined`) — a blank `href=""`
-  links to omp-web itself; `FileViewer` does this.
+  links to foxnio itself; `FileViewer` does this.
   Tool rows (`ToolCallBlock` in `MessageView`) open an `agent://` `path`
   through the same context.
 - **In-message task summary** (`components/MessageView.tsx` TaskResultPanel):
@@ -615,19 +623,19 @@ during the wait.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`).
+- `GET /api/app-update` queries the npm registry for `@telagod/foxnio` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @telagod/foxnio` or `bun add -g @telagod/foxnio`).
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
 
 ### Auth and model config
-- Auth flows go through RPC commands (`get_login_providers`, `login`, `get_logout_accounts`, `logout`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which omp-web never touches directly. `/api/auth/accounts/[provider]` lists stored accounts and removes one by `credentialId`; omp without those commands reports `supported: false` and the UI falls back to the read-only `omp usage` account list.
+- Auth flows go through RPC commands (`get_login_providers`, `login`, `get_logout_accounts`, `logout`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which foxnio never touches directly. `/api/auth/accounts/[provider]` lists stored accounts and removes one by `credentialId`; omp without those commands reports `supported: false` and the UI falls back to the read-only `omp usage` account list.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 
 ### Navigate back / forward (`lib/navigation-history.ts`, `hooks/useNavigationHistory.ts`)
 - Browser-style back/forward over visited chat views (sessions + the new-chat
-  composer), in-memory per page load. It is **omp-web's own stack**, never the
+  composer), in-memory per page load. It is **foxnio's own stack**, never the
   browser History API — the app only ever `router.replace`s `?session=`, and
   the real history stack belongs to the mobile back-gesture / exit-guard
   machinery (`useSidebarHistory` + the popstate bridge).
@@ -675,6 +683,24 @@ during the wait.
   `GhostMirror`), not ChatInput state: re-rendering the composer per ghost
   change was the dominant per-keystroke cost.
 
+### Expanded composer editor (`components/ChatInput-expand*.ts(x)`, `lib/user-message-preview.ts`)
+- The expand button does not mount a second editor: ChatInput's root div turns
+  into a `position: fixed` modal dialog (`useModalDialog`, `data-composer-expanded`)
+  around the same textarea, so draft, attachments, menus and dictation keep
+  working. A spacer of the compact height stops the transcript reflowing. CSS in
+  `globals.css` (`.composer-textarea`, `!important`) overrides the inline
+  auto-grow height; do not branch the ~10 auto-grow call sites.
+- Enter: bare Enter is a newline in the dialog, Ctrl/Cmd+Enter sends
+  (`composerEnterAction`). `clearInput` (every send path) collapses it.
+- Escape peels off the innermost open layer (history/slash/@ menu, plus/model/
+  thinking/context popovers) before collapsing; the dialog hook swallows Escape
+  in the capture phase, so textarea-level Escape code (menus, stop agent) does
+  not run while expanded. Slash/@/history menus use a pinned height and sit above
+  the toolbar instead of the flip logic, because their anchor spans the dialog.
+- Sent user messages clip to `USER_MESSAGE_PREVIEW_LINES` (3) of the bubble
+  font via max-height (markdown cannot be sliced by line); the toggle label
+  counts non-blank source lines beyond the preview.
+
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the
   recording in memory and starts a job; the hook polls `GET /api/stt/[jobId]`
@@ -707,7 +733,7 @@ during the wait.
 - Without `OMP_WEB_STT_ENDPOINT`, `OMP_WEB_STT_MODEL` names an omp STT model
   (e.g. `openai-codex/codex-transcribe`, the ChatGPT subscription) and jobs
   go through `lib/omp/auth-gateway.ts` as base64 JSON — so the gateway's 25MB
-  body cap limits audio to 18MB there. omp-web never reads omp credentials.
+  body cap limits audio to 18MB there. foxnio never reads omp credentials.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
@@ -723,7 +749,7 @@ during the wait.
   Auto-approved tool confirmations return before the hook and never notify.
   omp sends `retry_fallback_applied` before the `auto_retry_start` of the same
   failure, so the detector holds a reason-less fallback until that frame.
-  Failures also arrive as omp-web's own `prompt_error` (failed `response`) and
+  Failures also arrive as foxnio's own `prompt_error` (failed `response`) and
   `process_exit` frames; the detector reports one failure per run.
 - A session omp moved to a new file keeps its old ids as `aliases` on the
   event, so a tab still showing an old id counts as viewing it.
@@ -749,7 +775,7 @@ during the wait.
   so a tab stays reachable on every view, Settings included. A tab on
   Settings is visible, so it also counts as active.
 - Prefs and push subscriptions are per device, in `localStorage` and mirrored to
-  the SQLite notification store in omp-web's data dir
+  the SQLite notification store in foxnio's data dir
   (`lib/notification-store.ts`, server-only; mode 0600 because it also holds
   the VAPID private key; WAL with a busy timeout). It also keeps the
   notification history. An installed server and `npm run dev` sharing the agent

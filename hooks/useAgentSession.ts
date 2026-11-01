@@ -16,6 +16,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import { ADVISOR_DEFAULT_CHANGED_EVENT, NO_ADVISOR_DEFAULT, advisorDefaultSource, parseAdvisorDefault, readStoredAdvisorChoice, resolveEffectiveAdvisor, storeAdvisorChoice, type AdvisorChoice, type AdvisorDefault } from "@/lib/advisor-default";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, toDraftImages, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { formatExitedSessionNotice, translate } from "@/lib/i18n";
@@ -376,9 +377,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
   const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
   const [advisorActiveAt, setAdvisorActiveAt] = useState(0);
-  // Advisor is a per-chat toggle (composer Sparkles + /advisor command), not a
-  // global setting: each session remembers its own choice in localStorage.
-  const [advisorEnabled, setAdvisorEnabled] = useState(false);
+  // The chat's own advisor choice (composer Sparkles), remembered per session
+  // in localStorage: `inherit` follows the default below, `on`/`off` override
+  // it either way. Only an explicit choice travels with spawns and forks.
+  const [advisorChoice, setAdvisorChoice] = useState<AdvisorChoice>("inherit");
+  // What every chat in this workspace starts with: omp's `advisor.enabled`
+  // and the workspace launch config, resolved by /api/advisor-default.
+  const [advisorDefault, setAdvisorDefault] = useState<AdvisorDefault>(NO_ADVISOR_DEFAULT);
+  // The state the chat actually runs with, shown by the composer indicator.
+  const advisorEnabled = resolveEffectiveAdvisor(advisorDefault, advisorChoice);
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
   const eventSourceRef = useRef<EventStream | null>(null);
@@ -631,36 +638,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return null;
   }, [todoPhases]);
-  // Load the per-session advisor choice on session switch; brand-new chats
-  // start disabled until the user toggles the composer icon.
+  // Load the per-session advisor choice on session switch; a chat with no
+  // stored choice starts from the default resolved below.
   useEffect(() => {
     const sid = session?.id;
     if (!sid) {
-      setAdvisorEnabled(false);
+      setAdvisorChoice("inherit");
       return;
     }
-    let stored = false;
-    try {
-      stored = localStorage.getItem(`omp-advisor-enabled:${sid}`) === "true";
-    } catch {
-      stored = false;
-    }
-    setAdvisorEnabled(stored);
+    const stored = readStoredAdvisorChoice(sid);
+    setAdvisorChoice(stored);
     // The spawn registry must match before any command POST can lazily start
     // the omp process; localStorage alone would leave resumed sessions dark.
     setSessionAdvisorSpawn(sid, stored);
   }, [session?.id]);
 
+  // The default depends on the workspace (launch config) and on omp's config
+  // file, which Settings or the TUI can change while the chat stays open.
+  const advisorCwd = session?.cwd ?? newSessionCwd ?? null;
+  useEffect(() => {
+    setAdvisorDefault(NO_ADVISOR_DEFAULT);
+    const controller = new AbortController();
+    const load = () => {
+      const query = advisorCwd ? `?cwd=${encodeURIComponent(advisorCwd)}` : "";
+      fetch(`/api/advisor-default${query}`, { signal: controller.signal })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data: unknown) => { if (data) setAdvisorDefault(parseAdvisorDefault(data)); })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener("focus", load);
+    window.addEventListener(ADVISOR_DEFAULT_CHANGED_EVENT, load);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", load);
+      window.removeEventListener(ADVISOR_DEFAULT_CHANGED_EVENT, load);
+    };
+  }, [advisorCwd]);
+
   const handleAdvisorChange = useCallback((enabled: boolean) => {
-    setAdvisorEnabled(enabled);
+    // A click is always an explicit choice, so the chat keeps it even when the
+    // default changes later. The server applies it with its native advisor
+    // RPC command on an idle child, or at the next spawn.
+    const choice: AdvisorChoice = enabled ? "on" : "off";
+    setAdvisorChoice(choice);
     const sid = sessionIdRef.current;
     if (!sid) return;
-    setSessionAdvisorSpawn(sid, enabled);
-    try {
-      localStorage.setItem(`omp-advisor-enabled:${sid}`, String(enabled));
-    } catch {
-      // In-memory state still applies for this page load.
-    }
+    setSessionAdvisorSpawn(sid, choice);
+    storeAdvisorChoice(sid, choice);
   }, []);
 
   // Merge a batch of roster entries; ordering and live-over-history precedence
@@ -1015,7 +1040,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // observed (and its state snapshot recovered on stream open) right away.
   const observeCreatedSessionRef = useRef<((sid: string) => void) | null>(null);
 
+  /** In-flight liveness probe of the pre-created runtime, shared by concurrent callers. */
+  const newChatRuntimeProbeRef = useRef<{ sid: string; alive: Promise<boolean> } | null>(null);
+
+  /** Whether the omp wrapper behind a runtime created for an unsaved new chat
+   * still exists. Only a definitive "not running" answer counts as lost: a
+   * failed probe proceeds as before, so the command itself reports the real error. */
+  const isNewChatRuntimeAlive = useCallback((sid: string): Promise<boolean> => {
+    if (newChatRuntimeProbeRef.current?.sid === sid) return newChatRuntimeProbeRef.current.alive;
+    const alive = (async () => {
+      try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        if (!res.ok) return true;
+        const body = await res.json() as { running?: boolean };
+        return body.running !== false;
+      } catch {
+        return true;
+      }
+    })().finally(() => {
+      if (newChatRuntimeProbeRef.current?.alive === alive) newChatRuntimeProbeRef.current = null;
+    });
+    newChatRuntimeProbeRef.current = { sid, alive };
+    return alive;
+  }, []);
+
+  /** Forget a new-chat runtime whose wrapper is gone, so the next
+   * `ensureNewSession` spawns a replacement. Its observer stream (or pending
+   * reconnect) is bound to the dead id and must not outlive it. */
+  const discardLostNewChatRuntime = useCallback((sid: string) => {
+    if (sessionIdRef.current !== sid) return;
+    sessionIdRef.current = null;
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = undefined;
+    cancelEventConnectionRef.current?.();
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    eventCoalescer.reset();
+    catchUp.disconnect();
+    setSessionAdvisorSpawn(sid, "inherit");
+  }, [catchUp, eventCoalescer]);
+
+  /** The runtime id of this chat, creating it on first use. A runtime created
+   * earlier for an unsaved chat (slash discovery, side question, fast/slow
+   * toggle, ...) has no session file, so unlike a saved session the server
+   * cannot respawn it once its wrapper is gone (reaped while no tab observed it,
+   * omp exited, server restarted): every command for that id answers 404
+   * session_not_found. Such a cached id is therefore verified before reuse and
+   * replaced when the wrapper is gone. An open event stream proves the wrapper
+   * is attached and alive, so that case skips the probe. */
   const ensureNewSession = useCallback(async () => {
+    const cached = sessionIdRef.current;
+    if (cached) {
+      if (!isNew || !newSessionCwd || newSessionPromotedRef.current) return cached;
+      if (eventSourceRef.current?.readyState === EVENT_STREAM_OPEN) return cached;
+      if (await isNewChatRuntimeAlive(cached)) return sessionIdRef.current;
+      discardLostNewChatRuntime(cached);
+    }
     if (sessionIdRef.current) return sessionIdRef.current;
     if (!isNew || !newSessionCwd) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
@@ -1033,7 +1113,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           toolNames,
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
-          ...(advisorEnabled ? { advisor: true } : {}),
+          ...(advisorChoice !== "inherit" ? { advisor: advisorChoice } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1042,13 +1122,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sessionIdRef.current = realId;
       // The toggle handler could not persist while the chat had no id; carry
       // the pre-prompt choice over so it survives a reload after this point.
-      if (advisorEnabled) {
-        setSessionAdvisorSpawn(realId, true);
-        try {
-          localStorage.setItem(`omp-advisor-enabled:${realId}`, "true");
-        } catch {
-          // Best-effort: the spawned process already has --advisor.
-        }
+      if (advisorChoice !== "inherit") {
+        setSessionAdvisorSpawn(realId, advisorChoice);
+        storeAdvisorChoice(realId, advisorChoice);
       }
       // A prompt or side question that created this runtime attaches its own stream,
       // which would only replace an observer attached here.
@@ -1064,12 +1140,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [advisorChoice, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, isNewChatRuntimeAlive, discardLostNewChatRuntime]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
   const loadSystemPrompt = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) return;
 
     const state = await sendAgentCommand<AgentStateResponse>(sid, { type: "get_state" });
@@ -1078,7 +1154,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) {
       setSlashCommands([]);
       knownSlashCommandNamesRef.current = [];
@@ -1398,7 +1474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await respondHostUri(sid, id, { content: text || "(clipboard is empty)", contentType: "text/plain" });
         } catch {
           // Permission denied / document not focused: surface a readable error.
-          await respondHostUri(sid, id, { isError: true, error: "Clipboard read was denied. Click into the omp-web window and try again." });
+          await respondHostUri(sid, id, { isError: true, error: "Clipboard read was denied. Click into the foxnio window and try again." });
         }
         return;
       }
@@ -2760,8 +2836,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       let queuedBehindShell = false;
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const sid = existingSid ?? await ensureNewSession();
+        const cachedSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+        // ensureNewSession replaces a pre-created runtime whose wrapper is gone.
+        const sid = await ensureNewSession();
+        // Only a runtime that predates this send and survived is "existing"; a
+        // replacement is a brand-new session with nothing to exclude from the run boundary.
+        const existingSid = sid && sid === cachedSid ? sid : null;
+        if (cachedSid && !existingSid && promptRunIdRef.current === promptRunId) runPreviousEntryIdsRef.current = [];
         // Spawning takes seconds: the user may have opened another chat while
         // it was in flight (this instance is unmounted). Deliver their prompt
         // in the background, but never promote — switching the fresh chat
@@ -2946,7 +3027,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
     try {
-      const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
+      const sid = (await ensureNewSession()) ?? session?.id;
       if (!sid) throw new Error(translate("agentSession.shellSessionFailed"));
       await sendAgentCommand(sid, {
         type: "bash",
@@ -3223,16 +3304,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const { cancelled, newSessionId, text } = result ?? {};
       if (!cancelled && newSessionId) {
         if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [] });
-        // The forked child keeps its spawn flags: carry the advisor choice to
-        // the new id, or the toggle flips off on switch and the next prompt
-        // respawns the fork without --advisor.
-        if (advisorEnabled) {
-          setSessionAdvisorSpawn(newSessionId, true);
-          try {
-            localStorage.setItem(`omp-advisor-enabled:${newSessionId}`, "true");
-          } catch {
-            // In-memory registry still applies for this page load.
-          }
+        // The forked child keeps the parent's advisor state: carry the choice
+        // to the new id, or the fork's indicator falls back to the default and
+        // its next command would undo the parent's override.
+        if (advisorChoice !== "inherit") {
+          setSessionAdvisorSpawn(newSessionId, advisorChoice);
+          storeAdvisorChoice(newSessionId, advisorChoice);
         }
         onSessionForked?.(newSessionId);
       }
@@ -3242,7 +3319,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       forkInFlightRef.current = false;
       setForkingEntryId(null);
     }
-  }, [advisorEnabled, onSessionForked]);
+  }, [advisorChoice, onSessionForked]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current || agentRunningRef.current || editInFlightRef.current) return;
@@ -3287,7 +3364,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // A brand-new session has no runtime yet: the model picker updates local
     // state (so the Fast button appears), but set_fast_mode is a live-process
     // command — without spawning the session the click silently no-ops.
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) return;
     try {
       const result = await sendAgentCommand<{ enabled?: boolean; active?: boolean }>(sid, { type: "set_fast_mode", enabled });
@@ -3302,7 +3379,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleSlowModeChange = useCallback(async (enabled: boolean) => {
     // Before omp runs, the toggle comes from the catalog: spawn it like Fast.
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) return;
     try {
       const result = await sendAgentCommand<{ enabled?: boolean }>(sid, { type: "set_slow_mode", enabled });
@@ -3519,7 +3596,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (btwAskPendingRef.current) return false;
     btwAskPendingRef.current = true;
     try {
-      const sid = sessionIdRef.current ?? await ensureNewSession();
+      const sid = await ensureNewSession();
       if (!sid) {
         toast.error(translate("agentSession.noActiveSession"));
         return false;
@@ -3570,7 +3647,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       // Commands that talk to the runtime create it here. /btw <question> and the web
       // prompt commands create it inside askBtw/handleSend, which attach their own stream.
-      const ensureRuntime = async () => sessionIdRef.current ?? await ensureNewSession();
+      const ensureRuntime = async () => ensureNewSession();
       switch (commandName) {
         case "compact": {
           const sid = await ensureRuntime();
@@ -3654,8 +3731,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // shows these instead (CLIENT_BUILTIN_COMMAND_NAMES drops omp's
           // copies). handleSend runs the full prompt pipeline — optimistic
           // bubble, running state, settlement — with the expanded text.
-          // /advisor is gated on the per-chat composer toggle: refuse with a
-          // pointer to that toggle while the advisor is disabled.
+          // `/advisor` is the web review prompt and is gated by its effective
+          // advisor state; the composer toggle and Settings own that state.
           if (commandName === "advisor" && !advisorEnabled) {
             return complete({ handled: true, error: translate("agentSession.advisorDisabled") });
           }
@@ -4097,13 +4174,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
-    advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
+    advisorActive: advisorActiveAt > 0, advisorEnabled, advisorDefaultSource: advisorDefaultSource(advisorDefault), handleAdvisorChange,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     activeGoal, activePlan,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    pendingScrollToUserRef, initialScrollDoneRef,
+    pendingScrollToUserRef, initialScrollDoneRef, completionScrollAllowedRef,
     // Actions
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },

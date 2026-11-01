@@ -1113,6 +1113,38 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
   return rest;
 }
 
+/**
+ * Per-message fields omp persists for its own request replay. The browser never
+ * reads them, and `inputTransformations` alone can be over half of a long
+ * session's payload (one entry per dropped thinking block, per message).
+ * `thinkingSignature` is opaque base64 on thinking blocks; the lazy thinking
+ * endpoint serves `thinking` text from the raw entry, not from this output.
+ */
+const UNUSED_MESSAGE_FIELDS = ["inputTransformations", "requestControls", "contextSnapshot"] as const;
+
+/** Returns `message` itself when nothing needs stripping; never mutates it (it may alias the shared parse cache). */
+function stripUnusedMessageFields(message: AgentMessage): AgentMessage {
+  let out: Record<string, unknown> = message as unknown as Record<string, unknown>;
+  if (UNUSED_MESSAGE_FIELDS.some((key) => key in out)) {
+    out = { ...out };
+    for (const key of UNUSED_MESSAGE_FIELDS) delete out[key];
+  }
+  const content = out.content;
+  if (out.role === "assistant" && Array.isArray(content)
+    && content.some((block) => isRecord(block) && block.type === "thinking" && "thinkingSignature" in block)) {
+    out = {
+      ...out,
+      content: content.map((block) => {
+        if (!isRecord(block) || block.type !== "thinking" || !("thinkingSignature" in block)) return block;
+        const rest = { ...block };
+        delete rest.thinkingSignature;
+        return rest;
+      }),
+    };
+  }
+  return out as unknown as AgentMessage;
+}
+
 function toolResultImagesAsUrls(message: AgentMessage): AgentMessage {
   if (message.role !== "toolResult") return message;
   const content = toolResultContentAsUrls(message.content);
@@ -1194,7 +1226,7 @@ export function entryToUiMessage(
       const normalized = options.deferToolResultImages
         ? toolResultImagesAsUrls(normalizeToolCalls(raw))
         : normalizeToolCalls(raw);
-      const message = stripToolResultDetails(normalized);
+      const message = stripUnusedMessageFields(stripToolResultDetails(normalized));
       if (!options.deferThinking || message.role !== "assistant") return withNormalizedTimestamp(message);
       // Guard like the loader does for bad lines: normalizeToolCalls passes
       // non-array content through unchanged, so a string-content assistant

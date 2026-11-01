@@ -17,6 +17,7 @@ import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { HubResultPanel } from "./MessageView-hub-panel";
 import { isMessageOverflowing } from "@/lib/message-overflow";
+import { hiddenPreviewLines, userMessagePreviewMaxHeight } from "@/lib/user-message-preview";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
 import {
   getToolPreview,
@@ -85,9 +86,10 @@ const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
 const MAX_MARKDOWN_CHARS = 100_000;
 
-// Cap the user "sent" bubble's height so an abnormally long message does not
-// push the conversation off screen; overflow scrolls inside the bubble.
-const USER_BUBBLE_MAX_HEIGHT = 300;
+// Collapse the user "sent" bubble to a short preview (see
+// lib/user-message-preview.ts) so a long prompt does not push the conversation
+// off screen; the toggle below reveals the full message.
+const USER_BUBBLE_PREVIEW_MAX_HEIGHT = userMessagePreviewMaxHeight();
 
 function formatMessageSize(chars: number): string {
   return chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : `${Math.round(chars / 1_000)} KB`;
@@ -332,7 +334,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   editing?: boolean;
   editDisabled?: boolean;
 }) {
-  const { t, locale } = useI18n();
+  const { t, tn, locale } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
@@ -368,6 +370,10 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   const canFork = !!entryId && !!onFork;
   const canEdit = !!entryId && !!onEdit && !message.branchSummary;
   const editBlocked = editing || editDisabled || forking || forkDisabled;
+  const hiddenLines = hiddenPreviewLines(content);
+  const overflowToggleLabel = hiddenLines > 0
+    ? tn("messageView.showMoreInputLines", hiddenLines)
+    : t("messageView.showFullInput");
 
   return (
     <div
@@ -393,8 +399,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
             lineHeight: "var(--chat-line-height)",
             color: "var(--text)",
             wordBreak: "break-word",
-            maxHeight: expanded ? "none" : USER_BUBBLE_MAX_HEIGHT,
-            overflowY: "auto",
+            maxHeight: expanded ? "none" : USER_BUBBLE_PREVIEW_MAX_HEIGHT,
+            // The preview clips instead of scrolling: three lines are too short a window to scroll inside.
+            overflowY: expanded ? "auto" : "hidden",
           }}
         >
           {imageBlocks.length > 0 && (
@@ -423,13 +430,13 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
             type="button"
             className="message-overflow-toggle ui-focus-ring"
             aria-expanded={expanded}
-            aria-label={expanded ? t("messageView.collapseInput") : t("messageView.showFullInput")}
+            aria-label={expanded ? t("messageView.collapseInput") : overflowToggleLabel}
             onClick={() => {
               if (expanded) setHasOverflow(true);
               setExpanded(!expanded);
             }}
           >
-            <span>{expanded ? t("messageView.collapseInput") : t("messageView.showFullInput")}</span>
+            <span>{expanded ? t("messageView.collapseInput") : overflowToggleLabel}</span>
             <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" style={{ transform: expanded ? "rotate(180deg)" : "none" }} />
           </button>
         )}

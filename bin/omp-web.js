@@ -5,17 +5,17 @@
 require("./node-version").exitIfUnsupportedNode();
 
 // Forward service subcommands from the main bin. This makes both
-// `npx @kahme247/ompweb@latest ompweb-launchd ...` and
-// `npx @kahme247/ompweb@latest ompweb-systemd ...` work without requiring
+// `npx @telagod/foxnio@latest foxnio-launchd ...` and
+// `npx @telagod/foxnio@latest foxnio-systemd ...` work without requiring
 // callers to know the path of the secondary executable.
 const forwardedServiceScripts = {
   launchd: "omp-web-launchd.js",
-  "ompweb-launchd": "omp-web-launchd.js",
+  "foxnio-launchd": "omp-web-launchd.js",
   systemd: "omp-web-systemd.js",
-  "ompweb-systemd": "omp-web-systemd.js",
+  "foxnio-systemd": "omp-web-systemd.js",
 };
 
-// `ompweb hash-password` reads the password on stdin and prints the value for
+// `foxnio hash-password` reads the password on stdin and prints the value for
 // OMP_WEB_PASSWORD_HASH. Handled first so it works with no build artifacts, no
 // port, and no agent directory.
 if (process.argv[2] === "hash-password" || process.argv[2] === "hash_password") {
@@ -209,7 +209,7 @@ if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
     "Warning: OMP_WEB_PASSWORD holds a plaintext password. This option has been deprecated and is marked for removal.",
     "",
     "Every omp session inherits omp-web's environment, so an agent could print",
-    "the password into its transcript. ompweb hashed it and kept it out of the",
+    "the password into its transcript. foxnio hashed it and kept it out of the",
     "server's environment, but agents can still read it from this launcher",
     "process, and a new hash is made on every start, which signs every browser",
     "out on each restart.",
@@ -223,14 +223,14 @@ if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
   process.exit(1);
 } else if (launchOptions.legacyPassword !== undefined) {
   console.error([
-    "ompweb no longer accepts a plaintext password: the --password flag was removed.",
+    "foxnio no longer accepts a plaintext password: the --password flag was removed.",
     "Every omp session inherits this process's environment, so an agent could",
     "print the password into its transcript.",
     "",
     "Create a hash and use that instead:",
     "",
-    "  ompweb hash-password",
-    "  OMP_WEB_PASSWORD_HASH='scrypt$...' ompweb",
+    "  foxnio hash-password",
+    "  OMP_WEB_PASSWORD_HASH='scrypt$...' foxnio",
   ].join("\n"));
   process.exit(1);
 }
@@ -238,7 +238,7 @@ if (passwordHash !== undefined) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { isPasswordHash } = require("./omp-web-password-hash");
   if (!isPasswordHash(passwordHash)) {
-    console.error(`OMP_WEB_PASSWORD_HASH is not a valid password hash.\n\nGenerate one with: ompweb hash-password`);
+    console.error(`OMP_WEB_PASSWORD_HASH is not a valid password hash.\n\nGenerate one with: foxnio hash-password`);
     process.exit(1);
   }
 }
@@ -485,7 +485,7 @@ function trackServer(child) {
   currentChild = child;
   child.on("message", (message) => handleUpdateArm(child, message));
   child.once("error", (error) => {
-    console.error(`Could not start ompweb: ${error.message}`);
+    console.error(`Could not start foxnio: ${error.message}`);
     if (Number.isInteger(child.pid) && child.pid > 0) return;
     if (currentChild === child) currentChild = null;
     if (updateControl) {
@@ -613,15 +613,15 @@ async function main() {
   }
   if (!isLoopbackHost(hostname)) {
     if (!passwordEnabled) {
-      console.error(`Refusing to listen on ${hostname} without a password hash. Run: ompweb hash-password, then set OMP_WEB_PASSWORD_HASH. Or bind to 127.0.0.1.`);
+      console.error(`Refusing to listen on ${hostname} without a password hash. Run: foxnio hash-password, then set OMP_WEB_PASSWORD_HASH. Or bind to 127.0.0.1.`);
       process.exit(1);
     }
-    console.warn(`Warning: ompweb is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
+    console.warn(`Warning: foxnio is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
   }
 
   if (!await isPortAvailable(port, hostname)) {
     console.error(`Port ${port} on ${hostname} is already in use.`);
-    console.error(`If ompweb is already running, open ${browserUrl}. Otherwise, stop the process using it or run: ompweb --port ${Number(port) + 1}`);
+    console.error(`If foxnio is already running, open ${browserUrl}. Otherwise, stop the process using it or run: foxnio --port ${Number(port) + 1}`);
     process.exitCode = 1;
     return;
   }

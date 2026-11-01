@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import { isMap, parseDocument, stringify } from "yaml";
-import { getSettingsPath } from "./paths";
+import { getProfileSettingsPath, getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
 import { effectiveCompactionMethodOrder, isCompactionMethodOrder, type CompactionMethod } from "../compaction-methods";
 
@@ -64,6 +64,26 @@ function readDocument() {
   const doc = parseDocument(existsSync(path) ? readFileSync(path, "utf8") : "");
   if (doc.errors.length > 0) throw new Error(`${path} is not valid YAML: ${doc.errors[0].message}`);
   return { path, doc };
+}
+
+/**
+ * `advisor.enabled` as omp would see it for a chat launched with `profile`
+ * (`omp --profile <name>` reads that profile's own config.yml, not the default
+ * one). Without a profile this is the default config. Undefined when the key is
+ * unset, not a boolean, the file is unreadable, or the profile is not valid.
+ */
+export function readAdvisorEnabled(profile?: string): boolean | undefined {
+  try {
+    const path = profile ? getProfileSettingsPath(profile) : getSettingsPath();
+    if (!path || !existsSync(path)) return undefined;
+    const doc = parseDocument(readFileSync(path, "utf8"));
+    if (doc.errors.length > 0) return undefined;
+    const data = doc.toJS();
+    const advisor = isRecord(data) && isRecord(data.advisor) ? data.advisor : {};
+    return typeof advisor.enabled === "boolean" ? advisor.enabled : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** omp's `/slow` for Claude: `providers.anthropic.slowMode: auto` (default off).

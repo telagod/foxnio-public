@@ -1,0 +1,80 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - foxnio
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            electron_arch: x64
+          - os: macos-15
+            arch: arm64
+            electron_arch: arm64
+          - os: macos-15-intel
+            arch: x64
+            electron_arch: x64
+          - os: ubuntu-24.04
+            arch: x64
+            electron_arch: x64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies and native modules
+        run: npm ci --foreground-scripts
+      - name: Build the Next production server
+        run: npm run build
+      - name: Verify the independent Node runtime
+        shell: bash
+        run: |
+          node --version
+          npm run desktop:prepare-runtime
+          test -x desktop/runtime/node/node || test -f desktop/runtime/node/node.exe
+      - name: Verify desktop packaging inputs
+        run: npm run desktop:preflight
+      - name: Build desktop artifacts
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          npm_config_arch: ${{ matrix.arch }}
+        run: npx electron-builder --config desktop/electron-builder.yml --${{ matrix.electron_arch }} --publish never
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: foxnio-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist-desktop/*
+          if-no-files-found: error
+      - name: Ensure draft GitHub Release exists
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "foxnio desktop installers" --draft
+      - name: Upload desktop assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: gh release upload "$TAG" dist-desktop/* --clobber --repo "$GITHUB_REPOSITORY"

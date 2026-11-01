@@ -47,6 +47,10 @@ import {
 import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
+import { ComposerExpandButton } from "./ChatInput-expand-button";
+import { composerEnterAction, EXPANDED_MENU_BOTTOM_PX, expandedMenuMaxHeight } from "./ChatInput-expand";
+import { useModalDialog } from "@/hooks/useModalDialog";
+import { isMacPlatform } from "@/lib/navigation-history";
 import {
   composeMessageWithTextAttachments,
   describeTextAttachmentSkip,
@@ -231,8 +235,11 @@ interface Props {
   cwd?: string | null;
   activeGoal?: ActiveGoal | null;
   activePlan?: ActivePlan | null;
+  /** Effective advisor state: a default (below) or this chat's own toggle. */
   advisorEnabled?: boolean;
-  /** Toggle the per-chat advisor (composer icon + /advisor command). */
+  /** Which default turns the advisor on for chats that never chose (omp config.yml / project launch settings), or null. The chat's own On/Off overrides it; the menu names it so the user knows what they override. */
+  advisorDefaultSource?: "omp-config" | "project" | null;
+  /** Toggle the per-chat advisor from the composer icon. */
   onAdvisorChange?: (enabled: boolean) => void;
   /** Collapse the entire composer into a minimized bar. */
   onMinimize?: () => void;
@@ -289,6 +296,7 @@ function useDropdownFlip(
   menuRef: React.RefObject<HTMLDivElement | null>,
   vhFraction: number,
   capPx: number,
+  pinnedMaxHeight: number | null = null,
 ) {
   const [placement, setPlacement] = useState<MenuPlacement>("up");
   const [maxHeight, setMaxHeight] = useState<number | null>(null);
@@ -319,10 +327,14 @@ function useDropdownFlip(
     }
   }, [open, menuRef, vhFraction, capPx]);
 
-  return { placement, maxHeight };
+  return { placement, maxHeight: pinnedMaxHeight ?? maxHeight };
 }
 
-function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): React.CSSProperties {
+function menuDropStyle(placement: MenuPlacement, maxHeight: number | null, expanded = false): React.CSSProperties {
+  // The expanded editor stretches the menu's anchor over the whole dialog, so
+  // the usual above/below-the-anchor placement would land outside it. Open the
+  // menu over the editor, just above the toolbar.
+  if (expanded) return { bottom: EXPANDED_MENU_BOTTOM_PX, maxHeight: maxHeight !== null ? `${maxHeight}px` : undefined };
   return {
     ...(placement === "down" ? { top: "calc(100% + 8px)" } : { bottom: "calc(100% + 8px)" }),
     maxHeight: maxHeight !== null ? `${maxHeight}px` : undefined,
@@ -356,6 +368,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   activeGoal,
   activePlan,
   advisorEnabled,
+  advisorDefaultSource = null,
   onAdvisorChange,
   onMinimize,
   statusText,
@@ -415,6 +428,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [composerContextContainer, setComposerContextContainer] = useState<HTMLDivElement | null>(null);
   const contextContainer = isMobile ? sessionInfoContainer : composerContextContainer;
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  // Full-screen editor for long drafts: same textarea, state and attachments,
+  // restyled as a modal dialog (see ChatInput-expand.ts for the key semantics).
+  const [expanded, setExpanded] = useState(false);
+  // The compact composer's height at the moment it went full-screen: a spacer
+  // of that height keeps the transcript above it from reflowing.
+  const [collapsedHeight, setCollapsedHeight] = useState(0);
   const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
@@ -776,6 +795,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const clearInput = useCallback(() => {
     setValue("");
+    // Sending (or any other draft reset) returns to the compact composer.
+    setExpanded(false);
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
@@ -1085,9 +1106,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashQuery = slashMatch?.query ?? null;
   const isMidPromptSkillLookup = slashMatch?.mode === "mid-prompt";
-  const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
-  const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
-  const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
+  const expandedMenuHeight = expanded && typeof window !== "undefined" ? expandedMenuMaxHeight(window.innerHeight) : null;
+  const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360, expandedMenuHeight);
+  const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460, expandedMenuHeight);
+  const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400, expandedMenuHeight);
   const plusFlip = useDropdownFlip(plusMenuOpen, plusMenuRef, 0.44, 320);
   const [dormantSkillNames, setDormantSkillNames] = useState<Set<string>>(() => new Set());
 
@@ -1107,8 +1129,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
-      // The /advisor command is linked to Settings → Enable Advisor: hidden
-      // from the palette while the advisor is disabled.
+      // The web advisor review entry follows the effective advisor state:
+      // hidden from the palette while the advisor is off for this chat.
       .filter((def) => def.name !== "advisor" || advisorEnabled)
       .map((def) => ({
         name: def.name,
@@ -1118,6 +1140,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       })),
     [t, advisorEnabled],
   );
+
+  // A default (omp config.yml / project launch settings) turns the advisor on
+  // for chats that never chose. The menu names it under the toggle so the user
+  // knows what this chat's own On/Off overrides.
+  const advisorDefaultNote = advisorDefaultSource === "project"
+    ? t("chatInput.advisorDefaultProject")
+    : advisorDefaultSource === "omp-config" ? t("chatInput.advisorDefaultConfig") : null;
+  const advisorToggleTitle = advisorEnabled
+    ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
+    : t("chatInput.advisorEnableTitle");
 
   // Externally reported commands (extension/prompt/skill/ompBuiltin) group
   // below the client built-ins; any name the web UI intercepts itself —
@@ -1449,8 +1481,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      // Same gate as the direct path (useAgentSession refuses /advisor while
-      // disabled): queueing must not become a bypass around the toggle.
+      // `/advisor` is a web review prompt. Keep it gated by the effective
+      // advisor state; the composer toggle and Settings are the controls for
+      // the per-chat state.
       if (commandName === "advisor" && !advisorEnabled) {
         toast.error(t("agentSession.advisorDisabled"));
         return;
@@ -1757,9 +1790,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
-      // inserts a newline and the Send button submits.
-      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
+      // Enter semantics differ between the compact composer and the expanded
+      // editor; Shift+Enter is always a newline.
+      if (e.key === "Enter" && composerEnterAction({
+        expanded,
+        isMobile,
+        shiftKey: e.shiftKey,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+      }) === "send") {
         e.preventDefault();
         if (submissionBlockedRef.current) return;
         if (isStreaming && (onSteer || onFollowUp)) {
@@ -1773,7 +1812,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction]
+    [expanded, isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction]
   );
 
 
@@ -2013,11 +2052,86 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     cursor: "pointer", fontSize: 12, textAlign: "left",
   };
 
+  // The expanded editor is a modal dialog around the same composer DOM, so the
+  // draft, attachments and menus keep working. Escape peels off the innermost
+  // open layer (menus, popovers) before it collapses the editor itself; the
+  // hook swallows the event, so the textarea's own Escape handling never sees it.
+  const dialogRef = useModalDialog<HTMLDivElement>({
+    active: expanded,
+    onClose: () => {
+      if (historyMenuVisible) setHistoryMenuOpen(false);
+      else if (slashMenuOpen && slashQuery !== null) setSlashMenuOpen(false);
+      else if (atMenuOpen && atQuery !== null) setAtMenuOpen(false);
+      else if (plusMenuOpen) {
+        setPlusMenuOpen(false);
+        requestAnimationFrame(() => plusMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+        return;
+      } else if (modelDropdownOpen) setModelDropdownOpen(false);
+      else if (thinkingDropdownOpen) setThinkingDropdownOpen(false);
+      else if (contextOpen) setContextOpen(false);
+      else {
+        setExpanded(false);
+        return;
+      }
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+  });
+  const toggleExpanded = useCallback(() => {
+    if (!expanded) setCollapsedHeight(dialogRef.current?.getBoundingClientRect().height ?? 0);
+    setExpanded(!expanded);
+  }, [expanded, dialogRef]);
+  // Declared after the dialog hook so the hook records the opener before focus moves.
+  const wasExpandedRef = useRef(false);
+  useEffect(() => {
+    if (expanded) {
+      wasExpandedRef.current = true;
+      textareaRef.current?.focus();
+      return;
+    }
+    if (!wasExpandedRef.current) return;
+    wasExpandedRef.current = false;
+    // Back in the compact composer: keep typing where the editor left off.
+    textareaRef.current?.focus();
+  }, [expanded]);
+  // The compact textarea auto-grows up to 200px; the expanded one is sized by
+  // CSS, so refit once the cap applies again.
+  useLayoutEffect(() => {
+    if (expanded || !wasExpandedRef.current) return;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+  }, [expanded]);
+
+  const expandedShortcut = isMacPlatform() ? "⌘+Enter" : "Ctrl+Enter";
+
   return (
+    <>
+    {expanded && <div aria-hidden="true" style={{ flexShrink: 0, height: collapsedHeight }} />}
     <div
-      role="group"
-      aria-label={t("chatInput.composerLabel")}
-      style={{
+      ref={dialogRef}
+      role={expanded ? "dialog" : "group"}
+      aria-modal={expanded ? true : undefined}
+      aria-label={expanded ? t("chatInput.expandedEditorTitle") : t("chatInput.composerLabel")}
+      tabIndex={expanded ? -1 : undefined}
+      data-composer-expanded={expanded ? "true" : undefined}
+      onMouseDown={expanded ? (event) => {
+        // A press on the dimmed margin around the editor dismisses it.
+        if (event.target === event.currentTarget) setExpanded(false);
+      } : undefined}
+      style={expanded ? {
+        position: "fixed",
+        inset: 0,
+        // Above the app chrome, below the shared Dialog layer (1000) so
+        // confirmations and toasts still open over the editor.
+        zIndex: 900,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--overlay-backdrop)",
+        backdropFilter: "blur(2px)",
+        padding: isMobile ? 0 : "max(16px, 4dvh) max(16px, 4vw)",
+        outline: "none",
+      } : {
         flexShrink: 0,
         background: "transparent",
         padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
@@ -2060,7 +2174,34 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+      <div style={expanded ? {
+        width: "100%",
+        maxWidth: 1100,
+        margin: "0 auto",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--bg)",
+        border: isMobile ? "none" : "1px solid var(--border)",
+        borderRadius: isMobile ? 0 : "var(--radius-modal)",
+        boxShadow: "var(--shadow-modal)",
+        padding: isMobile
+          ? "calc(12px + env(safe-area-inset-top)) 12px calc(8px + env(safe-area-inset-bottom))"
+          : 16,
+      } : { maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        {expanded && (
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 10, flexShrink: 0 }}>
+            <h2 className="display-serif" style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "var(--text)" }}>
+              {t("chatInput.expandedEditorTitle")}
+            </h2>
+            {!isMobile && (
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {t("chatInput.expandedEditorHint", { shortcut: expandedShortcut })}
+              </span>
+            )}
+          </div>
+        )}
         <ModelErrorBanner error={modelError} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
@@ -2218,7 +2359,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
 
         {/* Main input */}
-        <div style={{ position: "relative" }}>
+        <div style={expanded ? { position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } : { position: "relative" }}>
           {historyMenuVisible && (
             <div
               ref={historyMenuRef}
@@ -2230,7 +2371,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 zIndex: 120,
                 display: "flex",
                 flexDirection: "column",
-                ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight),
+                ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight, expanded),
               }}
             >
               <div
@@ -2331,7 +2472,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 zIndex: 120,
                 display: "flex",
                 flexDirection: "column",
-                ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight),
+                ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight, expanded),
               }}
             >
               <div
@@ -2488,7 +2629,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   zIndex: 120,
                   display: "flex",
                   flexDirection: "column",
-                  ...menuDropStyle(atFlip.placement, atFlip.maxHeight),
+                  ...menuDropStyle(atFlip.placement, atFlip.maxHeight, expanded),
                 }}
               >
                 <div
@@ -2822,6 +2963,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
+              ...(expanded ? { flex: 1, minHeight: 0 } : null),
             } as React.CSSProperties}
           >
           {isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
@@ -2843,7 +2985,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               onDiscard={cancelDictation}
             />
           ) : (
-          <div style={{ position: "relative" }}>
+          <div style={expanded ? { position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } : { position: "relative" }}>
           <GhostMirror ref={ghostMirrorRef} textareaRef={textareaRef} prediction={wordPrediction} value={value} />
           <textarea
             ref={textareaRef}
@@ -2889,6 +3031,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             aria-autocomplete="list"
             aria-haspopup="listbox"
             rows={1}
+            className="composer-textarea"
             style={{
               width: "100%",
               background: "none",
@@ -3042,7 +3185,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         type="button"
                         aria-expanded={plusExpanded === "advisor"}
                         onClick={() => setPlusExpanded((v) => (v === "advisor" ? null : "advisor"))}
-                        title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                        title={advisorToggleTitle}
                         style={{
                           display: "flex", alignItems: "center", gap: 8, width: "100%",
                           padding: "7px 10px", border: 0, borderRadius: 5,
@@ -3061,11 +3204,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           role="menuitem"
                           type="button"
                           onClick={() => { setPlusMenuOpen(false); onAdvisorChange(!advisorEnabled); }}
-                          title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          title={advisorDefaultNote ? `${advisorToggleTitle} ${advisorDefaultNote}` : advisorToggleTitle}
                           style={{ paddingLeft: 30 }}
                         >
-                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {advisorToggleTitle}
+                            </span>
+                            {advisorDefaultNote && (
+                              <span style={{ color: "var(--text-dim)", fontSize: 11, whiteSpace: "normal" }}>{advisorDefaultNote}</span>
+                            )}
                           </span>
                         </button>
                       )}
@@ -3499,6 +3647,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               contextContainer,
             )}
 
+            <ComposerExpandButton expanded={expanded} onToggle={toggleExpanded} />
             {/* Dictation */}
             {isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
               <button
@@ -3637,5 +3786,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
       </div>
     </div>
+    </>
   );
 }));

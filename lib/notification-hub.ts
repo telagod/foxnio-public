@@ -22,7 +22,7 @@ const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
 export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
-const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
+const VAPID_SUBJECT = "https://github.com/telagod/foxnio-public";
 
 /** What a tab last reported. Written only by presence reports, pruned by TTL. */
 export interface NotificationPresence {
@@ -229,5 +229,5 @@ export function publishNotification(event: NotificationEvent): void {
 export async function sendTestPush(deviceId: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const device = getDevice(deviceId);
   if (!device) return { ok: false, error: "unknown device" };
-  return sendPush(device, { type: "test", sessionId: "", sessionName: "omp web" });
+  return sendPush(device, { type: "test", sessionId: "", sessionName: "foxnio" });
 }

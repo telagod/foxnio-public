@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Headless omp-web background service (no System Tray UI).
+    Headless foxnio background service (no System Tray UI).
     Used by Task Scheduler for reliable autostart without desktop-heap issues.
 #>
 param(
@@ -63,7 +63,7 @@ function Write-ServiceLog([string]$message) {
     finally { [System.Threading.Monitor]::Exit($script:LogLock) }
 }
 Write-ServiceLog "=========================================="
-Write-ServiceLog "omp-web Service v$PkgVersion starting (headless)"
+Write-ServiceLog "foxnio Service v$PkgVersion starting (headless)"
 Write-ServiceLog "Repository Root: $RepoRoot"
 Write-ServiceLog "Target: $ServerUrl (Mode: $EffectiveMode, Port: $EffectivePort)"
 Write-ServiceLog "=========================================="
@@ -139,12 +139,12 @@ function Start-WebServer {
     $psi.EnvironmentVariables["PORT"] = [string]$EffectivePort
     # bin/omp-web.js refuses a non-loopback bind without a password hash. A
     # plaintext OMP_WEB_PASSWORD is passed through only so the server can refuse
-    # it with instructions; generate a hash with `ompweb hash-password`.
+    # it with instructions; generate a hash with `foxnio hash-password`.
     $childHash = Set-ChildCredential $psi "OMP_WEB_PASSWORD_HASH"
     $null = Set-ChildCredential $psi "OMP_WEB_PASSWORD"
     $null = Set-ChildCredential $psi "OMP_WEB_TRUSTED_HEADER_SHA256"
     if ([string]::IsNullOrEmpty($childHash)) {
-        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)"
+        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: foxnio hash-password)"
     }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi

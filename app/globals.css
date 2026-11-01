@@ -2005,6 +2005,16 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
 .chat-input-shell:focus-within {
   transform: none;
 }
+/* Expanded composer editor (ChatInput-expand.ts): the textarea fills the
+   dialog instead of auto-growing to its 200px compact cap. !important beats the
+   inline height the auto-grow code writes. */
+[data-composer-expanded] .composer-textarea {
+  flex: 1 1 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow-y: auto !important;
+}
 .composer-toolbar {
   container-type: inline-size;
   justify-content: flex-end;
@@ -4098,6 +4108,10 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
 }
 .tabbar-close {
   transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
+}
+.session-tabs-list {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 
 @keyframes notice-shelf-in {

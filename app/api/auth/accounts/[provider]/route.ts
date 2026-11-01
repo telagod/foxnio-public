@@ -61,7 +61,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ provi
     if (message.includes(UNSUPPORTED)) {
       return NextResponse.json(
         {
-          error: "omp-web cannot disconnect accounts with this omp version. Update omp, or run `omp` in a terminal and use /logout.",
+          error: "foxnio cannot disconnect accounts with this omp version. Update omp, or run `omp` in a terminal and use /logout.",
           code: "logout_unsupported",
         },
         { status: 501 },

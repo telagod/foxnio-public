@@ -1,9 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Native Windows System Tray Manager and Background Service for omp-web.
+    Native Windows System Tray Manager and Background Service for foxnio.
 .DESCRIPTION
-    Runs omp-web in the background without a terminal window, monitors server health,
+    Runs foxnio in the background without a terminal window, monitors server health,
     provides a system tray context menu, auto-restarts on crash, and manages Windows startup.
 .PARAMETER Port
     HTTP port to bind (default 30177 for start mode, 30178 for dev mode).
@@ -147,7 +147,7 @@ function Write-ServiceLog([string]$message) {
 }
 
 Write-ServiceLog "=========================================="
-Write-ServiceLog "omp-web System Tray Manager v$PkgVersion starting"
+Write-ServiceLog "foxnio System Tray Manager v$PkgVersion starting"
 Write-ServiceLog "Repository Root: $RepoRoot"
 Write-ServiceLog "Target: $ServerUrl (Mode: $EffectiveMode, Port: $EffectivePort)"
 Write-ServiceLog "=========================================="
@@ -260,12 +260,12 @@ function Start-WebServer {
 
     # bin/omp-web.js refuses a non-loopback bind without a password hash. A
     # plaintext OMP_WEB_PASSWORD is passed through only so the server can refuse
-    # it with instructions; generate a hash with `ompweb hash-password`.
+    # it with instructions; generate a hash with `foxnio hash-password`.
     $childHash = Set-ChildCredential $psi "OMP_WEB_PASSWORD_HASH"
     $null = Set-ChildCredential $psi "OMP_WEB_PASSWORD"
     $null = Set-ChildCredential $psi "OMP_WEB_TRUSTED_HEADER_SHA256"
     if ([string]::IsNullOrEmpty($childHash)) {
-        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)"
+        Write-ServiceLog "WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: foxnio hash-password)"
     }
 
     $proc = New-Object System.Diagnostics.Process
@@ -347,13 +347,13 @@ function Test-ServerHealth {
 
 function Check-AutostartShortcut {
     $startupDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Startup)
-    $startupLnk = Join-Path $startupDir "omp-web-tray.lnk"
+    $startupLnk = Join-Path $startupDir "foxnio-tray.lnk"
     return (Test-Path $startupLnk)
 }
 
 function Set-AutostartShortcut([bool]$enable) {
     $startupDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Startup)
-    $startupLnk = Join-Path $startupDir "omp-web-tray.lnk"
+    $startupLnk = Join-Path $startupDir "foxnio-tray.lnk"
     $launchVbs = Join-Path $RepoRoot "scripts\windows\launch-tray.vbs"
 
     if ($enable) {
@@ -368,7 +368,7 @@ function Set-AutostartShortcut([bool]$enable) {
             if (Test-Path $IcoPath) {
                 $shortcut.IconLocation = "$IcoPath,0"
             }
-            $shortcut.Description = "omp-web Background Tray Service"
+            $shortcut.Description = "foxnio Background Tray Service"
             $shortcut.Save()
             Write-ServiceLog "Enabled Windows startup shortcut: $startupLnk"
         } catch {
@@ -413,14 +413,14 @@ function Set-AutostartShortcut([bool]$enable) {
 # -----------------------------------------------------------------------------
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:NotifyIcon.Icon = $script:AppIcon
-$script:NotifyIcon.Text = "omp-web (Starting...)"
+$script:NotifyIcon.Text = "foxnio (Starting...)"
 $script:NotifyIcon.Visible = $true
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
 # Item 1: App Header
 $script:MenuItemHeader = New-Object System.Windows.Forms.ToolStripMenuItem
-$script:MenuItemHeader.Text = "omp-web (v$PkgVersion)"
+$script:MenuItemHeader.Text = "foxnio (v$PkgVersion)"
 $script:MenuItemHeader.Font = New-Object System.Drawing.Font($script:MenuItemHeader.Font, [System.Drawing.FontStyle]::Bold)
 $script:MenuItemHeader.Enabled = $false
 $contextMenu.Items.Add($script:MenuItemHeader) | Out-Null
@@ -448,7 +448,7 @@ $script:MenuItemCopy.Text = "Copy Web URL"
 $script:MenuItemCopy.add_Click({
     try {
         [System.Windows.Forms.Clipboard]::SetText($ServerUrl)
-        $script:NotifyIcon.ShowBalloonTip(1500, "omp-web", "URL copied: $ServerUrl", [System.Windows.Forms.ToolTipIcon]::Info)
+        $script:NotifyIcon.ShowBalloonTip(1500, "foxnio", "URL copied: $ServerUrl", [System.Windows.Forms.ToolTipIcon]::Info)
     } catch { }
 })
 $contextMenu.Items.Add($script:MenuItemCopy) | Out-Null
@@ -554,7 +554,7 @@ function Update-TrayUI {
     $script:MenuItemStatus.Text = "  Status: $statusText"
 
     # Limit tooltip text length (Windows NotifyIcon.Text max 63 characters)
-    $tipText = "omp-web ($statusText)"
+    $tipText = "foxnio ($statusText)"
     if ($tipText.Length -gt 63) { $tipText = $tipText.Substring(0, 63) }
     $script:NotifyIcon.Text = $tipText
 
@@ -597,7 +597,7 @@ $script:Timer.add_Tick({
             if ($script:CrashTimestamps.Count -ge 3) {
                 $script:State = "Error"
                 Write-ServiceLog "Server crashed repeatedly (3 times in 60s). Auto-restart suspended."
-                $script:NotifyIcon.ShowBalloonTip(3000, "omp-web Service Error", "Server crashed repeatedly. Check logs for details.", [System.Windows.Forms.ToolTipIcon]::Error)
+                $script:NotifyIcon.ShowBalloonTip(3000, "foxnio Service Error", "Server crashed repeatedly. Check logs for details.", [System.Windows.Forms.ToolTipIcon]::Error)
             } else {
                 Write-ServiceLog "Auto-restarting server (crash attempt $($script:CrashTimestamps.Count) of 3)..."
                 Start-WebServer

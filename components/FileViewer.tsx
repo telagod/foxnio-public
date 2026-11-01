@@ -27,6 +27,7 @@ import { resolveLocalFileHref } from "@/lib/file-links";
 import { normalizeDisplayMath, useMarkdownPlugins } from "@/lib/markdown";
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { Tooltip } from "./ui/primitives";
+import { useDragClickGuard } from "./ui/toast";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { parseFrontmatter } from "@/lib/frontmatter";
@@ -817,6 +818,7 @@ export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMenti
 function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, active = true }: Props) {
   const { t } = useI18n();
   const { isDark } = useTheme();
+  const clickGuard = useDragClickGuard();
   const [data, setData] = useState<FileData | null>(null);
   const [gitDiff, setGitDiff] = useState<GitFileDiffResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1175,7 +1177,16 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       </div>
 
       {/* Content area */}
-      <div ref={contentRef} data-selection-scope="document" tabIndex={-1} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div
+        ref={contentRef}
+        data-selection-scope="document"
+        tabIndex={-1}
+        className="file-viewer-content"
+        onClickCapture={clickGuard.onClickCapture}
+        onPointerDown={clickGuard.onPointerDown}
+        onPointerMove={clickGuard.onPointerMove}
+        style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}
+      >
         {displayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && displayMode === "preview" ? (

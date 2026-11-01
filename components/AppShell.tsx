@@ -72,6 +72,10 @@ import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTree
 import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { openEventStream } from "@/lib/event-stream";
+import { SessionTabs } from "./SessionTabs";
+import { useSessionTabs } from "@/hooks/useSessionTabs";
+import { useRunningSessionIds } from "@/hooks/useRunningSessionIds";
+import { SESSION_TABS_ENABLED_STORAGE_KEY, type SessionTab } from "@/lib/session-tabs";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
@@ -97,6 +101,8 @@ const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel
 
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
 const HIDE_TOOL_ACTIVITY_STORAGE_KEY = "omp-web:hide-tool-activity";
+// On by default: a finished turn collapses to one summary row above its final reply.
+const FOLD_COMPLETED_TURNS_STORAGE_KEY = "omp-web:fold-completed-turns";
 // Off by default, so the transcript keeps collapsing reasoning until asked.
 const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
@@ -142,6 +148,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [hideToolActivity, setHideToolActivity] = useState(true);
+  const [foldCompletedTurns, setFoldCompletedTurns] = useState(true);
   // "Expand thinking blocks by default" — like the tool-call preference, a
   // UI-only behavior, so it lives in localStorage rather than omp's config.
   const [expandThinkingByDefault, setExpandThinkingByDefault] = useState(false);
@@ -162,6 +169,8 @@ export function AppShell({ appName }: { appName: string }) {
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
+  // null until localStorage is read (see the load effect).
+  const [sessionTabsPref, setSessionTabsPref] = useState<boolean | null>(null);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
@@ -176,6 +185,7 @@ export function AppShell({ appName }: { appName: string }) {
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
       setHideToolActivity(window.localStorage.getItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY) !== "false");
+      setFoldCompletedTurns(window.localStorage.getItem(FOLD_COMPLETED_TURNS_STORAGE_KEY) !== "false");
       setExpandThinkingByDefault(window.localStorage.getItem(EXPAND_THINKING_STORAGE_KEY) === "true");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
@@ -183,6 +193,15 @@ export function AppShell({ appName }: { appName: string }) {
     } catch {
       // Keep the compact default when storage is unavailable.
     }
+    // Session tabs are on unless switched off; unknown until read so the
+    // server render and a phone's first paint never show or fetch for them.
+    let tabsPref = true;
+    try {
+      tabsPref = window.localStorage.getItem(SESSION_TABS_ENABLED_STORAGE_KEY) !== "false";
+    } catch {
+      // Keep the default when storage is unavailable.
+    }
+    setSessionTabsPref(tabsPref);
   }, []);
   const handleToolCallsDefaultCollapsedChange = useCallback((collapsed: boolean) => {
     setToolCallsDefaultCollapsed(collapsed);
@@ -196,6 +215,14 @@ export function AppShell({ appName }: { appName: string }) {
     setHideToolActivity(hide);
     try {
       window.localStorage.setItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY, String(hide));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleFoldCompletedTurnsChange = useCallback((fold: boolean) => {
+    setFoldCompletedTurns(fold);
+    try {
+      window.localStorage.setItem(FOLD_COMPLETED_TURNS_STORAGE_KEY, String(fold));
     } catch {
       // The preference still applies for this page load.
     }
@@ -228,6 +255,14 @@ export function AppShell({ appName }: { appName: string }) {
     setOpenUrlAutomatically(enabled);
     try {
       window.localStorage.setItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY, String(enabled));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleSessionTabsChange = useCallback((enabled: boolean) => {
+    setSessionTabsPref(enabled);
+    try {
+      window.localStorage.setItem(SESSION_TABS_ENABLED_STORAGE_KEY, String(enabled));
     } catch {
       // The preference still applies for this page load.
     }
@@ -414,7 +449,7 @@ export function AppShell({ appName }: { appName: string }) {
           setAppUpdateDialogOpen(true);
         }
       } else {
-        const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
+        const cmd = data.updateCommand || "npm install -g @telagod/foxnio";
         const version = data.availableVersion;
         if (readDismissedVersion(DISMISSED_APP_UPDATE_KEY) === version) return data;
         toast.info(
@@ -1259,6 +1294,13 @@ export function AppShell({ appName }: { appName: string }) {
     router.replace("/", { scroll: false });
   }, [router, isMobile]);
 
+  const sessionTabsActive = !isMobile && sessionTabsPref === true;
+  const { runningIds: runningSessionIds, listVersion: runningListVersion } = useRunningSessionIds(sessionTabsActive);
+  const {
+    tabs: sessionTabs, closeTab, removeTab: removeSessionTabById, renameTabId, moveTab, shiftTab,
+    resolveSession: resolveTabSession, getScrollAnchor, setScrollAnchor,
+  } = useSessionTabs({ enabled: sessionTabsActive, selectedSession, refreshToken: refreshKey + runningListVersion });
+
   // ---- In-app Navigate back / forward over visited chat views ----
   // Own stack, not the browser History API (that one belongs to the mobile
   // back-gesture/exit-guard machinery — see lib/navigation-history.ts).
@@ -1386,13 +1428,14 @@ export function AppShell({ appName }: { appName: string }) {
   const handleSessionMoved = useCallback((oldId: string, newId: string) => {
     if (activeSessionIdRef.current !== oldId) return;
     activeSessionIdRef.current = newId;
+    renameTabId(oldId, newId);
     setSelectedSession((current) => current?.id === oldId ? { ...current, id: newId, path: "" } : current);
     setRefreshKey((key) => key + 1);
     hydrateSelectedSession(newId);
     // This is the same conversation. Preserve ChatWindow's run/edit fences
     // and its mounted composer, including unfinished attachments and audio.
     router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+  }, [router, hydrateSelectedSession, renameTabId]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -1490,6 +1533,7 @@ export function AppShell({ appName }: { appName: string }) {
     // The composer for this session can never be reopened, so its draft would
     // otherwise keep the exit guard armed for unreachable content.
     clearDraft(sessionId);
+    removeSessionTabById(sessionId);
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
@@ -1502,7 +1546,7 @@ export function AppShell({ appName }: { appName: string }) {
       setActiveTopPanel(null);
       router.replace("/", { scroll: false });
     }
-  }, [selectedSession, router]);
+  }, [selectedSession, router, removeSessionTabById]);
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
   }, []);
@@ -1594,7 +1638,7 @@ export function AppShell({ appName }: { appName: string }) {
     }
     setPendingOpens((queue) => [...queue, { kind: "url", target: url, name: url, sessionId, crossSession }]);
     return crossSession
-      ? `Asked the user to confirm opening ${url}; they are viewing another omp-web session.`
+      ? `Asked the user to confirm opening ${url}; they are viewing another foxnio session.`
       : `Asked the user to confirm opening ${url}.`;
   }, [openUrlAutomatically]);
   const handleSessionOpenUrl = useCallback((url: string) => requestOpenUrl(url, selectedSession?.id ?? "", false), [requestOpenUrl, selectedSession?.id]);
@@ -1606,7 +1650,7 @@ export function AppShell({ appName }: { appName: string }) {
       openFile: (path, name) => {
         if (viewing) return handleOpenFile(path, name, call.sessionId);
         setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, crossSession: true }]);
-        return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
+        return `Asked the user to confirm opening ${path}; they are viewing another foxnio session.`;
       },
     });
     try {
@@ -1732,6 +1776,47 @@ export function AppShell({ appName }: { appName: string }) {
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+
+  // ---- Session tabs (desktop) ----
+  // Tabs are shortcuts into the one live ChatWindow. A newer activation
+  // supersedes an older one still waiting on the session list.
+  const tabActivationRef = useRef(0);
+  const activateSessionTab = useCallback(async (tab: SessionTab): Promise<"done" | "superseded" | "failed"> => {
+    const version = ++tabActivationRef.current;
+    const session = await resolveTabSession(tab.id);
+    if (version !== tabActivationRef.current) return "superseded";
+    if (session === "unavailable") {
+      toast.error(translate("sessionTabs.openFailed"));
+      return "failed";
+    }
+    if (!session) {
+      removeSessionTabById(tab.id);
+      toast.error(translate("notifications.sessionNotFound"));
+      return "failed";
+    }
+    handleSelectSession(session);
+    return "done";
+  }, [resolveTabSession, removeSessionTabById, handleSelectSession]);
+  const handleSelectSessionTab = useCallback((tab: SessionTab) => {
+    if (tab.id === selectedSession?.id) return;
+    void activateSessionTab(tab);
+  }, [selectedSession?.id, activateSessionTab]);
+  const handleCloseSessionTab = useCallback(async (id: string) => {
+    const closing = sessionTabs.find((tab) => tab.id === id);
+    const next = closeTab(id);
+    if (id !== selectedSession?.id) return;
+    // Closing the tab on screen shows its neighbour, or a new chat in the same workspace.
+    const outcome = next ? await activateSessionTab(next) : "failed";
+    if (outcome === "failed") handleNewSession("", selectedSession.cwd || closing?.cwd || activeCwd || null);
+  }, [sessionTabs, closeTab, selectedSession, activateSessionTab, handleNewSession, activeCwd]);
+  const handleNewSessionTab = useCallback(() => {
+    // Already on the empty composer: keep its draft instead of remounting it.
+    if (selectedSession === null && effectiveNewSessionCwd) {
+      chatInputRef.current?.focus();
+      return;
+    }
+    handleNewSession("", activeCwd ?? selectedSession?.cwd ?? null);
+  }, [selectedSession, effectiveNewSessionCwd, activeCwd, handleNewSession]);
   const currentRate = generationSpeed?.current;
   const rate = currentRate ?? generationSpeed?.average;
   const speed = showChat ? formatGenerationSpeed(rate) : null;
@@ -2034,6 +2119,8 @@ export function AppShell({ appName }: { appName: string }) {
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
             hideToolActivity={hideToolActivity}
             onHideToolActivityChange={handleHideToolActivityChange}
+            foldCompletedTurns={foldCompletedTurns}
+            onFoldCompletedTurnsChange={handleFoldCompletedTurnsChange}
             expandThinkingByDefault={expandThinkingByDefault}
             onExpandThinkingByDefaultChange={handleExpandThinkingByDefaultChange}
             onHideThinkingBlockChange={setHideThinkingBlock}
@@ -2043,6 +2130,8 @@ export function AppShell({ appName }: { appName: string }) {
             onScopeNativeSelectAllChange={handleScopeNativeSelectAllChange}
             openUrlAutomatically={openUrlAutomatically}
             onOpenUrlAutomaticallyChange={handleOpenUrlAutomaticallyChange}
+            sessionTabs={sessionTabsPref !== false}
+            onSessionTabsChange={handleSessionTabsChange}
             cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
             sessionId={selectedSession?.id ?? null}
             onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
@@ -2444,6 +2533,20 @@ export function AppShell({ appName }: { appName: string }) {
 
         </div>
 
+        {sessionTabsActive && sessionTabs.length > 0 && (
+          <SessionTabs
+            tabs={sessionTabs}
+            activeId={selectedSession?.id ?? null}
+            runningIds={runningSessionIds}
+            onSelect={handleSelectSessionTab}
+            onClose={handleCloseSessionTab}
+            onNew={handleNewSessionTab}
+            newDisabled={!(activeCwd ?? selectedSession?.cwd)}
+            onMove={moveTab}
+            onShift={shiftTab}
+          />
+        )}
+
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {showChat ? (
@@ -2537,8 +2640,11 @@ export function AppShell({ appName }: { appName: string }) {
               onOpenProviders={() => setSettingsTab("providers")}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              foldCompletedTurns={foldCompletedTurns}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
+              initialScrollAnchor={sessionTabsActive && selectedSession ? getScrollAnchor(selectedSession.id) : null}
+              onScrollAnchorChange={sessionTabsActive ? setScrollAnchor : undefined}
             />
           ) : initialCwdStatus === "validating" ? (
             <WorkspaceState

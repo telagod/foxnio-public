@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uninstalls the Windows Background Service and System Tray shortcuts for omp-web.
+    Uninstalls the Windows Background Service and System Tray shortcuts for foxnio.
 .PARAMETER CleanConfig
     Also removes the web-service.json configuration file.
 .PARAMETER Quiet
@@ -21,7 +21,7 @@ function Log-Message([string]$msg) {
     }
 }
 
-Log-Message "Uninstalling omp-web Windows System Tray & Background Service..."
+Log-Message "Uninstalling foxnio Windows System Tray & Background Service..."
 
 # -----------------------------------------------------------------------------
 # 1. Terminate Running Background Service & Tray Instances
@@ -44,8 +44,8 @@ try {
         Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
     }
     # Delete Scheduled Task (both schtasks and PowerShell fallback)
-    try { schtasks /delete /tn "omp-web" /f 2>$null | Out-Null; Log-Message "  [OK] Removed Scheduled Task: omp-web" } catch { }
-    try { Unregister-ScheduledTask -TaskName "omp-web" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+    try { schtasks /delete /tn "foxnio" /f 2>$null | Out-Null; Log-Message "  [OK] Removed Scheduled Task: foxnio" } catch { }
+    try { Unregister-ScheduledTask -TaskName "foxnio" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
 } catch { }
 
 # -----------------------------------------------------------------------------
@@ -60,21 +60,21 @@ $desktopDirs.Add((Join-Path $env:USERPROFILE "OneDrive\Desktop"))
 $uniqueDesktopDirs = $desktopDirs | Where-Object { !([string]::IsNullOrEmpty($_)) } | Select-Object -Unique
 
 foreach ($dir in $uniqueDesktopDirs) {
-    $desktopLnk = Join-Path $dir "omp-web.lnk"
+    $desktopLnk = Join-Path $dir "foxnio.lnk"
     if (Test-Path $desktopLnk) {
         Remove-Item -Path $desktopLnk -Force -ErrorAction SilentlyContinue
         Log-Message "  [OK] Removed Desktop shortcut: $desktopLnk"
     }
 }
 $programsDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Programs)
-$startMenuLnk = Join-Path $programsDir "omp-web.lnk"
+$startMenuLnk = Join-Path $programsDir "foxnio.lnk"
 if (Test-Path $startMenuLnk) {
     Remove-Item -Path $startMenuLnk -Force -ErrorAction SilentlyContinue
     Log-Message "  [OK] Removed Start Menu shortcut: $startMenuLnk"
 }
 
 $startupDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Startup)
-$startupLnk = Join-Path $startupDir "omp-web-tray.lnk"
+$startupLnk = Join-Path $startupDir "foxnio-tray.lnk"
 if (Test-Path $startupLnk) {
     Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
     Log-Message "  [OK] Removed Startup shortcut: $startupLnk"

@@ -384,7 +384,7 @@ export async function runHostTool(
       return { text: text || `Opened ${path}`, isError: false };
     }
     default:
-      return { text: `Host tool "${toolName}" is not available in omp-web`, isError: true };
+      return { text: `Host tool "${toolName}" is not available in foxnio`, isError: true };
   }
 }
 

@@ -1,6 +1,6 @@
 "use strict";
 
-// `ompweb hash-password` plus the password prompt the launcher and the service
+// `foxnio hash-password` plus the password prompt the launcher and the service
 // installers use. The password is read from stdin, never from argv, so it
 // stays out of shell history and out of `ps` output (issue #239).
 
@@ -109,7 +109,7 @@ async function promptPassword(options = {}) {
 }
 
 /**
- * `ompweb hash-password`: print the `OMP_WEB_PASSWORD_HASH` value for the
+ * `foxnio hash-password`: print the `OMP_WEB_PASSWORD_HASH` value for the
  * password read from stdin.
  * @returns {Promise<number>} process exit code
  */
@@ -146,7 +146,7 @@ function resolvePasswordHash(env = process.env) {
   const existing = typeof env.OMP_WEB_PASSWORD_HASH === "string" ? env.OMP_WEB_PASSWORD_HASH.trim() : "";
   if (existing) {
     if (!isPasswordHash(existing)) {
-      throw new Error("OMP_WEB_PASSWORD_HASH is not a valid password hash; generate one with: ompweb hash-password");
+      throw new Error("OMP_WEB_PASSWORD_HASH is not a valid password hash; generate one with: foxnio hash-password");
     }
     return existing;
   }

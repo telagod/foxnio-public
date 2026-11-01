@@ -312,16 +312,16 @@ test("top-bar panels block swipes starting outside their own content", () => {
 test("a naturally curved swipe with vertical drift still opens the intended sidebar", () => {
   const hook = mount();
   touch("touchstart", 140, 300);
-  touch("touchmove", 154, 316);
-  touch("touchmove", 182, 330);
-  touch("touchmove", 228, 362);
-  touch("touchend", 228, 362);
+  touch("touchmove", 154, 308);
+  touch("touchmove", 182, 318);
+  touch("touchmove", 228, 330);
+  touch("touchend", 228, 330);
   assert.deepEqual(hook.result.current, { leftOpen: true, rightOpen: false });
 });
 
 test("a shorter deliberate horizontal swipe does not require a long precise drag", () => {
   const hook = mount();
-  swipe(140, 180, { y2: 325 });
+  swipe(140, 200, { y2: 312 });
   assert.equal(hook.result.current.leftOpen, true);
 });
 
@@ -339,21 +339,21 @@ test("an open drawer tolerates a small wrong-way start before a clear closing sw
   const hook = mount({ rightOpen: true });
   touch("touchstart", 180, 300);
   touch("touchmove", 165, 302);
-  touch("touchmove", 205, 318);
-  touch("touchmove", 245, 340);
-  touch("touchend", 245, 340);
+  touch("touchmove", 205, 314);
+  touch("touchmove", 245, 330);
+  touch("touchend", 245, 330);
   assert.equal(hook.result.current.rightOpen, false);
 });
 
 test("a curved swipe remains tracked when initial browser panning makes later moves non-cancelable", () => {
   const hook = mount();
   touch("touchstart", 140, 300);
-  touch("touchmove", 154, 316);
+  touch("touchmove", 154, 308);
   let prevented = 0;
   const ownedByBrowser = { cancelable: false, onPreventDefault: () => { prevented += 1; } };
-  touch("touchmove", 182, 330, ownedByBrowser);
-  touch("touchmove", 228, 362, ownedByBrowser);
-  touch("touchend", 228, 362, ownedByBrowser);
+  touch("touchmove", 182, 318, ownedByBrowser);
+  touch("touchmove", 228, 330, ownedByBrowser);
+  touch("touchend", 228, 330, ownedByBrowser);
   assert.equal(prevented, 0);
   assert.deepEqual(hook.result.current, { leftOpen: true, rightOpen: false });
 });
@@ -379,4 +379,58 @@ test("a slight horizontal wobble before vertical scrolling does not seize the ge
   assert.equal(touch("touchmove", 214, 420).defaultPrevented, false);
   touch("touchend", 214, 420);
   assert.deepEqual(hook.result.current, { leftOpen: false, rightOpen: false });
+});
+
+test("a scroll that drifts sideways never opens or closes a drawer", () => {
+  const hook = mount();
+  // Chat scrolling with a sloppy thumb: plenty of sideways travel, but diagonal.
+  for (const [x2, y2] of [[200, 400], [210, 340], [230, 380], [100, 400]]) {
+    const { move, end } = swipe(140, x2, { y2 });
+    assert.equal(move.defaultPrevented, false);
+    assert.equal(end.defaultPrevented, false);
+  }
+  assert.deepEqual(hook.result.current, { leftOpen: false, rightOpen: false });
+  const open = mount({ rightOpen: true });
+  swipe(140, 230, { y2: 400 });
+  swipe(140, 210, { y2: 340 });
+  assert.equal(open.result.current.rightOpen, true);
+});
+
+test("travel just below the swipe distance does not navigate", () => {
+  const hook = mount();
+  swipe(140, 140 + 55);
+  swipe(240, 240 - 55);
+  assert.deepEqual(hook.result.current, { leftOpen: false, rightOpen: false });
+  swipe(140, 140 + 60);
+  assert.equal(hook.result.current.leftOpen, true);
+});
+
+test("horizontal travel must be at least twice the vertical travel", () => {
+  const hook = mount();
+  swipe(140, 140 + 90, { y2: 300 + 50 });
+  assert.equal(hook.result.current.leftOpen, false);
+  swipe(140, 140 + 90, { y2: 300 + 30 });
+  assert.equal(hook.result.current.leftOpen, true);
+});
+
+test("a vertical scroll locks the touch even when it later swings sideways", () => {
+  const hook = mount();
+  touch("touchstart", 200, 300);
+  touch("touchmove", 204, 350);
+  assert.equal(touch("touchmove", 320, 352).defaultPrevented, false);
+  assert.equal(touch("touchmove", 330, 352).defaultPrevented, false);
+  assert.equal(touch("touchend", 330, 352).defaultPrevented, false);
+  assert.deepEqual(hook.result.current, { leftOpen: false, rightOpen: false });
+  // A fresh touch starts a new gesture and is not poisoned by the lock.
+  swipe(140, 240);
+  assert.equal(hook.result.current.leftOpen, true);
+});
+
+test("a claimed swipe that drifts diagonal before release does not navigate", () => {
+  const hook = mount();
+  touch("touchstart", 140, 300);
+  touch("touchmove", 210, 305);
+  touch("touchmove", 230, 410);
+  touch("touchend", 230, 410);
+  assert.equal(hook.result.current.leftOpen, false);
 });

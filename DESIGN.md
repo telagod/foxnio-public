@@ -1,8 +1,8 @@
-# ompweb — Product & Architecture Contract
+# foxnio — Product & Architecture Contract
 
 ## Purpose
 
-ompweb is a local, browser-based workspace for the
+foxnio is a local, browser-based workspace for the
 [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) coding agent. It lets a
 user browse the same local sessions they use in the terminal, continue live
 work, configure supported OMP settings, and inspect project files without
@@ -16,13 +16,13 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 ## Product principles
 
 1. **OMP remains authoritative.** Sessions, credentials, providers, and agent
-   behavior belong to the installed `omp` CLI. ompweb must not invent a
+   behavior belong to the installed `omp` CLI. foxnio must not invent a
    parallel data format or credential store.
 2. **Local-first by default.** The server binds to `127.0.0.1`; remote access
    is an explicit user choice and must be protected by a trusted network
    boundary and HTTPS.
 3. **Node-first installation.** A normal user installs Node.js 24+ and OMP,
-   then runs `npx ompweb@latest` or installs `ompweb` globally. ompweb does not
+   then runs `npx foxnio@latest` or installs `foxnio` globally. foxnio does not
    require users to install Bun for its own runtime.
 4. **Native compatibility over imitation.** Prefer OMP's CLI and documented
    on-disk formats to copied SDK internals. If a capability cannot be done
@@ -34,7 +34,7 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 
 ## Distribution and identity
 
-- npm package and CLI command: `ompweb`.
+- npm package and CLI command: `foxnio`.
 - Default server address: `http://127.0.0.1:30177`.
 - Existing `OMP_WEB_*` environment variables remain the configuration prefix
   for compatibility: `OMP_WEB_HOSTNAME`, `OMP_WEB_NO_OPEN`, and
@@ -51,7 +51,7 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 Browser
   │ HTTP / Server-Sent Events
   ▼
-ompweb (Next.js on Node)
+foxnio (Next.js on Node)
   ├─ reads native OMP session files and selected configuration
   ├─ serves allow-listed project files
   └─ starts one `omp --mode rpc-ui` child per active session
@@ -79,9 +79,9 @@ v1-capable installations.
 
 - `~/.omp/agent` is the source of
   truth for sessions, configuration, models, skills, plugins, and blobs.
-- `agent.db` contains authentication data. ompweb never reads or writes it;
+- `agent.db` contains authentication data. foxnio never reads or writes it;
   authentication actions go through the OMP RPC process.
-- A live OMP process owns writes to its session file. ompweb routes supported
+- A live OMP process owns writes to its session file. foxnio routes supported
   live actions through RPC and never races a live file rewrite.
 
 ### Direct file access
@@ -94,7 +94,7 @@ tree.
 Direct session mutation is deliberately narrow and explicit: rename/title,
 archive, deletion, and required branch-parent maintenance. These writes are
 atomic where possible; archive or deletion stops the associated live process
-first. ompweb does not provide a general editor for session JSONL or opaque OMP
+first. foxnio does not provide a general editor for session JSONL or opaque OMP
 state.
 
 Models and allow-listed OMP settings use surgical YAML updates that preserve
@@ -172,7 +172,7 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
 
 - Bind loopback-only by default. A non-loopback hostname is an explicit opt-in.
 - `OMP_WEB_PASSWORD_HASH` protects every route with a password-only sign-in
-  screen. Only a scrypt hash reaches the server (`ompweb hash-password`),
+  screen. Only a scrypt hash reaches the server (`foxnio hash-password`),
   because every `omp` session inherits the server's environment and an agent
   could print the password into its transcript, session file and
   model-provider traffic. `--password`, or a plaintext `OMP_WEB_PASSWORD` next
@@ -185,10 +185,10 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
   invalidates existing sessions. Exposed deployments require HTTPS through a
   trusted reverse proxy or VPN. With `OMP_WEB_TRUSTED_HEADER_SHA256` set, a
   request whose `X-Omp-Web-Auth` header hashes to that digest counts as signed
-  in; omp-web never holds the secret itself. Deciding which clients get the
-  header is the reverse proxy's job, because omp-web has no client address it
+  in; foxnio never holds the secret itself. Deciding which clients get the
+  header is the reverse proxy's job, because foxnio has no client address it
   can trust.
-- omp-web's own secrets (`OMP_WEB_PASSWORD`, `OMP_WEB_PASSWORD_HASH`,
+- foxnio's own secrets (`OMP_WEB_PASSWORD`, `OMP_WEB_PASSWORD_HASH`,
   `OMP_WEB_TRUSTED_HEADER_SHA256` and its legacy name
   `OMP_WEB_TRUSTED_HEADER_SECRET`) are stripped from every child process
   environment through `createChildProcessEnvironment`
@@ -229,8 +229,8 @@ Releases are independent:
 
 1. Run typecheck, lint, relevant tests, and a production build.
 2. Confirm `npm pack --dry-run` contains the built `.next` output and exposes
-   the `ompweb` binary.
-3. Publish `ompweb@<version>` only from an npm account authorized for that
+   the `foxnio` binary.
+3. Publish `foxnio@<version>` only from an npm account authorized for that
    package.
 4. Tag and release the repository that owns this downstream project.
 

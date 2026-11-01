@@ -1,26 +1,28 @@
-# ompweb
+# foxnio
 
-[![npm version](https://img.shields.io/npm/v/@kahme247/ompweb.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![node version](https://img.shields.io/node/v/@kahme247/ompweb.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/kahme247/ompweb.svg?color=44cc11)](./LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/@kahme247/ompweb.svg?color=44cc11)](https://www.npmjs.com/package/@kahme247/ompweb)
-[![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
+[![npm version](https://img.shields.io/npm/v/@telagod/foxnio.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@telagod/foxnio)
+[![node version](https://img.shields.io/node/v/@telagod/foxnio.svg?logo=node.js&color=44cc11)](https://nodejs.org)
+[![license](https://img.shields.io/github/license/telagod/foxnio-public.svg?color=44cc11)](./LICENSE)
+[![npm downloads](https://img.shields.io/npm/dm/@telagod/foxnio.svg?color=44cc11)](https://www.npmjs.com/package/@telagod/foxnio)
+[![GitHub stars](https://img.shields.io/github/stars/telagod/foxnio-public.svg?logo=github)](https://github.com/telagod/foxnio-public/stargazers)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/telagod/foxnio-public/pulls)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-社区：[加入 OMPWEB Discord](https://discord.gg/evqgGzRfM5)
+foxnio 是 [kahme247/ompweb](https://github.com/kahme247/ompweb) 的 fork，专注于智能体定制。它仍通过 `OMP_WEB_*` 环境变量配置，已有的 `omp-web` 数据（设置、会话、通知历史）保持不变、可继续使用。
+
+上游社区：[ompweb Discord](https://discord.gg/evqgGzRfM5)
 
 [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) 编程智能体的现代 Web UI。它读取本地的 omp 会话，在浏览器中提供实时对话、项目会话浏览、配置管理和文件预览等功能。
 
-![ompweb — 演示](docs/demo.gif)
+![foxnio — 演示](docs/demo.gif)
 
 <details>
 <summary>截图（浅色 / 深色主题）</summary>
 
-![ompweb — 浅色主题](docs/screenshot-light.png)
+![foxnio — 浅色主题](docs/screenshot-light.png)
 
-![ompweb — 深色主题](docs/screenshot-dark.png)
+![foxnio — 深色主题](docs/screenshot-dark.png)
 
 </details>
 
@@ -29,7 +31,7 @@
 - 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指定路径）
 - Node.js `>= 24`
 
-将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；ompweb 不会重复发送一条引导消息。
+将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；foxnio 不会重复发送一条引导消息。
 
 队列中的 **Delete** 和 **Edit** 还需要支持 `remove_queued_message`。只有 OMP 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。运行时不支持该命令或消息已不在队列中时，界面保留队列并显示提示。
 
@@ -40,14 +42,14 @@
 **免安装直接运行：**
 
 ```bash
-npx @kahme247/ompweb@latest
+npx @telagod/foxnio@latest
 ```
 
 **或全局安装：**
 
 ```bash
-npm install -g @kahme247/ompweb
-ompweb
+npm install -g @telagod/foxnio
+foxnio
 ```
 
 在浏览器中打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。
@@ -55,32 +57,32 @@ ompweb
 ### CLI 选项
 
 ```bash
-ompweb --port 8080                         # 自定义端口
-ompweb --hostname 0.0.0.0                  # 监听网络地址
-ompweb hash-password                      # 输出 OMP_WEB_PASSWORD_HASH 的值
-ompweb --no-open                           # 不自动打开浏览器
+foxnio --port 8080                         # 自定义端口
+foxnio --hostname 0.0.0.0                  # 监听网络地址
+foxnio hash-password                      # 输出 OMP_WEB_PASSWORD_HASH 的值
+foxnio --no-open                           # 不自动打开浏览器
 ```
 
 ### 密码保护
 
-omp-web **绝不把明文密码交给服务器**：每个 `omp` 会话都会继承服务器的环境变量，
+foxnio **绝不把明文密码交给服务器**：每个 `omp` 会话都会继承服务器的环境变量，
 智能体只要运行 `env` 就会把密码写入会话文件并发送给模型提供商。使用
-`--password` 会导致启动被拒绝。`OMP_WEB_PASSWORD` 暂时仍可使用：`ompweb`
+`--password` 会导致启动被拒绝。`OMP_WEB_PASSWORD` 暂时仍可使用：`foxnio`
 会在启动时将其哈希、使其不进入服务器的环境变量，并在日志中输出警告，附上应设置为
-`OMP_WEB_PASSWORD_HASH` 的哈希值。请尽快切换：智能体仍能从 `ompweb` 启动器进程中
+`OMP_WEB_PASSWORD_HASH` 的哈希值。请尽快切换：智能体仍能从 `foxnio` 启动器进程中
 读取明文，而且每次启动都会生成新的哈希，每次重启都会让所有浏览器退出登录。
 同时设置两个变量会导致启动被拒绝，请删除 `OMP_WEB_PASSWORD`。
 
 请改用哈希：
 
 ```bash
-ompweb hash-password                       # 输入两次，内容不回显
-echo "a-long-random-password" | ompweb hash-password   # 也可通过管道输入
+foxnio hash-password                       # 输入两次，内容不回显
+echo "a-long-random-password" | foxnio hash-password   # 也可通过管道输入
 
-OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
+OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' foxnio
 ```
 
-`ompweb hash-password` 从标准输入读取密码（绝不作为命令行参数），因此不会
+`foxnio hash-password` 从标准输入读取密码（绝不作为命令行参数），因此不会
 留在 shell 历史或 `ps` 输出中。哈希使用 scrypt（N = 2^15、r = 8、p = 1）
 与 16 字节随机盐，输出格式为 `scrypt$<ln>$<r>$<p>$<salt>$<digest>`。
 即使读到哈希也无法用它登录，更无法还原出密码。
@@ -89,7 +91,7 @@ OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
 `~/.omp/agent/omp-web/web-auth-secret.json`（权限 `0600`），再与哈希混合得到
 签名密钥：修改密码会让已有会话失效，而仅凭保存的哈希无法伪造会话。
 
-服务安装脚本（`ompweb systemd install`、`ompweb-launchd install`、Linux 托盘、
+服务安装脚本（`foxnio systemd install`、`foxnio-launchd install`、Linux 托盘、
 Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置前会先做哈希，
 最终只保存哈希。
 
@@ -112,24 +114,26 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 | --- | --- | --- |
 | `PORT` | 服务端口 | `30177` |
 | `OMP_WEB_HOSTNAME` | 绑定主机名 | `127.0.0.1` |
-| `OMP_WEB_PASSWORD_HASH` | Web 登录密码的 scrypt 哈希（由 `ompweb hash-password` 生成）。绑定非回环地址时必须设置 | _无（未启用验证）_ |
-| `OMP_WEB_TRUSTED_HEADER_SHA256` | 受信任的反向代理在 `X-Omp-Web-Auth` 请求头中发送的密钥的 SHA-256 摘要（十六进制）；请求头哈希匹配的请求无需密码。omp-web 不保存密钥本身。生成方法和 nginx 配置示例见英文 README 的 “Skipping the password on trusted networks” 一节 | _无（未启用）_ |
+| `OMP_WEB_PASSWORD_HASH` | Web 登录密码的 scrypt 哈希（由 `foxnio hash-password` 生成）。绑定非回环地址时必须设置 | _无（未启用验证）_ |
+| `OMP_WEB_TRUSTED_HEADER_SHA256` | 受信任的反向代理在 `X-Omp-Web-Auth` 请求头中发送的密钥的 SHA-256 摘要（十六进制）；请求头哈希匹配的请求无需密码。foxnio 不保存密钥本身。生成方法和 nginx 配置示例见英文 README 的 “Skipping the password on trusted networks” 一节 | _无（未启用）_ |
 | `OMP_WEB_NO_OPEN` | 设为 `1` 时禁止自动打开浏览器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 设为 `1` 时禁用更新检查和应用内更新；修改后需重启 | `0` |
-| `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `omp web`；其他值按原样使用。修改后需重启 | `omp web` |
+| `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `foxnio`；其他值按原样使用。修改后需重启 | `foxnio` |
 | `OMP_WEB_OMP_BIN` | `omp` 二进制路径（未在 PATH 时使用） | _自动检测_ |
 | `PI_CODING_AGENT_DIR` | 自定义 omp agent 目录 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI 兼容的语音转文字接口 URL。不设置时使用 `OMP_WEB_STT_MODEL` 通过 omp 自身的凭据转录 | _无_ |
 | `OMP_WEB_STT_KEY` | STT 接口对应的 API Key | _无_ |
 | `OMP_WEB_STT_MODEL` | STT 接口的模型名称。未设置接口时：使用 omp 登录凭据运行的 omp 语音转文字模型，例如 `openai-codex/codex-transcribe`（ChatGPT 订阅；需要包含该模型的 omp 版本） | _无（未设置接口时禁用）_ |
 
-**`OMP_WEB_NAME` 与已安装应用。** 已安装应用（PWA）通常以安装时所在页面的名称命名。如果之后修改了 `OMP_WEB_NAME`，或在 `OMP_WEB_NAME` 为 `url`、`host` 或 `domain` 时通过其他地址访问 omp-web，操作系统可能也会重命名已安装的应用。建议将 `OMP_WEB_NAME` 留空，或设置一个无论通过哪个域名或地址访问都能识别这台 omp-web 服务器的名称。
+桌面安装包构建说明见 [`docs/desktop-packaging.zh-CN.md`](./docs/desktop-packaging.zh-CN.md)。桌面版是本地 foxnio 服务的 launcher：第一版安装包需要用户另外安装 `omp`，Android/iOS 继续通过 HTTPS 使用 PWA 远程连接。
+
+**`OMP_WEB_NAME` 与已安装应用。** 已安装应用（PWA）通常以安装时所在页面的名称命名。如果之后修改了 `OMP_WEB_NAME`，或在 `OMP_WEB_NAME` 为 `url`、`host` 或 `domain` 时通过其他地址访问 foxnio，操作系统可能也会重命名已安装的应用。建议将 `OMP_WEB_NAME` 留空，或设置一个无论通过哪个域名或地址访问都能识别这台 foxnio 服务器的名称。
 
 ## 本地开发
 
 ```bash
-git clone https://github.com/kahme247/ompweb.git
-cd ompweb
+git clone https://github.com/telagod/foxnio-public.git foxnio
+cd foxnio
 npm install
 npm run dev
 ```

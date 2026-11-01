@@ -24,7 +24,7 @@ function legacyPassword(args, env) {
 }
 
 function printHelp() {
-  console.log(`Usage: ompweb [options]
+  console.log(`Usage: foxnio [options]
 
 Options:
   -p, --port <port>        Server port (default 30177, env PORT)
@@ -41,11 +41,11 @@ Commands:
                            OMP_WEB_PASSWORD_HASH
 
 Password:
-  ompweb hash-password                       # prompts, input hidden
-  echo "a-long-random-password" | ompweb hash-password
-  OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$...' ompweb
+  foxnio hash-password                       # prompts, input hidden
+  echo "a-long-random-password" | foxnio hash-password
+  OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$...' foxnio
 
-  ompweb never passes a plaintext password on: --password is rejected, and an
+  foxnio never passes a plaintext password on: --password is rejected, and an
   OMP_WEB_PASSWORD is hashed at startup with a warning that prints its hash
   (set alongside OMP_WEB_PASSWORD_HASH, it is rejected), because every omp
   session inherits the environment and an agent could print the password

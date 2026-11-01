@@ -47,6 +47,7 @@ import type {
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
+import type { AdvisorChoice } from "./advisor-default";
 
 // ============================================================================
 // Types
@@ -107,11 +108,13 @@ const RENAME_POLL_TIMEOUT_MS = 20_000;
 const AUTO_TITLE_MAX_ATTEMPTS = 3;
 /** command_output lines printed by omp's argument-less `/rename`. */
 const RENAME_OUTPUT_RE = /^(Session renamed to |Could not generate a session title|Session name not changed|Rename failed:)/;
+/** command_output lines printed by omp's `/advisor on|off`. */
+const ADVISOR_OUTPUT_RE = /^(Advisor (?:enabled|disabled)\.|Advisor setting enabled, but no model)/;
 const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
-  "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
+  "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside foxnio.";
 
 /**
  * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
@@ -399,10 +402,11 @@ export class AgentSessionWrapper {
   /** Process whose exit is expected because reload is deliberately disposing it. */
   private expectedExitProc: RpcProcess | null = null;
   readonly cwd: string;
-  /** Whether the child was spawned with --advisor. The flag is spawn-time
-   * only (no runtime RPC toggles it), so applying a changed advisor setting
-   * means replacing an idle child on the next startRpcSession call. */
-  readonly advisorSpawned: boolean;
+  /** The chat's explicit advisor choice this child reflects: `on` when it was
+   * spawned with --advisor for the chat (or `/advisor on` was applied), `off`
+   * after `/advisor off`, `inherit` when the chat never chose (the child then
+   * follows omp's config and the workspace launch flag). Restarts reuse it. */
+  private _advisorChoice: AdvisorChoice;
   /** The cwd recorded in the session file header; null for brand-new sessions
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
@@ -414,7 +418,7 @@ export class AgentSessionWrapper {
     proc: RpcProcess,
     cwd: string,
     recordedCwd?: string | null,
-    advisorSpawned = false,
+    advisorChoice: AdvisorChoice = "inherit",
     expectedSessionId = "",
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
@@ -423,7 +427,7 @@ export class AgentSessionWrapper {
     this.proc = proc;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
-    this.advisorSpawned = advisorSpawned;
+    this._advisorChoice = advisorChoice;
     this._sessionId = expectedSessionId;
     this.disconnectDestroyMs = disconnectDestroyMs;
   }
@@ -638,6 +642,8 @@ export class AgentSessionWrapper {
   private autoTitleInFlight = false;
   /** Until this time, drop the chat output of a background `/rename`. */
   private quietRenameUntil = 0;
+  /** Until this time, drop the chat output of an `/advisor on|off` sent for the chat's advisor choice. */
+  private quietAdvisorUntil = 0;
 
   /**
    * Ask omp to generate a title for this session with its own title generator.
@@ -809,6 +815,10 @@ export class AgentSessionWrapper {
           this.quietRenameUntil = 0;
           return;
         }
+        if (Date.now() < this.quietAdvisorUntil && typeof event.text === "string" && ADVISOR_OUTPUT_RE.test(event.text)) {
+          this.quietAdvisorUntil = 0;
+          return;
+        }
         break;
       }
       case "agent_start":
@@ -935,7 +945,7 @@ export class AgentSessionWrapper {
               result: {
                 content: [{
                   type: "text",
-                  text: "Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.",
+                  text: "Agent tools are disabled. Enable \"Agent tools\" in foxnio Settings (System & Updates) first.",
                 }],
               },
             });
@@ -1000,7 +1010,7 @@ export class AgentSessionWrapper {
           type: "host_uri_result",
           id,
           isError: true,
-          error: `URI scheme \"${scheme}\" is not registered by omp-web`,
+          error: `URI scheme \"${scheme}\" is not registered by foxnio`,
         });
         return;
       }
@@ -1110,7 +1120,7 @@ export class AgentSessionWrapper {
       result: {
         content: [{
           type: "text",
-          text: `Host tool \"${toolName}\" is not available in omp-web. Use OMP's built-in tools within the selected workspace.`,
+          text: `Host tool \"${toolName}\" is not available in foxnio. Use OMP's built-in tools within the selected workspace.`,
         }],
       },
     });
@@ -1502,6 +1512,65 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
   }
+
+  /** The chat's explicit advisor choice this child reflects. */
+  get advisorChoice(): AdvisorChoice {
+    return this._advisorChoice;
+  }
+
+  /**
+   * Run omp's native `/advisor on|off` on this child. It is a local command
+   * that flips the session's in-memory advisor flag: omp answers with one
+   * `command_output` line (kept out of the chat, see handleFrame) and starts no
+   * model turn. An omp without the command would hand the text to the model,
+   * so the command list is checked first; false means it is unavailable.
+   */
+  private async sendAdvisorCommand(choice: "on" | "off"): Promise<boolean> {
+    const data = await this.proc
+      .sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS)
+      .catch(() => null);
+    if (!data?.commands?.some((command) => command.name === "advisor")) return false;
+    this.quietAdvisorUntil = Date.now() + PROMPT_ACK_TIMEOUT_MS;
+    await this.proc.sendCommand({ type: "prompt", message: `/advisor ${choice}` }, PROMPT_ACK_TIMEOUT_MS);
+    return true;
+  }
+
+  /**
+   * Make the live child follow a chat's explicit advisor choice without a
+   * respawn. Only an idle child takes the command (a prompt mid-run would be
+   * queued behind the turn); false means it was not applied now, the recorded
+   * choice stays unchanged, and the next request carrying the choice retries.
+   * `inherit` is no opinion and leaves the child as it is.
+   */
+  async applyAdvisorChoice(choice: AdvisorChoice): Promise<boolean> {
+    if (choice === "inherit" || choice === this._advisorChoice) return true;
+    if (this.restarting || !this.isAlive() || this.isRunning() || this.historyEditInFlight || this.mcpListInFlight || this.pendingUiRequests.size > 0) return false;
+    try {
+      if (!(await this.sendAdvisorCommand(choice))) return false;
+    } catch {
+      return false;
+    }
+    this._advisorChoice = choice;
+    return true;
+  }
+
+  /**
+   * Spawn-time half of an `off` choice. omp has no launch flag that disables
+   * an advisor enabled by config.yml (or by the workspace's --advisor), so
+   * every fresh or restarted child runs `/advisor off` before its first prompt.
+   * `on` is the --advisor spawn flag and needs nothing here.
+   */
+  async applyAdvisorChoiceAfterSpawn(): Promise<void> {
+    if (this._advisorChoice !== "off") return;
+    try {
+      if (!(await this.sendAdvisorCommand("off"))) {
+        console.warn("[omp-web] this omp has no /advisor command; the chat's advisor Off could not be applied");
+      }
+    } catch (error) {
+      console.warn(`[omp-web] could not apply the chat's advisor Off: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private buildWebState(state: RpcSessionState): WebSessionState {
     const wasRunning = this.isRunning();
 
@@ -1736,7 +1805,7 @@ export class AgentSessionWrapper {
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this._advisorChoice === "on", launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1760,6 +1829,7 @@ export class AgentSessionWrapper {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
+        await this.applyAdvisorChoiceAfterSpawn();
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
         this.unsubscribeFrames?.();
@@ -2401,9 +2471,9 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
 /** Record which sessions are mid-run, for resume after a restart. */
 export function syncInterruptibleSessions(): void {
   const registry = getRegistry();
-  const running = new Map<string, { id: string; advisor: boolean }>();
+  const running = new Map<string, { id: string; advisor: AdvisorChoice }>();
   for (const session of registry.values()) {
-    if (session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorSpawned });
+    if (session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorChoice });
   }
   recordRunningSessions([...running.values()], (id) => registry.get(id)?.isAlive() === true);
 }
@@ -2429,7 +2499,7 @@ export async function resumeInterruptedSessions(): Promise<void> {
 }
 
 /** Look up the workspace-registered launch config; unregistered projects attach none. */
-function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
+export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
   try { canonical = realpathSync(cwd); } catch {}
   const key = comparableProjectPath(canonical);
@@ -2539,9 +2609,11 @@ export async function startRpcSession(
   sessionFile: string,
   cwd: string,
   toolNames?: string[],
-  /** Spawn-time --advisor flag. Pass an explicit boolean to replace an idle
-   * child whose flag differs; pass undefined to reuse whatever is alive. */
-  advisor?: boolean,
+  /** The chat's advisor choice. `on` spawns with --advisor and `off` runs
+   * `/advisor off` after the spawn; a live idle child whose choice differs
+   * takes the command in place. `inherit` or undefined reuses whatever is
+   * alive. */
+  advisor?: AdvisorChoice,
   /** The cwd recorded in the session file header, used to detect a spawn
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
@@ -2560,21 +2632,16 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
   launchConfig = launchConfig ?? launchConfigForCwd(cwd);
-  // Union semantics, matching the spawn below and the wrapper identity:
-  // workspace advisor=true forces the flag on. The gate must compare this
-  // same effective value — comparing the raw toggle would destroy+respawn a
-  // workspace-forced child on every toggle-off prompt.
-  const effectiveAdvisor = advisor === true || launchConfig?.advisor === true;
-
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
-    // --advisor is a spawn-time flag with no runtime RPC. When the caller
-    // carries an explicit advisor setting that differs from the live child's,
-    // replace the child so the toggle takes effect on the next prompt. Busy
-    // children are kept (a mid-run swap would drop in-flight work) and pick
-    // the new flag up at the next natural respawn; callers that pass no
-    // advisor opinion (undefined) simply reuse whatever is running.
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
+    // Busy children are kept (a mid-run swap would drop in-flight work); the
+    // choice reaches them with a later request. An idle child takes `/advisor
+    // on|off` in place. Only an omp without that command still needs a respawn
+    // to turn the advisor on (the --advisor flag); `off` has no flag at all.
+    if (!advisor || advisor === "inherit" || existing.advisorChoice === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      return { session: existing, realSessionId: sessionId };
+    }
+    if (await existing.applyAdvisorChoice(advisor) || advisor === "off") {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2607,14 +2674,14 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
+      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === "on", launchConfig, spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
       proc,
       cwd,
       recordedCwd,
-      advisor === true || launchConfig?.advisor === true,
+      advisor ?? "inherit",
       sessionFile ? sessionId : "",
     );
     holder.wrapper = created;
@@ -2631,6 +2698,7 @@ export async function startRpcSession(
       if (!sessionFile && created.sessionFile && existsSync(created.sessionFile)) {
         await created.send({ type: "new_session" });
       }
+      await created.applyAdvisorChoiceAfterSpawn();
       // Register server agent tools (#275) at startup when the gate is on,
       // so a session works for agent-to-agent calls even when no browser
       // tab ever registers host tools for it. send() merges these with any

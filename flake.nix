@@ -1,5 +1,5 @@
 {
-  description = "A clean, modern web UI for the oh-my-pi (omp) coding agent";
+  description = "foxnio: a clean, modern web UI for the oh-my-pi (omp) coding agent";
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   };

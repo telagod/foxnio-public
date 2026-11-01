@@ -1,16 +1,12 @@
-import { useId } from "react";
-
-// omp-web brand mark: the omp π glyph on its midnight tile.
-// Artwork matches the omp.sh favicon (https://omp.sh/favicon.svg).
+// foxnio brand mark: a flat geometric fox head on a dark warm tile.
+// Keep in sync with app/icon.svg and public/omp-web-logo.svg.
 export default function OmpWebLogo({
   size = 20,
-  label = "omp logo",
+  label = "foxnio logo",
 }: {
   size?: number;
   label?: string;
 }) {
-  const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
-  const g = `owl-g-${uid}`;
   return (
     <svg
       width={size}
@@ -20,15 +16,13 @@ export default function OmpWebLogo({
       aria-label={label}
       style={{ display: "block", flexShrink: 0 }}
     >
-      <defs>
-        <linearGradient id={g} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#ed4abf" />
-          <stop offset="0.5" stopColor="#9b4dff" />
-          <stop offset="1" stopColor="#5ad8e6" />
-        </linearGradient>
-      </defs>
-      <rect width="64" height="64" rx="12" fill="#0f0a14" />
-      <path fill={`url(#${g})`} d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" />
+      <rect width="64" height="64" rx="12" fill="#241810" />
+      <g transform="translate(32 33) scale(1.1) translate(-32 -33)">
+        <path fill="#f2802e" d="M9 8l17 13h12L55 8l2 26-25 24L7 34z" />
+        <path fill="#fff1e2" d="M7 34l15 2 10 11 10-11 15-2-25 24z" />
+        <path fill="#5a2a10" d="M14 17l7 6-8 5zM50 17l-7 6 8 5z" />
+        <path fill="#241810" d="M16 28l8 2-6 4zM48 28l-8 2 6 4zM28 52h8l-4 6z" />
+      </g>
     </svg>
   );
 }

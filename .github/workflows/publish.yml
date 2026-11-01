@@ -80,10 +80,10 @@ jobs:
 
           jq -n \
             --arg body "$(jq -r '.body' <<<"$RELEASE_JSON")" \
-            --arg title "OMPWEB $TAG" \
+            --arg title "foxnio $TAG" \
             --arg url "$(jq -r '.url' <<<"$RELEASE_JSON")" \
             '{
-              username: "OMPWEB Releases",
+              username: "foxnio Releases",
               embeds: [{
                 title: $title,
                 url: $url,

@@ -106,6 +106,7 @@ const world = {
   wrappers: new Map(),
   nativeHistories: new Map(), // isolated, parent-linked native history fixtures
   btwHistory: new Map(), // sid -> BtwRecord[] served by get_btw_history
+  advisorDefault: null, // payload of /api/advisor-default; null answers 404
 };
 
 async function fetchStub(url, init = {}) {
@@ -120,6 +121,10 @@ async function fetchStub(url, init = {}) {
       const { status = 200, value } = await h.produce();
       return jsonResponse(status, value);
     }
+  }
+
+  if (/^\/api\/advisor-default/.test(u)) {
+    return world.advisorDefault ? jsonResponse(200, world.advisorDefault) : jsonResponse(404, {});
   }
 
   let m;
@@ -361,6 +366,7 @@ function resetWorld() {
   world.nativeHistories.clear();
   world.btwHistory.clear();
   world.abortRestoreQueue = null;
+  world.advisorDefault = null;
 }
 
 function primeSession(sid, messages) {
@@ -2505,20 +2511,117 @@ test("an abandoned new-chat /btw is still asked, but neither promotes, attaches 
 
 test("forking carries the advisor choice to the child's next native command", async () => {
   resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
   primeSession("advisor-parent", [userMsg("u0", "q")]);
   const forked = [];
   const w = await mountSession("advisor-parent", undefined, { onSessionForked: (id) => forked.push(id) });
-  await act(async () => { w.latest.handleAdvisorChange(true); });
+  await act(async () => { w.latest.handleAdvisorChange(false); });
   world.holds.push({
     match: (method, url) => method === "POST" && url.startsWith("/api/agent/advisor-parent"),
     produce: async () => ({ value: { success: true, data: { newSessionId: "advisor-child" } } }),
   });
   await act(async () => { await w.latest.handleFork("e0", false); });
   assert.deepEqual(forked, ["advisor-child"]);
-  assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-child"), "true");
+  assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-child"), "off");
   const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
   await sendAgentCommand("advisor-child", { type: "get_state" });
-  assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-child?advisor=1"));
+  assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-child?advisor=off"));
+});
+
+test("a default-on advisor shows On for a new chat without recording a per-chat choice", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  assert.equal(w.latest.advisorEnabled, true);
+  assert.equal(w.latest.advisorDefaultSource, "omp-config");
+  assert.ok(world.calls.some((call) => call.method === "GET" && call.url === "/api/advisor-default?cwd=%2Fworkspace"));
+  assert.equal(Object.keys(localStorage).some((key) => key.startsWith("omp-advisor-enabled:")), false);
+});
+
+test("a workspace launch default shows On for a resumed session and keeps spawns free of the per-chat flag", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: false, project: true };
+  primeSession("advisor-project", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-project");
+  assert.equal(w.latest.advisorEnabled, true);
+  assert.equal(w.latest.advisorDefaultSource, "project");
+  // The default is not the chat's own choice: nothing is stored, and command
+  // POSTs carry no ?advisor= (the server adds the workspace flag itself).
+  assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-project"), null);
+  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  await sendAgentCommand("advisor-project", { type: "get_state" });
+  assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-project"));
+  assert.equal(world.calls.some((call) => call.url.startsWith("/api/agent/advisor-project?advisor=")), false);
+});
+
+test("with no default the advisor starts Off and the per-chat toggle still turns it on", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: false, ompConfig: false, project: false };
+  primeSession("advisor-optional", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-optional");
+  assert.equal(w.latest.advisorEnabled, false);
+  assert.equal(w.latest.advisorDefaultSource, null);
+  await act(async () => { w.latest.handleAdvisorChange(true); });
+  assert.equal(w.latest.advisorEnabled, true);
+  assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-optional"), "on");
+  await act(async () => { w.latest.handleAdvisorChange(false); });
+  assert.equal(w.latest.advisorEnabled, false);
+});
+
+test("a chat's Off overrides an On default and survives later default changes", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
+  primeSession("advisor-override", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-override");
+  assert.equal(w.latest.advisorEnabled, true);
+  await act(async () => { w.latest.handleAdvisorChange(false); });
+  assert.equal(w.latest.advisorEnabled, false);
+  assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-override"), "off");
+  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  await sendAgentCommand("advisor-override", { type: "get_state" });
+  assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-override?advisor=off"));
+
+  // The explicit Off survives the default flipping off and back on.
+  const { ADVISOR_DEFAULT_CHANGED_EVENT } = await jiti.import("@/lib/advisor-default");
+  world.advisorDefault = { enabled: false, ompConfig: false, project: false };
+  await act(async () => { window.dispatchEvent(new window.Event(ADVISOR_DEFAULT_CHANGED_EVENT)); await sleep(30); });
+  assert.equal(w.latest.advisorDefaultSource, null);
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
+  await act(async () => { window.dispatchEvent(new window.Event(ADVISOR_DEFAULT_CHANGED_EVENT)); await sleep(30); });
+  assert.equal(w.latest.advisorEnabled, false);
+});
+
+test("a chat that never chose follows a changed default live", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
+  primeSession("advisor-follow", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-follow");
+  assert.equal(w.latest.advisorEnabled, true);
+  const { ADVISOR_DEFAULT_CHANGED_EVENT } = await jiti.import("@/lib/advisor-default");
+  world.advisorDefault = { enabled: false, ompConfig: false, project: false };
+  await act(async () => { window.dispatchEvent(new window.Event(ADVISOR_DEFAULT_CHANGED_EVENT)); await sleep(30); });
+  assert.equal(w.latest.advisorEnabled, false);
+  assert.equal(w.latest.advisorDefaultSource, null);
+});
+
+test("a choice stored by the boolean toggle migrates to on/off", async () => {
+  resetWorld();
+  world.advisorDefault = { enabled: true, ompConfig: true, project: false };
+  localStorage.setItem("omp-advisor-enabled:advisor-legacy", "false");
+  primeSession("advisor-legacy", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-legacy");
+  assert.equal(w.latest.advisorEnabled, false);
+  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  await sendAgentCommand("advisor-legacy", { type: "get_state" });
+  assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-legacy?advisor=off"));
+});
+
+
+test("an unreachable default endpoint leaves the advisor Off instead of failing the chat", async () => {
+  resetWorld();
+  primeSession("advisor-offline", [userMsg("u0", "q")]);
+  const w = await mountSession("advisor-offline");
+  assert.equal(w.latest.advisorEnabled, false);
 });
 
 test("an edit-and-resend fork puts the branched prompt into the child's composer", async () => {
@@ -4824,6 +4927,142 @@ test("a fresh chat's first prompt attaches one event stream instead of an observ
   assert.equal(streamsBeforeOpen, 1, "the prompt owns the only stream");
   assert.equal(world.esInstances.length, 1);
   assert.equal(callsTo("POST", "/api/agent/fresh-send").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a fresh chat whose pre-created runtime is gone starts a replacement instead of sending into the dead id (#316)", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "lost-runtime" } }),
+  });
+  world.agents.set("lost-runtime", { running: true, state: {} });
+  const promoted = [];
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", onSessionCreated: (session) => promoted.push(session.id) });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  assert.deepEqual(lastEs()?.channel, { kind: "session", sessionId: "lost-runtime" }, "precondition: slash discovery created and observed a runtime");
+
+  // The wrapper disappears (reaped while unobserved, omp exit, server restart). The
+  // chat never reached disk, so the server answers 404 session_not_found for its id.
+  world.agents.set("lost-runtime", { running: false, state: {} });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.startsWith("/api/agent/lost-runtime") && body?.type === "prompt",
+    produce: async () => ({ status: 404, value: { error: "Session not found", code: "session_not_found" } }),
+  });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "replacement-runtime" } }),
+  });
+  world.agents.set("replacement-runtime", { running: true, state: {} });
+
+  let sent;
+  await act(async () => {
+    sent = w.latest.handleSend("first prompt");
+    await sleep(30);
+  });
+  let delivered;
+  await act(async () => {
+    lastEs().open();
+    delivered = await sent;
+  });
+  const channel = lastEs()?.channel;
+  w.unmount();
+  assert.equal(delivered.status, "accepted");
+  assert.deepEqual(channel, { kind: "session", sessionId: "replacement-runtime" });
+  assert.deepEqual(promoted, ["replacement-runtime"], "the chat becomes the replacement session");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 2);
+  assert.equal(callsTo("POST", "/api/agent/lost-runtime").some((call) => call.body?.type === "prompt"), false, "nothing is sent into the dead runtime");
+  assert.equal(callsTo("POST", "/api/agent/replacement-runtime").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a fresh chat whose pre-created runtime is still alive keeps it for the first prompt", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "live-runtime" } }),
+  });
+  world.agents.set("live-runtime", { running: true, state: {} });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", onSessionCreated: () => {} });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  let sent;
+  await act(async () => {
+    sent = w.latest.handleSend("first prompt");
+    await sleep(30);
+  });
+  let delivered;
+  await act(async () => {
+    lastEs().open();
+    delivered = await sent;
+  });
+  w.unmount();
+  assert.equal(delivered.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "a live runtime is reused, not replaced");
+  assert.equal(callsTo("POST", "/api/agent/live-runtime").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a non-send action on a fresh chat replaces a lost pre-created runtime too (#316)", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "lost-discovery" } }),
+  });
+  world.agents.set("lost-discovery", { running: true, state: {} });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+
+  world.agents.set("lost-discovery", { running: false, state: {} });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "replacement-discovery" } }),
+  });
+  world.agents.set("replacement-discovery", { running: true, state: {} });
+  const before = callsTo("POST", "/api/agent/lost-discovery").length;
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  const channel = lastEs()?.channel;
+  w.unmount();
+  assert.equal(callsTo("POST", "/api/agent/new").length, 2);
+  assert.equal(callsTo("POST", "/api/agent/lost-discovery").length, before, "no command goes to the dead runtime");
+  assert.equal(callsTo("POST", "/api/agent/replacement-discovery").some((call) => call.body?.type === "get_commands"), true);
+  assert.deepEqual(channel, { kind: "session", sessionId: "replacement-discovery" }, "the replacement is observed");
+});
+
+test("concurrent new-chat actions share one liveness probe and one replacement runtime", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "lost-shared" } }),
+  });
+  world.agents.set("lost-shared", { running: true, state: {} });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+
+  world.agents.set("lost-shared", { running: false, state: {} });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "replacement-shared" } }),
+  });
+  world.agents.set("replacement-shared", { running: true, state: {} });
+  const probesBefore = callsTo("GET", "/api/agent/lost-shared").length;
+  await act(async () => { await Promise.all([w.latest.loadSlashCommands(), w.latest.handleFastModeChange(true)]); });
+  w.unmount();
+  assert.equal(callsTo("GET", "/api/agent/lost-shared").length - probesBefore, 1, "one probe for both callers");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 2, "one replacement runtime for both callers");
+});
+
+test("a pre-created runtime observed by an open event stream is reused without a liveness probe", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "observed-runtime" } }),
+  });
+  world.agents.set("observed-runtime", { running: true, state: {} });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  await act(async () => { lastEs().open(); await sleep(30); });
+  const probesBefore = callsTo("GET", "/api/agent/observed-runtime").length;
+  await act(async () => { await w.latest.loadSlashCommands(); });
+  w.unmount();
+  assert.equal(callsTo("GET", "/api/agent/observed-runtime").length, probesBefore, "an attached stream already proves the wrapper is alive");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1);
 });
 
 test("a fresh chat's /btw question attaches one event stream instead of an observer plus its own", async () => {

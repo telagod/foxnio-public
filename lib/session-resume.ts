@@ -5,6 +5,7 @@ import { getAgentDir } from "./omp/paths";
 import { isValidSessionId } from "./session-file-references-core";
 import { isRecord } from "./type-guards";
 import { loadWebServerSettings } from "./web-settings";
+import { parseAdvisorChoice, type AdvisorChoice } from "./advisor-default";
 
 /** Sent to each session that was mid-run when omp-web stopped. */
 export const RESUME_PROMPT = "Session interrupted and resumed. Continue as you would have done without the interruption.";
@@ -17,8 +18,8 @@ export const EXIT_GRACE_MS = 2_000;
 
 export interface InterruptibleSession {
   id: string;
-  /** The child's spawn-time --advisor flag, restored on resume. */
-  advisor: boolean;
+  /** The chat's advisor choice, restored on resume. */
+  advisor: AdvisorChoice;
 }
 
 interface TrackerState {
@@ -96,7 +97,8 @@ function readLeftover(): InterruptibleSession[] {
       const list = isRecord(raw) && Array.isArray(raw.sessions) ? raw.sessions : [];
       for (const entry of list) {
         if (isRecord(entry) && typeof entry.id === "string" && isValidSessionId(entry.id)) {
-          sessions.set(entry.id, { id: entry.id, advisor: entry.advisor === true });
+          // Lists written before the choice was tri-state stored the --advisor flag as a boolean.
+          sessions.set(entry.id, { id: entry.id, advisor: entry.advisor === true ? "on" : parseAdvisorChoice(entry.advisor) });
         }
       }
     } catch {

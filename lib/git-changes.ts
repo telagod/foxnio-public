@@ -49,6 +49,17 @@ function isWithinPath(parent: string, target: string): boolean {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+/** Symlink-free absolute form of `target`, or null when it cannot be resolved.
+ *  Containment checks compare canonical paths: `git rev-parse --show-toplevel`
+ *  is canonical while the requested cwd may be a symlink alias. */
+async function canonicalPath(target: string): Promise<string | null> {
+  try {
+    return await fs.promises.realpath(target);
+  } catch {
+    return null;
+  }
+}
+
 function toGitPath(filePath: string): string {
   return filePath.split(path.sep).join("/");
 }
@@ -83,16 +94,20 @@ async function readCollapseReasons(repositoryRoot: string, relativePaths: string
 }
 
 export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
-  if (!repositoryRoot) {
+  const gitRoot = await findRepositoryRoot(cwd);
+  const repositoryRoot = gitRoot && await canonicalPath(gitRoot);
+  const canonicalCwd = repositoryRoot ? await canonicalPath(cwd) : null;
+  if (!repositoryRoot || !canonicalCwd) {
     return { isGitRepository: false, repositoryRoot: null, files: [] };
   }
 
+  // Contain against the canonical cwd, then report paths in the caller's cwd
+  // namespace so they match the file explorer and /api/git/diff requests.
   const entries = (await readStatusEntries(repositoryRoot))
-    .filter((entry) => isWithinPath(cwd, path.resolve(repositoryRoot, entry.path)));
+    .filter((entry) => isWithinPath(canonicalCwd, path.resolve(repositoryRoot, entry.path)));
   const reasons = await readCollapseReasons(repositoryRoot, entries.map((entry) => entry.path));
   const files = entries.map((entry): GitFileStatus => ({
-    filePath: path.resolve(repositoryRoot, entry.path),
+    filePath: path.resolve(cwd, path.relative(canonicalCwd, path.resolve(repositoryRoot, entry.path))),
     ...classifyGitStatus(entry),
     indexStatus: entry.indexStatus,
     worktreeStatus: entry.worktreeStatus,
@@ -148,10 +163,19 @@ async function createTrackedFilePatch(
 }
 
 export async function getGitFileDiff(cwd: string, filePath: string): Promise<GitFileDiffResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
-  if (!repositoryRoot || !isWithinPath(repositoryRoot, filePath)) return { supported: false };
+  const gitRoot = await findRepositoryRoot(cwd);
+  const repositoryRoot = gitRoot && await canonicalPath(gitRoot);
+  if (!repositoryRoot) return { supported: false };
 
-  const resolvedFilePath = path.resolve(filePath);
+  // Canonicalize the parent directory (not the file): a symlinked parent that
+  // leaves the repository is rejected, and a symlink leaf stays a symlink so
+  // the lstat below refuses it.
+  const requestedPath = path.resolve(filePath);
+  const canonicalParent = await canonicalPath(path.dirname(requestedPath));
+  if (!canonicalParent) return { supported: false };
+  const resolvedFilePath = path.join(canonicalParent, path.basename(requestedPath));
+  if (!isWithinPath(repositoryRoot, resolvedFilePath)) return { supported: false };
+
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(resolvedFilePath);

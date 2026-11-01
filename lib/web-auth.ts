@@ -9,7 +9,7 @@ export const OMP_WEB_TRUSTED_HEADER = "x-omp-web-auth";
 
 /**
  * Password protection for the web UI (issue #239). Only a hash is accepted:
- * `OMP_WEB_PASSWORD_HASH` holds the output of `ompweb hash-password`, and the
+ * `OMP_WEB_PASSWORD_HASH` holds the output of `foxnio hash-password`, and the
  * plaintext is never read from the environment, so it cannot leak into the
  * `omp` child processes omp-web spawns or into anything an agent prints.
  */
@@ -60,17 +60,17 @@ export function webPasswordConfigurationProblem(env: NodeJS.ProcessEnv = process
   const legacy = env[WEB_PASSWORD_VAR];
   const hasLegacy = typeof legacy === "string" && legacy.length > 0;
   if (raw && hasLegacy) {
-    return `Both ${WEB_PASSWORD_HASH_VAR} and the plaintext ${WEB_PASSWORD_VAR} are set. Remove ${WEB_PASSWORD_VAR}: omp-web no longer reads a plaintext password.`;
+    return `Both ${WEB_PASSWORD_HASH_VAR} and the plaintext ${WEB_PASSWORD_VAR} are set. Remove ${WEB_PASSWORD_VAR}: foxnio no longer reads a plaintext password.`;
   }
   if (!raw) {
     if (!hasLegacy) return null;
     return [
-      `Plaintext passwords are no longer accepted: omp-web refuses to start with ${WEB_PASSWORD_VAR} set.`,
+      `Plaintext passwords are no longer accepted: foxnio refuses to start with ${WEB_PASSWORD_VAR} set.`,
       "",
       "Create a hash and use that instead:",
       "",
-      "  ompweb hash-password",
-      `  OMP_WEB_PASSWORD_HASH='scrypt$...' ompweb`,
+      "  foxnio hash-password",
+      `  OMP_WEB_PASSWORD_HASH='scrypt$...' foxnio`,
       "",
       `See the README for the service installers, which hash the password for you.`,
     ].join("\n");
@@ -81,7 +81,7 @@ export function webPasswordConfigurationProblem(env: NodeJS.ProcessEnv = process
       "",
       "Generate one with:",
       "",
-      "  ompweb hash-password",
+      "  foxnio hash-password",
       "",
       `The value must look like scrypt$<ln>$<r>$<p>$<salt>$<digest> (unquoted, single line).`,
     ].join("\n");

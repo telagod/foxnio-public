@@ -7,9 +7,10 @@ import * as path from "path";
  * omp-web cannot import the Bun-only @oh-my-pi packages, so the layout rules
  * are replicated here. Covered: PI_CODING_AGENT_DIR override, PI_CONFIG_DIR
  * rename, and the XDG data layout (used only when $XDG_DATA_HOME/omp already
- * exists, mirroring omp's opt-in migration). Named profiles
- * (OMP_PROFILE/PI_PROFILE) are intentionally unsupported: omp-web always
- * resolves the default profile location.
+ * exists, mirroring omp's opt-in migration). Ambient named profiles
+ * (OMP_PROFILE/PI_PROFILE) are intentionally unsupported: omp-web resolves the
+ * default profile location, except where a workspace launch config passes
+ * `--profile` (see getProfileSettingsPath).
  */
 
 const APP_NAME = "omp";
@@ -84,14 +85,37 @@ export function getBlobsDir(): string {
   return agentDataSubdir("blobs");
 }
 
-/** Settings file (YAML). config.yml is canonical, config.yaml the fallback. */
-export function getSettingsPath(): string {
-  const dir = getAgentDir();
+/** Settings file (YAML) in `dir`. config.yml is canonical, config.yaml the fallback. */
+function settingsPathIn(dir: string): string {
   const canonical = path.join(dir, "config.yml");
   if (existsSync(canonical)) return canonical;
   const fallback = path.join(dir, "config.yaml");
   if (existsSync(fallback)) return fallback;
   return canonical;
+}
+
+/** Settings file (YAML). config.yml is canonical, config.yaml the fallback. */
+export function getSettingsPath(): string {
+  return settingsPathIn(getAgentDir());
+}
+
+// omp's profile-name rule (packages/utils/src/dirs.ts): a path-safe slug that
+// is not a Windows reserved device name.
+const PROFILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$/i;
+
+/**
+ * Settings file of the agent that `omp --profile <name>` runs as, or undefined
+ * when `profile` is not a profile omp accepts. A profile is fully isolated:
+ * its agent dir is `<config root>/profiles/<name>/agent` (verified on omp
+ * 18.14.1), it ignores PI_CODING_AGENT_DIR, and it inherits nothing from the
+ * default config. "default" (or blank) is omp's own spelling of no profile.
+ */
+export function getProfileSettingsPath(profile: string): string | undefined {
+  const name = profile.trim();
+  if (!name || name === "default") return settingsPathIn(getAgentDir());
+  if (name.endsWith(".") || !PROFILE_NAME.test(name) || WINDOWS_RESERVED_NAME.test(name)) return undefined;
+  return settingsPathIn(path.join(getConfigRoot(), "profiles", name, "agent"));
 }
 
 /** Custom models file (YAML). models.yml canonical, models.yaml fallback. */

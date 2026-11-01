@@ -5,6 +5,7 @@ import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } fr
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
+import { parseAdvisorChoice } from "@/lib/advisor-default";
 
 // Commands that ride whatever child is alive and never spawn or replace one:
 // keystroke predictions, and the side-question reads/cancel omp-web sends in
@@ -56,20 +57,25 @@ export async function POST(
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
-    // The per-chat advisor choice rides on the query string (never the RPC
-    // body, which is forwarded to omp verbatim) and only matters when this
-    // request spawns or replaces the session's omp process.
-    const advisor = new URL(req.url).searchParams.get("advisor") === "1";
+    // The chat's advisor choice (`on` / `off`; absent = no explicit choice)
+    // rides on the query string, never the RPC body, which is forwarded to omp
+    // verbatim. It matters when this request spawns the session's omp process
+    // or reaches an idle live one whose advisor differs.
+    const advisor = parseAdvisorChoice(new URL(req.url).searchParams.get("advisor"));
 
-    // Fast path: already-running session. --advisor is a spawn-time flag with
-    // no runtime RPC, so a toggle that now differs from the live child's spawn
-    // flag must replace an idle child to take effect; busy children keep
-    // running and pick the flag up at the next natural respawn.
+    // Fast path: already-running session. An idle child takes the choice in
+    // place through omp's `/advisor on|off`; busy children keep running and
+    // get it with a later request. Only an omp without that command needs a
+    // respawn, and only to turn the advisor on (the --advisor flag).
     const existing = getRpcSession(id);
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      const reuse = noSpawn || liveOnly || existing.isRunning() || existing.isEditingHistory()
+        || await existing.applyAdvisorChoice(advisor)
+        // `off` has no spawn flag, so a respawn could not apply it either.
+        || advisor !== "on";
+      if (reuse) {
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }

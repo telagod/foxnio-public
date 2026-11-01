@@ -281,7 +281,7 @@ class TrayApplication : IDisposable
         // bin/omp-web.js refuses a non-loopback bind without a password hash. A plaintext
         // OMP_WEB_PASSWORD is passed through only so the server can refuse it with instructions.
         if (string.IsNullOrEmpty(SetChildCredential(psi, "OMP_WEB_PASSWORD_HASH")))
-            WriteLog("WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: ompweb hash-password)");
+            WriteLog("WARN: OMP_WEB_PASSWORD_HASH not found in the user or system environment; a non-loopback bind will be refused by bin/omp-web.js (generate one with: foxnio hash-password)");
         SetChildCredential(psi, "OMP_WEB_PASSWORD");
         SetChildCredential(psi, "OMP_WEB_TRUSTED_HEADER_SHA256");
 
@@ -352,7 +352,7 @@ class TrayApplication : IDisposable
         try
         {
             var startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
-            var lnk = Path.Combine(startup, "omp-web-tray.lnk");
+            var lnk = Path.Combine(startup, "foxnio-tray.lnk");
             return File.Exists(lnk);
         }
         catch { return false; }
@@ -363,7 +363,7 @@ class TrayApplication : IDisposable
         try
         {
             var startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
-            var lnk = Path.Combine(startup, "omp-web-tray.lnk");
+            var lnk = Path.Combine(startup, "foxnio-tray.lnk");
             if (enable)
             {
                 // Recreate via install script logic (simplified): copy from install
@@ -395,7 +395,7 @@ class TrayApplication : IDisposable
             _ => _state
         };
         _menuStatus.Text = $"  Status: {statusText}";
-        var tip = $"omp-web ({statusText})";
+        var tip = $"foxnio ({statusText})";
         if (tip.Length > 63) tip = tip.Substring(0, 63);
         if (_notifyIcon != null) _notifyIcon.Text = tip;
 
@@ -433,7 +433,7 @@ class TrayApplication : IDisposable
         }
 
         WriteLog("==========================================");
-        WriteLog($"omp-web System Tray Manager v{_pkgVersion} starting (native)");
+        WriteLog($"foxnio System Tray Manager v{_pkgVersion} starting (native)");
         WriteLog($"Repository Root: {_repoRoot}");
         WriteLog($"Target: {_serverUrl} (Mode: {_effectiveMode}, Port: {_effectivePort})");
         WriteLog("==========================================");
@@ -455,7 +455,7 @@ class TrayApplication : IDisposable
 
         _contextMenu = new ContextMenuStrip();
 
-        _menuHeader = new ToolStripMenuItem($"omp-web (v{_pkgVersion})") { Enabled = false, Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
+        _menuHeader = new ToolStripMenuItem($"foxnio (v{_pkgVersion})") { Enabled = false, Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
         _contextMenu.Items.Add(_menuHeader);
 
         _menuStatus = new ToolStripMenuItem($"  Status: Starting ({_effectivePort})") { Enabled = false };
@@ -470,7 +470,7 @@ class TrayApplication : IDisposable
             try
             {
                 Clipboard.SetText(_serverUrl);
-                _notifyIcon.ShowBalloonTip(1500, "omp-web", $"URL copied: {_serverUrl}", ToolTipIcon.Info);
+                _notifyIcon.ShowBalloonTip(1500, "foxnio", $"URL copied: {_serverUrl}", ToolTipIcon.Info);
             }
             catch { }
         });
@@ -537,7 +537,7 @@ class TrayApplication : IDisposable
         {
             Icon = icon,
             ContextMenuStrip = _contextMenu,
-            Text = $"omp-web ({_state})",
+            Text = $"foxnio ({_state})",
             Visible = true
         };
         _notifyIcon.DoubleClick += (s, e) => { try { Process.Start(new ProcessStartInfo(_serverUrl) { UseShellExecute = true }); } catch { } };
@@ -561,7 +561,7 @@ class TrayApplication : IDisposable
                     {
                         _state = "Error";
                         WriteLog("Server crashed repeatedly (3 times in 60s). Auto-restart suspended.");
-                        _notifyIcon.ShowBalloonTip(3000, "omp-web Service Error", "Server crashed repeatedly. Check logs for details.", ToolTipIcon.Error);
+                        _notifyIcon.ShowBalloonTip(3000, "foxnio Service Error", "Server crashed repeatedly. Check logs for details.", ToolTipIcon.Error);
                     }
                     else
                     {

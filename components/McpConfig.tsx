@@ -6,6 +6,7 @@ import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
+import { readStoredAdvisorChoice } from "@/lib/advisor-default";
 
 type McpServer = { name: string; config: Record<string, unknown> };
 // User-level servers arrive as a sanitized DTO (no raw config — env/headers
@@ -62,14 +63,11 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       if (cwd) params.set("cwd", cwd);
       if (sessionId) {
         params.set("sessionId", sessionId);
-        // Fresh-spawn opinion for the MCP route (same localStorage key the
-        // chat-switch effect reads): without it a spawn here plants a
-        // non-advisor child that a concurrent prompt then reuses.
-        try {
-          if (localStorage.getItem(`omp-advisor-enabled:${sessionId}`) === "true") params.set("advisor", "1");
-        } catch {
-          // Private mode: omit the opinion, spawn defaults apply.
-        }
+        // Fresh-spawn opinion for the MCP route (the same stored choice the
+        // chat-switch effect reads): without it a spawn here plants a child
+        // with the wrong advisor state that a concurrent prompt then reuses.
+        const advisor = readStoredAdvisorChoice(sessionId);
+        if (advisor !== "inherit") params.set("advisor", advisor);
       }
 
       const read = async (includeLive: boolean): Promise<McpResponse> => {

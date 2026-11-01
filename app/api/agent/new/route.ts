@@ -8,6 +8,7 @@ import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
+import { parseAdvisorChoice } from "@/lib/advisor-default";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof RequestBodyTooLargeError) {
@@ -44,7 +45,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: unknown; [key: string]: unknown };
     // A session id has no meaning for a fresh spawn and must never reach the
     // child RPC: a stale or forged id would address the wrong session.
     delete promptCommand.sessionId;
@@ -56,7 +57,7 @@ export async function POST(req: Request) {
     // that share a key onto one session. Date.now() (ms resolution) collides for
     // requests in the same millisecond, merging two new sessions into one.
     const tempKey = `__new__${randomUUID()}`;
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true);
+    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, parseAdvisorChoice(advisor));
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,

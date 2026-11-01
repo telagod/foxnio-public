@@ -16,6 +16,8 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, CustomMessa
  *   followed by `segments` in order, where each run of activity (thinking,
  *   tool calls, notices) between two pieces of text folds into one collapsed
  *   row. A turn stays one row so the render-window math is unchanged.
+ *   `foldCompletedTurn` can then collapse a finished turn further, into one
+ *   summary row plus its final reply.
  */
 
 /** A folded activity entry: the listed blocks of an assistant message, or a whole non-assistant message. */
@@ -25,7 +27,17 @@ export type TranscriptSegment =
   /** Visible agent text/images from one assistant message. `last` marks text
    *  that ends its message; only that segment carries usage and the error. */
   | { kind: "text"; index: number; blocks: AssistantContentBlock[]; last: boolean }
-  | { kind: "activity"; pieces: ActivityPiece[]; stepCount: number; toolCallCount: number };
+  | { kind: "activity"; pieces: ActivityPiece[]; stepCount: number; toolCallCount: number; summary?: TurnSummary };
+
+/** Counts shown on the one-row summary of a completed turn (see `foldCompletedTurn`). */
+export interface TurnSummary {
+  /** Individual trajectory items: tool calls, thinking blocks, intermediate text, notices. */
+  steps: number;
+  toolCalls: number;
+  thinkingBlocks: number;
+  /** Prompt to the last message of the turn; absent when timestamps are missing or under a second. */
+  durationMs?: number;
+}
 
 export type TranscriptRow =
   | { kind: "message"; index: number }
@@ -259,4 +271,78 @@ export function planTranscriptRows(messages: AgentMessage[], options: PlanOption
     idx = endIdx;
   }
   return rows;
+}
+
+/**
+ * Collapse a COMPLETED turn into one summary row plus its final reply:
+ * everything before the trailing run of text segments (thinking, tool calls,
+ * intermediate text, notices) becomes a single activity segment carrying a
+ * `TurnSummary`. Callers must not use it on the running turn, which keeps the
+ * live layout.
+ *
+ * Kept visible, in order: the final reply (the trailing text segments) and any
+ * notices that arrive after it. A turn whose last assistant output is tool
+ * calls has no reply, so it folds completely. A turn with a provider error on
+ * a folded message is returned unchanged so the error stays visible in place.
+ */
+export function foldCompletedTurn(
+  messages: AgentMessage[],
+  row: Extract<TranscriptRow, { kind: "group" }>,
+): TranscriptSegment[] {
+  const { segments } = row;
+  let end = segments.length;
+  const tail = segments[end - 1];
+  if (tail?.kind === "activity" && tail.pieces.every((piece) => !piece.blocks)) end -= 1;
+  let answerStart = end;
+  while (answerStart > 0 && segments[answerStart - 1].kind === "text") answerStart -= 1;
+  if (answerStart === 0) return segments;
+
+  const pieces: ActivityPiece[] = [];
+  let steps = 0;
+  let toolCalls = 0;
+  let thinkingBlocks = 0;
+  for (let i = 0; i < answerStart; i++) {
+    const segment = segments[i];
+    if (segment.kind === "text") {
+      if ((messages[segment.index] as AssistantMessage).errorMessage?.trim()) return segments;
+      pieces.push({ index: segment.index, blocks: segment.blocks });
+      steps += 1;
+      continue;
+    }
+    for (const piece of segment.pieces) {
+      pieces.push(piece);
+      if (!piece.blocks) {
+        steps += 1;
+        continue;
+      }
+      steps += piece.blocks.length;
+      for (const block of piece.blocks) {
+        if (block.type === "toolCall") toolCalls += 1;
+        else if (block.type === "thinking") thinkingBlocks += 1;
+      }
+    }
+  }
+
+  const summary: TurnSummary = { steps, toolCalls, thinkingBlocks };
+  const start = messages[row.userIndex]?.timestamp;
+  let last: number | undefined;
+  for (let i = row.userIndex + 1; i < row.endIndex; i++) {
+    const stamp = messages[i].timestamp;
+    if (typeof stamp === "number" && Number.isFinite(stamp) && (last === undefined || stamp > last)) last = stamp;
+  }
+  if (typeof start === "number" && Number.isFinite(start) && last !== undefined && last - start >= 1000) {
+    summary.durationMs = last - start;
+  }
+
+  const folded: TranscriptSegment = { kind: "activity", pieces, stepCount: pieces.length, toolCallCount: toolCalls, summary };
+  return [folded, ...segments.slice(answerStart)];
+}
+
+/** Compact duration for the turn summary: `45s`, `2m 41s`, `1h 5m`. */
+export function formatTurnDuration(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m ${total % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }

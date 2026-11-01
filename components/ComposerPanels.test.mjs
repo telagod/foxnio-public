@@ -59,6 +59,38 @@ test("panels start collapsed with live summary in their headers", () => {
   assert.doesNotMatch(html, /Map the surface/);
 });
 
+test("idle subagent header counts completed subagents instead of running ones", () => {
+  const render = (subagents) => renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents,
+    onSelectSubagent: noop,
+  }));
+
+  const allDone = render([
+    { id: "s1", agent: "scout", status: "completed", index: 0 },
+    { id: "s2", agent: "worker", status: "completed", index: 1 },
+  ]);
+  assert.match(allDone, /aria-label="2\/2 complete"/);
+  assert.match(allDone, />2\/2 complete</);
+  assert.doesNotMatch(allDone, />0\/2</);
+
+  // Failed and aborted subagents are finished but not "complete".
+  const mixed = render([
+    { id: "s1", agent: "scout", status: "completed", index: 0 },
+    { id: "s2", agent: "worker", status: "failed", index: 1 },
+    { id: "s3", agent: "worker", status: "aborted", index: 2 },
+  ]);
+  assert.match(mixed, />1\/3 complete</);
+
+  // Anything still running keeps the running summary.
+  const running = render([
+    { id: "s1", agent: "scout", status: "completed", index: 0 },
+    { id: "s2", agent: "worker", status: "started", index: 1 },
+  ]);
+  assert.match(running, /aria-label="1 running · 2 total"/);
+  assert.match(running, />1\/2</);
+});
+
 test("live chips show current tool, telemetry, and async marker", () => {
   const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
     todoPhases: [],

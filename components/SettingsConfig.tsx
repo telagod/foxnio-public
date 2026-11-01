@@ -15,6 +15,7 @@ import { useI18n } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { copyText } from "@/lib/clipboard";
+import { ADVISOR_DEFAULT_CHANGED_EVENT } from "@/lib/advisor-default";
 import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
@@ -161,7 +162,9 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
   { id: "expand-thinking-by-default", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandThinkingByDefault", descKey: "settingsConfig.expandThinkingByDefaultDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand thinking blocks by default", fallbackDesc: "Open every thinking block as it appears, including while it streams, so reasoning is readable without clicking each one. Collapsing a block by hand still works.", scope: "UI" },
   { id: "hide-tool-activity", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.hideToolActivity", descKey: "settingsConfig.hideToolActivityDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Hide tool activity while working", fallbackDesc: "Fold a running turn's tool calls into one Process details row, the same way a finished turn folds them. Expand the row to see each call and its result.", scope: "UI" },
+  { id: "fold-completed-turns", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.foldCompletedTurns", descKey: "settingsConfig.foldCompletedTurnsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Fold completed turns", fallbackDesc: "When a turn finishes, collapse its thinking, tool calls and intermediate text into one summary row above the final reply. Turn it off to keep the full transcript visible.", scope: "UI" },
   { id: "open-url-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openUrlAutomatically", descKey: "settingsConfig.openUrlAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Open agent links without asking", fallbackDesc: "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.", scope: "UI" },
+  { id: "session-tabs", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.sessionTabs", descKey: "settingsConfig.sessionTabsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Session tabs", fallbackDesc: "Keep opened sessions as tabs above the chat so you can switch between them and watch several runs. Closing a tab does not stop the session. Desktop only.", scope: "UI" },
   { id: "scope-native-select-all", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.scopeNativeSelectAll", descKey: "settingsConfig.scopeNativeSelectAllDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Scope native Select All (experimental)", fallbackDesc: "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.", scope: "UI" },
   { id: "tts-autoplay", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsAutoplay", descKey: "settingsConfig.ttsAutoplayDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Auto-read assistant responses", fallbackDesc: "Automatically read aloud new assistant replies when completed.", scope: "UI" },
   { id: "tts-voice", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsVoice", descKey: "settingsConfig.ttsVoiceDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Speech Voice", fallbackDesc: "Select the browser voice for text-to-speech reading.", scope: "UI" },
@@ -182,6 +185,10 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "personality", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.personality", descKey: "settingsConfig.personalityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Personality", fallbackDesc: "Style included in OMP's system prompt.", scope: "Native OMP" },
   { id: "thinking-blocks", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.thinkingBlocks", descKey: "settingsConfig.thinkingBlocksDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Hide Thinking Blocks", fallbackDesc: "Hide model reasoning from output view.", scope: "Native OMP" },
   { id: "external-thinking", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.externalThinking", descKey: "settingsConfig.externalThinkingDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "External Thinking", fallbackDesc: "Private scratchpad reasoning via think tool.", scope: "Native OMP" },
+  // Agent & Intelligence — Advisor Review
+  { id: "enable-advisor", tab: "intelligence", sectionKey: "settingsConfig.advisorReview", labelKey: "settingsConfig.enableAdvisor", descKey: "settingsConfig.enableAdvisorDesc", fallbackSection: "Advisor Review", fallbackLabel: "Enable Advisor by default", fallbackDesc: "Run the advisor in every new and existing chat. Saved as advisor.enabled in omp's config.yml.", scope: "Native OMP" },
+  { id: "advisor-backlog", tab: "intelligence", sectionKey: "settingsConfig.advisorReview", labelKey: "settingsConfig.advisorBacklog", descKey: "settingsConfig.advisorBacklogDesc", fallbackSection: "Advisor Review", fallbackLabel: "Advisor Backlog", fallbackDesc: "Wait briefly when the advisor falls behind.", scope: "Native OMP" },
+  { id: "review-subagents", tab: "intelligence", sectionKey: "settingsConfig.advisorReview", labelKey: "settingsConfig.reviewSubagents", descKey: "settingsConfig.reviewSubagentsDesc", fallbackSection: "Advisor Review", fallbackLabel: "Review Subagents", fallbackDesc: "Apply the advisor's passive review to subagent tasks.", scope: "Native OMP" },
   // Context Compaction
   { id: "automatic-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.automaticCompaction", descKey: "settingsConfig.automaticCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Automatic Compaction", fallbackDesc: "Compact context before model context limit is hit.", scope: "Native OMP" },
   { id: "continue-after-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.continueAfterCompaction", descKey: "settingsConfig.continueAfterCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Continue After Compaction", fallbackDesc: "Resume task execution after compaction completes.", scope: "Native OMP" },
@@ -534,7 +541,7 @@ function NotificationSettingsPanel() {
 
   // With push, the server sends a real push; otherwise this tab shows one itself.
   const sendTest = async () => {
-    const testNotification = renderNotification({ type: "test", sessionId: "", sessionName: "omp web" }, t);
+    const testNotification = renderNotification({ type: "test", sessionId: "", sessionName: "foxnio" }, t);
     try {
       if (pushActive) {
         const res = await fetch("/api/notifications/test", {
@@ -740,12 +747,14 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, foldCompletedTurns, onFoldCompletedTurnsChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, sessionTabs, onSessionTabsChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
   hideToolActivity: boolean;
   onHideToolActivityChange: (hide: boolean) => void;
+  foldCompletedTurns: boolean;
+  onFoldCompletedTurnsChange: (fold: boolean) => void;
   expandThinkingByDefault: boolean;
   onExpandThinkingByDefaultChange: (expand: boolean) => void;
   onHideThinkingBlockChange?: (hide: boolean) => void;
@@ -755,6 +764,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   onScopeNativeSelectAllChange: (enabled: boolean) => void;
   openUrlAutomatically: boolean;
   onOpenUrlAutomaticallyChange: (enabled: boolean) => void;
+  sessionTabs: boolean;
+  onSessionTabsChange: (enabled: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
   onModelsSaved: () => void;
@@ -915,6 +926,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
             const data = (await response.json()) as { settings?: NativeSettings; error?: string };
             if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+            window.dispatchEvent(new Event(ADVISOR_DEFAULT_CHANGED_EVENT));
             if (latestNativeSettingsRef.current === null) setNativeSettings(data.settings ?? snapshot);
           } catch (error) {
             setNativeSettingsError(error instanceof Error ? error.message : String(error));
@@ -1234,11 +1246,17 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="hide-tool-activity" label={t("settingsConfig.hideToolActivity")} description={t("settingsConfig.hideToolActivityDesc")} scope="UI">
                     <ToggleSwitch checked={hideToolActivity} onChange={onHideToolActivityChange} />
                   </NativeSetting>
+                  <NativeSetting searchId="fold-completed-turns" label={t("settingsConfig.foldCompletedTurns")} description={t("settingsConfig.foldCompletedTurnsDesc")} scope="UI">
+                    <ToggleSwitch checked={foldCompletedTurns} onChange={onFoldCompletedTurnsChange} />
+                  </NativeSetting>
                   <NativeSetting searchId="scope-native-select-all" label={t("settingsConfig.scopeNativeSelectAll")} description={t("settingsConfig.scopeNativeSelectAllDesc")} scope="UI">
                     <ToggleSwitch checked={scopeNativeSelectAll} onChange={onScopeNativeSelectAllChange} />
                   </NativeSetting>
                   <NativeSetting searchId="open-url-automatically" label={t("settingsConfig.openUrlAutomatically")} description={t("settingsConfig.openUrlAutomaticallyDesc")} scope="UI">
                     <ToggleSwitch checked={openUrlAutomatically} onChange={onOpenUrlAutomaticallyChange} />
+                  </NativeSetting>
+                  <NativeSetting searchId="session-tabs" label={t("settingsConfig.sessionTabs")} description={t("settingsConfig.sessionTabsDesc")} scope="UI">
+                    <ToggleSwitch checked={sessionTabs} onChange={onSessionTabsChange} />
                   </NativeSetting>
                   <NativeSetting searchId="completion-sound" label={t("settingsConfig.completionSound")} description={t("settingsConfig.completionSoundDesc")} scope="UI">
                     <ToggleSwitch
@@ -1544,6 +1562,42 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsTabs.intelligence.label")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.intelligence.description")}</p>
                 </div>
+                {/* Advisor Section */}
+                <section style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                  <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.advisorReview")}</div>
+                  <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.45 }}>{t("settingsConfig.advisorReviewDesc")}</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
+                    <NativeSetting searchId="enable-advisor" label={t("settingsConfig.enableAdvisor")} description={t("settingsConfig.enableAdvisorDesc")} scope="Native OMP">
+                      <ToggleSwitch
+                        checked={nativeSettings?.advisor?.enabled ?? false}
+                        onChange={(checked) => patchSection("advisor", { enabled: checked })}
+                      />
+                    </NativeSetting>
+                    {nativeSettings?.advisor?.enabled === true && (
+                      <>
+                        <NativeSetting searchId="advisor-backlog" label={t("settingsConfig.advisorBacklog")} description={t("settingsConfig.advisorBacklogDesc")} scope="Native OMP">
+                          <select
+                            style={nativeSelectStyle}
+                            value={nativeSettings?.advisor?.syncBacklog ?? "off"}
+                            onChange={(e) => patchSection("advisor", { syncBacklog: e.target.value as "off" | "1" | "3" | "5" })}
+                          >
+                            <option value="off" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogOff")}</option>
+                            <option value="1" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogOne")}</option>
+                            <option value="3" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogThree")}</option>
+                            <option value="5" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogFive")}</option>
+                          </select>
+                        </NativeSetting>
+                        <NativeSetting searchId="review-subagents" label={t("settingsConfig.reviewSubagents")} description={t("settingsConfig.reviewSubagentsDesc")} scope="Native OMP">
+                          <ToggleSwitch
+                            checked={nativeSettings?.advisor?.subagents ?? false}
+                            onChange={(checked) => patchSection("advisor", { subagents: checked })}
+                          />
+                        </NativeSetting>
+                      </>
+                    )}
+                  </div>
+                </section>
+
                 {/* Context Compaction Section */}
                 <section style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 18, width: "100%" }}>
                   <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.contextCompaction")}</div>
@@ -1770,7 +1824,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
                 <AgentEnvSetting />
 
-                {/* ompweb app update card */}
+                {/* foxnio app update card */}
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                     <div>
@@ -1810,11 +1864,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                             {t("settingsConfig.runAppUpdateCommand")}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                            <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @telagod/foxnio"}</code>
                             <button
                               type="button"
                               onClick={() => {
-                                void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
+                                void copyText(appUpdate.updateCommand || "npm install -g @telagod/foxnio")
                                   .then(() => toast.success(t("appShell.commandCopied")))
                                   .catch(() => toast.error(t("appShell.commandCopyFailed")));
                               }}

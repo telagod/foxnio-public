@@ -19,7 +19,7 @@ export function proxy(request: NextRequest) {
   // deliberately logs nothing — a doomed request loop must not flood the log.
   const passwordProblem = webPasswordConfigurationProblem();
   if (passwordProblem) {
-    return new NextResponse(`omp-web password configuration error\n\n${passwordProblem}\n`, {
+    return new NextResponse(`foxnio password configuration error\n\n${passwordProblem}\n`, {
       status: 503,
       headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
     });

@@ -58,7 +58,7 @@ const DENIED_NAMES: ReadonlySet<string> = new Set([
 
 /** Prefixes that may never be overridden (compared uppercased). */
 const DENIED_PREFIXES: readonly string[] = [
-  "OMP_WEB_", // omp-web's own plumbing (auth, ports, binary overrides)
+  "OMP_WEB_", // foxnio's own plumbing (auth, ports, binary overrides)
   "NEXT_", // stripped by sanitizeProjectCommandEnvironment
   "_", // shell-internal namespace
 ];
@@ -81,7 +81,7 @@ const DEFAULT_LABELS: Required<AgentEnvErrorLabels> = {
   missingSeparator: (line) => `Line ${line}: expected KEY=VALUE`,
   emptyName: (line) => `Line ${line}: missing variable name`,
   invalidName: (line, name) => `Line ${line}: "${name}" is not a valid variable name`,
-  deniedName: (line, name) => `Line ${line}: "${name}" is reserved by omp-web and cannot be set`,
+  deniedName: (line, name) => `Line ${line}: "${name}" is reserved by foxnio and cannot be set`,
 };
 
 /** True when the name is reserved by omp-web and may not be overridden. */

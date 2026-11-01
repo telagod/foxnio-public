@@ -157,18 +157,18 @@ export function getWindowsShortcutPaths(): { desktop: string; startMenu: string;
   const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
 
   let desktopDir = path.join(home, "Desktop");
-  if (process.env.OneDrive && existsSync(path.join(process.env.OneDrive, "Desktop", "omp-web.lnk"))) {
+  if (process.env.OneDrive && existsSync(path.join(process.env.OneDrive, "Desktop", "foxnio.lnk"))) {
     desktopDir = path.join(process.env.OneDrive, "Desktop");
-  } else if (process.env.OneDriveConsumer && existsSync(path.join(process.env.OneDriveConsumer, "Desktop", "omp-web.lnk"))) {
+  } else if (process.env.OneDriveConsumer && existsSync(path.join(process.env.OneDriveConsumer, "Desktop", "foxnio.lnk"))) {
     desktopDir = path.join(process.env.OneDriveConsumer, "Desktop");
-  } else if (existsSync(path.join(home, "OneDrive", "Desktop", "omp-web.lnk"))) {
+  } else if (existsSync(path.join(home, "OneDrive", "Desktop", "foxnio.lnk"))) {
     desktopDir = path.join(home, "OneDrive", "Desktop");
   }
 
   return {
-    desktop: path.join(desktopDir, "omp-web.lnk"),
-    startMenu: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "omp-web.lnk"),
-    startup: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "omp-web-tray.lnk"),
+    desktop: path.join(desktopDir, "foxnio.lnk"),
+    startMenu: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "foxnio.lnk"),
+    startup: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "foxnio-tray.lnk"),
   };
 }
 
@@ -449,7 +449,7 @@ export async function toggleAutostart(enable: boolean): Promise<{ success: boole
         $sc.Arguments = '"${launchVbs.replace(/"/g, '`"')}" -Startup'
         $sc.WorkingDirectory = '${repoRoot.replace(/'/g, "''")}'
         if (Test-Path '${icoPath.replace(/'/g, "''")}') { $sc.IconLocation = '${icoPath.replace(/'/g, "''")},0' }
-        $sc.Description = 'omp-web Background Tray Service'
+        $sc.Description = 'foxnio Background Tray Service'
         $sc.Save()
       `;
       const psExe = resolvePowerShellBin();
@@ -479,9 +479,9 @@ export async function startTrayService(options: { openBrowser?: boolean } = {}):
   try {
     // Check if task exists: schtasks /query returns 0 if found.
     try {
-      await execFileAsync("schtasks.exe", ["/query", "/tn", "omp-web"], { timeout: 3000, env: getWindowsExecutionEnv(), windowsHide: true });
+      await execFileAsync("schtasks.exe", ["/query", "/tn", "foxnio"], { timeout: 3000, env: getWindowsExecutionEnv(), windowsHide: true });
       // Task exists, try to run it (ONLOGON tasks can be triggered via /run even without logon trigger).
-      await execFileAsync("schtasks.exe", ["/run", "/tn", "omp-web"], { timeout: 5000, env: getWindowsExecutionEnv(), windowsHide: true });
+      await execFileAsync("schtasks.exe", ["/run", "/tn", "foxnio"], { timeout: 5000, env: getWindowsExecutionEnv(), windowsHide: true });
       invalidateTrayRunningCache();
       // Optionally open browser if requested.
       if (options.openBrowser) {
@@ -582,7 +582,7 @@ export async function stopTrayService(): Promise<{ success: boolean; message?: s
   try {
     // Try to end Scheduled Task first (headless service)
     try {
-      await execFileAsync("schtasks.exe", ["/end", "/tn", "omp-web"], { timeout: 3000, env: getWindowsExecutionEnv(), windowsHide: true });
+      await execFileAsync("schtasks.exe", ["/end", "/tn", "foxnio"], { timeout: 3000, env: getWindowsExecutionEnv(), windowsHide: true });
     } catch { }
     const taskkillExe = resolveTaskkillBin();
     const psCommand = `

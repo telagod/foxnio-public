@@ -41,3 +41,33 @@ test("every locale carries the expand-thinking setting copy", async () => {
     assert.ok(messages["settingsConfig.expandThinkingByDefaultDesc"], `${locale} description`);
   }
 });
+
+test("the fold-completed-turns preference reaches the chat, on unless stored as false", async () => {
+  const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const settings = await readFile(new URL("./SettingsConfig.tsx", import.meta.url), "utf8");
+  const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+
+  assert.match(appShell, /FOLD_COMPLETED_TURNS_STORAGE_KEY = "omp-web:fold-completed-turns"/);
+  assert.match(appShell, /setFoldCompletedTurns\(window\.localStorage\.getItem\(FOLD_COMPLETED_TURNS_STORAGE_KEY\) !== "false"\)/);
+  assert.match(appShell, /window\.localStorage\.setItem\(FOLD_COMPLETED_TURNS_STORAGE_KEY, String\(fold\)\)/);
+  // A missing prop would leave the setting inert, so both consumers must receive it.
+  assert.match(appShell, /foldCompletedTurns=\{foldCompletedTurns\}\s+onFoldCompletedTurnsChange=\{handleFoldCompletedTurnsChange\}/);
+  assert.equal(appShell.match(/foldCompletedTurns=\{foldCompletedTurns\}/g)?.length, 2, "Settings and ChatWindow");
+  assert.match(chatWindow, /foldCompletedTurns=\{foldCompletedTurns\}/);
+  assert.match(settings, /id: "fold-completed-turns", tab: "general"/);
+  assert.match(settings, /<ToggleSwitch checked=\{foldCompletedTurns\} onChange=\{onFoldCompletedTurnsChange\} \/>/);
+});
+
+test("every locale carries the fold-completed-turns copy and the summary row labels", async () => {
+  for (const locale of ["en", "zh-CN", "ja"]) {
+    const messages = JSON.parse(await readFile(new URL(`../lib/i18n/locales/${locale}.json`, import.meta.url), "utf8"));
+    for (const key of [
+      "settingsConfig.foldCompletedTurns",
+      "settingsConfig.foldCompletedTurnsDesc",
+      "chatWindow.completedSteps.one",
+      "chatWindow.completedSteps.other",
+      "chatWindow.thinkingBlockCount.one",
+      "chatWindow.thinkingBlockCount.other",
+    ]) assert.ok(messages[key], `${locale} ${key}`);
+  }
+});

@@ -4,11 +4,11 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./node-version").exitIfUnsupportedNode();
 
-// Install ompweb as a macOS launchd user agent (starts at login, restarts on crash).
+// Install foxnio as a macOS launchd user agent (starts at login, restarts on crash).
 //
-// Usage (installed as the `ompweb-launchd` bin, or run via npx / node directly):
-//   ompweb-launchd [install [package-spec]|uninstall|status]
-//   npx -p @kahme247/ompweb@latest ompweb-launchd install
+// Usage (installed as the `foxnio-launchd` bin, or run via npx / node directly):
+//   foxnio-launchd [install [package-spec]|uninstall|status]
+//   npx -p @telagod/foxnio@latest foxnio-launchd install
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawnSync } = require("node:child_process");
@@ -21,10 +21,10 @@ const path = require("node:path");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { resolvePasswordHash } = require("./omp-web-hash-password");
 
-const LABEL = "com.kahme247.ompweb";
+const LABEL = "com.telagod.foxnio";
 const HOME = os.homedir();
 const PLIST = path.join(HOME, "Library", "LaunchAgents", `${LABEL}.plist`);
-const LOG_DIR = path.join(HOME, "Library", "Logs", "ompweb");
+const LOG_DIR = path.join(HOME, "Library", "Logs", "foxnio");
 const DOMAIN = `gui/${process.getuid?.() ?? 0}`;
 
 function fail(message) {
@@ -77,7 +77,7 @@ function install(pkgArg) {
     console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
   }
 
-  const pkg = pkgArg ?? process.env.OMP_WEB_PKG ?? "@kahme247/ompweb@latest";
+  const pkg = pkgArg ?? process.env.OMP_WEB_PKG ?? "@telagod/foxnio@latest";
   const port = process.env.PORT ?? "30177";
   const hostname = process.env.OMP_WEB_HOSTNAME ?? "127.0.0.1";
   const noOpen = process.env.OMP_WEB_NO_OPEN ?? "1";
@@ -140,8 +140,8 @@ ${envXml}
   <key>WorkingDirectory</key><string>${xmlEscape(HOME)}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${xmlEscape(path.join(LOG_DIR, "ompweb.log"))}</string>
-  <key>StandardErrorPath</key><string>${xmlEscape(path.join(LOG_DIR, "ompweb.err.log"))}</string>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(LOG_DIR, "foxnio.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(LOG_DIR, "foxnio.err.log"))}</string>
 </dict>
 </plist>
 `;
@@ -157,7 +157,7 @@ ${envXml}
   console.log(`installed: ${PLIST}`);
   console.log(`package:   ${pkg} (via npx --yes)`);
   console.log(`url:       http://${hostname}:${port}`);
-  console.log(`logs:      ${path.join(LOG_DIR, "ompweb.log")}`);
+  console.log(`logs:      ${path.join(LOG_DIR, "foxnio.log")}`);
   if (passwordHash) console.log("note:      the password hash is stored in the plist (mode 600)");
 }
 
@@ -185,6 +185,6 @@ if (command === "install") install(process.argv[3]);
 else if (command === "uninstall") uninstall();
 else if (command === "status") status();
 else {
-  console.error("usage: ompweb-launchd [install [package-spec]|uninstall|status]");
+  console.error("usage: foxnio-launchd [install [package-spec]|uninstall|status]");
   process.exit(2);
 }

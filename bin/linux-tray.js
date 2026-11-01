@@ -3,19 +3,19 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./node-version").exitIfUnsupportedNode();
 
-// Linux system tray for ompweb (KDE Plasma and any StatusNotifierItem host).
+// Linux system tray for foxnio (KDE Plasma and any StatusNotifierItem host).
 //
 // Registers a StatusNotifierItem on the session bus with a DBusMenu context
 // menu mirroring the Windows tray: open, copy URL, start/stop/restart the
 // systemd user service, view logs, autostart toggle, quit.
 //
 // CLI:
-//   ompweb-tray --install [--no-autostart]   install icons/autostart, start tray
-//   ompweb-tray --uninstall                  remove autostart and stop the tray
-//   ompweb-tray --start                      run the tray (foreground)
-//   ompweb-tray --stop | --restart           stop/restart a running tray
-//   ompweb-tray --status [--json]            tray + service status
-//   ompweb-tray --open                       open the web UI in the browser
+//   foxnio-tray --install [--no-autostart]   install icons/autostart, start tray
+//   foxnio-tray --uninstall                  remove autostart and stop the tray
+//   foxnio-tray --start                      run the tray (foreground)
+//   foxnio-tray --stop | --restart           stop/restart a running tray
+//   foxnio-tray --status [--json]            tray + service status
+//   foxnio-tray --open                       open the web UI in the browser
 //   -p, --port / -H, --hostname              override status endpoint
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -46,9 +46,9 @@ const { hashPassword } = require("./omp-web-password-hash");
 // via FallbackVariant, which only needs the .value the tests and the
 // menu code read; the real D-Bus path always uses the real Variant.
 const DBUS_MISSING_MESSAGE =
-  "The Linux tray requires dbus-next, which is not bundled with ompweb. " +
+  "The Linux tray requires dbus-next, which is not bundled with foxnio. " +
   "Install it with: npm install dbus-next@^0.10.2 " +
-  "(in the ompweb install directory, or globally with npm install -g dbus-next@^0.10.2), " +
+  "(in the foxnio install directory, or globally with npm install -g dbus-next@^0.10.2), " +
   "then run the tray command again.";
 
 class FallbackVariant {
@@ -111,7 +111,7 @@ function getDbusClasses() {
       return [
         "",
         this.state.running ? buildIconPixmap(true) : buildIconPixmap(false),
-        "ompweb",
+        "foxnio",
         this.state.running ? `Running — ${this.state.serviceUrl}` : "Service stopped",
       ];
     }
@@ -169,8 +169,8 @@ function getDbusClasses() {
   });
 
   StatusNotifierItem.prototype.Category = "ApplicationStatus";
-  StatusNotifierItem.prototype.Id = "ompweb";
-  StatusNotifierItem.prototype.Title = "ompweb";
+  StatusNotifierItem.prototype.Id = "foxnio";
+  StatusNotifierItem.prototype.Title = "foxnio";
   // Status, IconName, IconPixmap, and ToolTip stay as class getters (dynamic).
   StatusNotifierItem.prototype.WindowId = 0;
   StatusNotifierItem.prototype.AttentionIconName = "";
@@ -247,7 +247,7 @@ function getDbusClasses() {
 
   class TrayControl extends Interface {
     constructor(state) {
-      super("org.kde.ompweb.Tray");
+      super("org.kde.foxnio.Tray");
       this.state = state;
     }
 
@@ -267,111 +267,119 @@ function getDbusClasses() {
 
 const execFileAsync = promisify(execFile);
 
-const BUS_NAME = "org.kde.ompweb.tray";
+const BUS_NAME = "org.kde.foxnio.tray";
 const ITEM_PATH = "/StatusNotifierItem";
 const MENU_PATH = "/MenuBar";
-const TRAY_PATH = "/ompweb/tray";
-const SERVICE_UNIT = "ompweb.service";
-const AUTOSTART_FILE = path.join(os.homedir(), ".config", "autostart", "ompweb-tray.desktop");
+const TRAY_PATH = "/foxnio/tray";
+const SERVICE_UNIT = "foxnio.service";
+const AUTOSTART_FILE = path.join(os.homedir(), ".config", "autostart", "foxnio-tray.desktop");
 const ICON_DIR = path.join(os.homedir(), ".local", "share", "icons", "hicolor", "scalable", "apps");
 const POLL_INTERVAL_MS = 5000;
 
-// Warm-palette tray icons; installed into the user hicolor icon dir.
-const ICON_RUNNING = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#c96f4a"/>
-  <path d="M18 22 L30 32 L18 42" fill="none" stroke="#fff8f2" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="34" y="38" width="14" height="6" rx="3" fill="#fff8f2"/>
-</svg>
-`;
-const ICON_STOPPED = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#8d8578"/>
-  <rect x="20" y="28" width="24" height="8" rx="4" fill="#f5f1ea"/>
-</svg>
-`;
+// ---------------------------------------------------------------------------
+// Fox head tray icons. One set of flat polygons (design coordinates, same
+// artwork as public/omp-web-logo.svg without the tile) drives both the hicolor
+// SVG files and the pure-JS rasterizer below.
+// ---------------------------------------------------------------------------
+
+// Painter's order: head, cheeks, inner ears, dark details (eyes + nose).
+const FOX_LAYERS = [
+  { color: "head", polygons: [[[9, 8], [26, 21], [38, 21], [55, 8], [57, 34], [32, 58], [7, 34]]] },
+  { color: "cheek", polygons: [[[7, 34], [22, 36], [32, 47], [42, 36], [57, 34], [32, 58]]] },
+  { color: "ear", polygons: [[[14, 17], [21, 23], [13, 28]], [[50, 17], [43, 23], [51, 28]]] },
+  {
+    color: "detail",
+    polygons: [[[16, 28], [24, 30], [18, 34]], [[48, 28], [40, 30], [46, 34]], [[28, 52], [36, 52], [32, 58]]],
+  },
+];
+
+// Visible fox bounds inside the 64×64 design space (square, centered on the head).
+const FOX_VIEWBOX = { x: 3, y: 4, size: 58 };
+
+const TRAY_COLORS = {
+  running: { head: [242, 128, 46], cheek: [255, 241, 226], ear: [90, 42, 16], detail: [36, 24, 16] },
+  stopped: { head: [141, 133, 120], cheek: [245, 241, 234], ear: [95, 89, 80], detail: [58, 54, 47] },
+};
+
+const rgbHex = ([r, g, b]) => `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+
+function buildTrayIconSvg(running) {
+  const colors = TRAY_COLORS[running ? "running" : "stopped"];
+  const paths = FOX_LAYERS.map(({ color, polygons }) => {
+    const d = polygons.map((poly) => `M${poly.map(([x, y]) => `${x} ${y}`).join(" L")} Z`).join(" ");
+    return `  <path fill="${rgbHex(colors[color])}" d="${d}"/>`;
+  });
+  const { x, y, size } = FOX_VIEWBOX;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="${x} ${y} ${size} ${size}">\n${paths.join("\n")}\n</svg>\n`;
+}
+
+// Installed into the user hicolor icon dir.
+const ICON_RUNNING = buildTrayIconSvg(true);
+const ICON_STOPPED = buildTrayIconSvg(false);
 
 // ---------------------------------------------------------------------------
 // Pure-JS tray icon rasterizer (SNI IconPixmap, ARGB32 big-endian = [A,R,G,B])
 //
-// Matches the SVG design: rounded square + prompt chevron + underscore
-// (running) / gray square + flat bar (stopped). Rasterized at process start so
-// the panel icon renders even when the theme cannot resolve IconName.
+// Fills the same polygons with 4×4 supersampling. Rasterized at process start
+// so the panel icon renders even when the theme cannot resolve IconName.
 // ---------------------------------------------------------------------------
-
-const TRAY_COLORS = {
-  running: { bg: [201, 111, 74], fg: [255, 248, 242] }, // #c96f4a / #fff8f2
-  stopped: { bg: [141, 133, 120], fg: [245, 241, 234] }, // #8d8578 / #f5f1ea
-};
 
 const TRAY_ICON_PIXMAP_SIZES = [24, 32, 64];
 
-const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const TRAY_SAMPLES = 4;
 
-// Signed distance to a rounded box centered at (cx, cy) with half extents.
-function sdRoundRect(px, py, cx, cy, hx, hy, r) {
-  const qx = Math.abs(px - cx) - (hx - r);
-  const qy = Math.abs(py - cy) - (hy - r);
-  const ox = Math.max(qx, 0);
-  const oy = Math.max(qy, 0);
-  return Math.hypot(ox, oy) + Math.min(Math.max(qx, qy), 0) - r;
-}
-
-// Signed distance to a segment (round caps) — used for the chevron strokes.
-function sdSegment(px, py, ax, ay, bx, by) {
-  const abx = bx - ax;
-  const aby = by - ay;
-  const apx = px - ax;
-  const apy = py - ay;
-  const t = clamp01((apx * abx + apy * aby) / (abx * abx + aby * aby));
-  return Math.hypot(apx - abx * t, apy - aby * t);
-}
-
-// Signed distance for the foreground glyph at design coordinates (0..64).
-function foregroundDistance(px, py, running) {
-  if (!running) {
-    // Flat horizontal bar: rounded rect centered (32, 32), half (12, 4), r 4.
-    return sdRoundRect(px, py, 32, 32, 12, 4, 4);
+// Even-odd point-in-polygon test.
+function pointInPolygon(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
   }
-  const chevron = Math.min(
-    sdSegment(px, py, 18, 22, 30, 32),
-    sdSegment(px, py, 30, 32, 18, 42),
-  ) - 3; // 6px stroke → half-width 3
-  const underscore = sdRoundRect(px, py, 41, 41, 7, 3, 3);
-  return Math.min(chevron, underscore);
+  return inside;
 }
 
-// Convert one design pixel (SDF coverage) into straight-alpha ARGB floats.
-function shadePixel(designX, designY, running, colors) {
-  // 2×2 supersampling against the background rounded box and the glyph.
-  let bgCover = 0;
-  let fgCover = 0;
-  for (const [ox, oy] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]) {
-    const x = designX + ox;
-    const y = designY + oy;
-    bgCover += clamp01(0.5 - sdRoundRect(x, y, 32, 32, 28, 28, 14));
-    fgCover += clamp01(0.5 - foregroundDistance(x, y, running));
+// Color of the topmost layer covering a design-space point, or null.
+function foxColorAt(px, py, colors) {
+  for (let i = FOX_LAYERS.length - 1; i >= 0; i -= 1) {
+    const { color, polygons } = FOX_LAYERS[i];
+    if (polygons.some((poly) => pointInPolygon(px, py, poly))) return colors[color];
   }
-  const bgA = bgCover / 4;
-  const fgA = fgCover / 4;
-  // Composite foreground over background over transparent.
-  const outA = fgA + bgA * (1 - fgA);
-  if (outA <= 0) return [0, 0, 0, 0];
-  const mix = (f, b) => (f * fgA + b * bgA * (1 - fgA)) / outA;
-  return [outA, mix(colors.fg[0], colors.bg[0]), mix(colors.fg[1], colors.bg[1]), mix(colors.fg[2], colors.bg[2])];
+  return null;
 }
 
 // Rasterize the tray icon; returns an ARGB32 byte buffer ([A,R,G,B] per pixel).
 function buildTrayIconPixels(size, running) {
   const colors = TRAY_COLORS[running ? "running" : "stopped"];
-  const scale = size / 64;
+  const scale = FOX_VIEWBOX.size / size;
+  const total = TRAY_SAMPLES * TRAY_SAMPLES;
   const buffer = Buffer.alloc(size * size * 4);
   let offset = 0;
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
-      const [a, r, g, b] = shadePixel((x + 0.5) / scale, (y + 0.5) / scale, running, colors);
-      buffer[offset] = Math.round(a * 255);
-      buffer[offset + 1] = Math.round(r);
-      buffer[offset + 2] = Math.round(g);
-      buffer[offset + 3] = Math.round(b);
+      let covered = 0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let sy = 0; sy < TRAY_SAMPLES; sy += 1) {
+        for (let sx = 0; sx < TRAY_SAMPLES; sx += 1) {
+          const dx = FOX_VIEWBOX.x + (x + (sx + 0.5) / TRAY_SAMPLES) * scale;
+          const dy = FOX_VIEWBOX.y + (y + (sy + 0.5) / TRAY_SAMPLES) * scale;
+          const c = foxColorAt(dx, dy, colors);
+          if (c) {
+            covered += 1;
+            r += c[0];
+            g += c[1];
+            b += c[2];
+          }
+        }
+      }
+      if (covered > 0) {
+        buffer[offset] = Math.round((covered / total) * 255);
+        buffer[offset + 1] = Math.round(r / covered);
+        buffer[offset + 2] = Math.round(g / covered);
+        buffer[offset + 3] = Math.round(b / covered);
+      }
       offset += 4;
     }
   }
@@ -384,9 +392,9 @@ function buildIconPixmap(running) {
 }
 
 function printHelp() {
-  console.log(`Usage: ompweb-tray [command] [options]
+  console.log(`Usage: foxnio-tray [command] [options]
 
-Linux system tray icon (StatusNotifierItem) for the ompweb web service.
+Linux system tray icon (StatusNotifierItem) for the foxnio web service.
 
 Commands:
   --install, install     Install icons + autostart entry, then start the tray
@@ -452,7 +460,7 @@ function readTrayConfig(overrides = {}, env = process.env, home = os.homedir()) 
 // carry a toggle state; `disabled` items are inert status rows.
 function buildMenuItems({ running, version, autostart, hasService, exposed, hasDialogTool }) {
   return [
-    { id: 1, label: `ompweb (v${version})`, enabled: false },
+    { id: 1, label: `foxnio (v${version})`, enabled: false },
     { id: 2, label: running ? "  Status: Running" : "  Status: Stopped", enabled: false },
     { id: 3, separator: true },
     { id: 4, label: "Open in Browser", action: "open" },
@@ -525,11 +533,11 @@ function buildAutostartDesktop(execLine) {
   return [
     "[Desktop Entry]",
     "Type=Application",
-    "Name=ompweb Tray",
-    "GenericName=ompweb tray icon",
-    "Comment=ompweb web service tray icon and controls",
+    "Name=foxnio Tray",
+    "GenericName=foxnio tray icon",
+    "Comment=foxnio web service tray icon and controls",
     `Exec=${execLine}`,
-    "Icon=ompweb",
+    "Icon=foxnio",
     "Terminal=false",
     "Categories=Network;",
     "X-GNOME-Autostart-enabled=true",
@@ -691,7 +699,7 @@ function viewLogs() {
   const resolved = candidateBinPath(terminal);
   if (!resolved) return false;
   const prefix = terminalPrefix(terminal).slice(1);
-  const child = spawn(resolved, [...prefix, `journalctl --user -u ompweb -f`], {
+  const child = spawn(resolved, [...prefix, `journalctl --user -u foxnio -f`], {
     stdio: "ignore",
     detached: true,
     env: process.env,
@@ -764,12 +772,12 @@ function createTrayState(config, { log = console.log } = {}) {
     try {
       writeServiceEnv(merged);
     } catch (err) {
-      state.notify("ompweb", `Config write failed: ${err.message}`);
+      state.notify("foxnio", `Config write failed: ${err.message}`);
       return false;
     }
     const result = systemctlUser(["restart", SERVICE_UNIT]);
     if (!result.ok) {
-      state.notify("ompweb", `Service restart failed: ${result.stderr || result.stdout || "unknown error"}`);
+      state.notify("foxnio", `Service restart failed: ${result.stderr || result.stdout || "unknown error"}`);
       return false;
     }
     state.reloadConfig();
@@ -786,7 +794,7 @@ function createTrayState(config, { log = console.log } = {}) {
     getDbusClasses().Interface.emitPropertiesChanged(state.sni, {
       IconName: "",
       IconPixmap: buildIconPixmap(state.running),
-      ToolTip: ["", buildIconPixmap(state.running), "ompweb", state.running ? `Running — ${state.serviceUrl}` : "Service stopped"],
+      ToolTip: ["", buildIconPixmap(state.running), "foxnio", state.running ? `Running — ${state.serviceUrl}` : "Service stopped"],
     });
     state.sni.NewIcon();
     state.sni.NewToolTip();
@@ -801,7 +809,7 @@ function createTrayState(config, { log = console.log } = {}) {
         openUrl(state.serviceUrl);
         break;
       case "copy":
-        if (!copyToClipboard(state.serviceUrl)) state.notify("ompweb", "No clipboard tool found (install wl-clipboard)");
+        if (!copyToClipboard(state.serviceUrl)) state.notify("foxnio", "No clipboard tool found (install wl-clipboard)");
         break;
       case "toggle":
         systemctlUser([state.running ? "stop" : "start", SERVICE_UNIT]);
@@ -810,7 +818,7 @@ function createTrayState(config, { log = console.log } = {}) {
         systemctlUser(["restart", SERVICE_UNIT]);
         break;
       case "logs":
-        if (!viewLogs()) state.notify("ompweb", "No terminal emulator found for logs");
+        if (!viewLogs()) state.notify("foxnio", "No terminal emulator found for logs");
         break;
       case "autostart":
         state.setAutostart(!state.autostart);
@@ -821,12 +829,12 @@ function createTrayState(config, { log = console.log } = {}) {
         if (exposing && !readServiceEnv().OMP_WEB_PASSWORD_HASH) {
           const password = await dialogPrompt({
             tool: state.dialogTool,
-            title: "ompweb",
+            title: "foxnio",
             text: "A password is required to expose the web UI.\nWeb sign-in password:",
             password: true,
           });
           if (!password) {
-            state.notify("ompweb", "Expose cancelled: a password is required to leave loopback");
+            state.notify("foxnio", "Expose cancelled: a password is required to leave loopback");
             break;
           }
           updates.OMP_WEB_PASSWORD_HASH = hashPassword(password);
@@ -836,7 +844,7 @@ function createTrayState(config, { log = console.log } = {}) {
             .filter((entry) => entry.label !== "Local")
             .map((entry) => entry.url);
           state.notify(
-            "ompweb",
+            "foxnio",
             exposing
               ? `Exposed to the network: ${urls[0] ?? `http://0.0.0.0:${state.port}`}`
               : `Restricted to loopback (${state.serviceUrl})`,
@@ -847,25 +855,25 @@ function createTrayState(config, { log = console.log } = {}) {
       case "port": {
         const input = await dialogPrompt({
           tool: state.dialogTool,
-          title: "ompweb",
+          title: "foxnio",
           text: `Server port (current: ${state.port}):`,
           value: String(state.port),
         });
         if (input === null) break;
         const port = parseInt(input.trim(), 10);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
-          state.notify("ompweb", `Invalid port: ${input.trim()}`);
+          state.notify("foxnio", `Invalid port: ${input.trim()}`);
           break;
         }
         if (state.applyServiceEnv({ PORT: String(port) })) {
-          state.notify("ompweb", `Port updated: ${state.serviceUrl}`);
+          state.notify("foxnio", `Port updated: ${state.serviceUrl}`);
         }
         break;
       }
       case "password": {
         const password = await dialogPrompt({
           tool: state.dialogTool,
-          title: "ompweb",
+          title: "foxnio",
           text: "Web sign-in password (empty disables auth):",
           password: true,
         });
@@ -878,7 +886,7 @@ function createTrayState(config, { log = console.log } = {}) {
           if (!isLoopbackHost(state.hostname)) updates.OMP_WEB_HOSTNAME = "127.0.0.1";
         }
         if (state.applyServiceEnv(updates)) {
-          state.notify("ompweb", password ? "Password updated" : "Password disabled (loopback only)");
+          state.notify("foxnio", password ? "Password updated" : "Password disabled (loopback only)");
         }
         break;
       }
@@ -901,7 +909,7 @@ function createTrayState(config, { log = console.log } = {}) {
       state.autostart = enable;
       state.refreshMenu();
     } catch (err) {
-      state.notify("ompweb", `Autostart update failed: ${err.message}`);
+      state.notify("foxnio", `Autostart update failed: ${err.message}`);
     }
   };
 
@@ -910,7 +918,7 @@ function createTrayState(config, { log = console.log } = {}) {
     try {
       const obj = await state.bus.getProxyObject("org.freedesktop.Notifications", "/org/freedesktop/Notifications");
       const iface = obj.getInterface("org.freedesktop.Notifications");
-      await iface.Notify("ompweb", 0, "ompweb", summary, body, [], {}, 5000);
+      await iface.Notify("foxnio", 0, "foxnio", summary, body, [], {}, 5000);
     } catch {
       // Notifications are best-effort.
     }
@@ -988,7 +996,7 @@ async function startTray(config, { log = console.log, error = console.error } = 
   }
   // 1 = primary owner, 4 = already ours; anything else means another tray runs.
   if (nameReply !== 1 && nameReply !== 4) {
-    log("ompweb tray is already running");
+    log("foxnio tray is already running");
     return state;
   }
 
@@ -1008,15 +1016,15 @@ async function startTray(config, { log = console.log, error = console.error } = 
   await state.registerWithWatcher();
   state.registerTimer = setInterval(() => state.registerWithWatcher(), 60000);
   state.pollTimer = setInterval(() => state.poll(), POLL_INTERVAL_MS);
-  log(`ompweb tray started (${state.serviceUrl})`);
+  log(`foxnio tray started (${state.serviceUrl})`);
   return state;
 }
 
 function installIcons({ log = console.log } = {}) {
   try {
     fs.mkdirSync(ICON_DIR, { recursive: true });
-    fs.writeFileSync(path.join(ICON_DIR, "ompweb.svg"), ICON_RUNNING, { mode: 0o644 });
-    fs.writeFileSync(path.join(ICON_DIR, "ompweb-off.svg"), ICON_STOPPED, { mode: 0o644 });
+    fs.writeFileSync(path.join(ICON_DIR, "foxnio.svg"), ICON_RUNNING, { mode: 0o644 });
+    fs.writeFileSync(path.join(ICON_DIR, "foxnio-off.svg"), ICON_STOPPED, { mode: 0o644 });
   } catch (err) {
     log(`warning: could not install tray icons: ${err.message}`);
   }
@@ -1062,7 +1070,7 @@ async function quitRunningTray() {
   }
   try {
     const obj = await bus.getProxyObject(BUS_NAME, TRAY_PATH);
-    const iface = obj.getInterface("org.kde.ompweb.Tray");
+    const iface = obj.getInterface("org.kde.foxnio.Tray");
     await iface.Quit();
     return true;
   } catch {
@@ -1265,7 +1273,7 @@ async function runCli(argv = process.argv.slice(2)) {
   if (cliArgs.json) {
     console.log(JSON.stringify(status, null, 2));
   } else {
-    console.log(`=== ompweb Linux tray status ===`);
+    console.log(`=== foxnio Linux tray status ===`);
     console.log(`  Tray running    : ${status.trayRunning ? "Yes" : "No"}`);
     console.log(`  Service unit    : ${status.serviceInstalled ? "installed" : "not installed"} (${status.serviceRunning ? "active" : "inactive"})`);
     console.log(`  Autostart       : ${status.autostart ? `enabled (${status.autostartFile})` : "disabled"}`);
