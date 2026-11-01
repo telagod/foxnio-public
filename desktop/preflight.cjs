@@ -29,7 +29,8 @@ try {
 }
 if (!fs.existsSync(electronBinary)) fail(`Electron binary is missing: ${electronBinary}`);
 
-const electronVersion = spawnSync(electronBinary, ["--version"], {
+const electronArgs = process.platform === "linux" ? ["--no-sandbox", "--version"] : ["--version"];
+const electronVersion = spawnSync(electronBinary, electronArgs, {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
