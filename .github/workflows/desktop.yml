@@ -1,4 +1,5 @@
 name: Desktop installers
+run-name: Desktop installers / ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
