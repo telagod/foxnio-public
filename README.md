@@ -1,9 +1,8 @@
 # foxnio
 
-[![npm version](https://img.shields.io/npm/v/@telagod/foxnio.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@telagod/foxnio)
+[![GitHub Packages](https://img.shields.io/badge/GitHub%20Packages-%40telagod%2Ffoxnio-181717?logo=github)](https://github.com/telagod/foxnio-public/packages)
 [![node version](https://img.shields.io/node/v/@telagod/foxnio.svg?logo=node.js&color=44cc11)](https://nodejs.org)
 [![license](https://img.shields.io/github/license/telagod/foxnio-public.svg?color=44cc11)](./LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/@telagod/foxnio.svg?color=44cc11)](https://www.npmjs.com/package/@telagod/foxnio)
 [![GitHub stars](https://img.shields.io/github/stars/telagod/foxnio-public.svg?logo=github)](https://github.com/telagod/foxnio-public/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/telagod/foxnio-public/pulls)
 
@@ -93,6 +92,21 @@ Completion notifications use omp's `prompt_result` and `session_settled` RPC
 frames (omp 18.3.1 or later).
 
 ## Quick Start
+Configure the `@telagod` registry scope before installing.
+
+For a private package, use a classic personal access token with `read:packages`:
+
+```bash
+npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+For a public package, no token is needed, but configure the scope in your user-level npm settings:
+
+```bash
+npm config set @telagod:registry https://npm.pkg.github.com
+```
+
+Both commands configure global installs and the in-app self-updater. New packages are private by default; after the first release, change visibility to **Public** in GitHub settings for anonymous installs.
 
 **Run directly without installing:**
 
@@ -313,7 +327,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
-- **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
+- **Tool Presets & Workspace Launch Config**: New browser profiles default to `full`, matching the CLI. `default` limits built-in tools to `read,bash,edit,write`; `full` keeps OMP's complete default toolset, including search and subagents. The active session toolset is shown in chat. Configure a workspace's OMP profile and extra launch arguments from its sidebar menu; changes apply on the next start or reload. Preset selection persists to localStorage.
 - **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
 - **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.

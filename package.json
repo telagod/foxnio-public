@@ -1,11 +1,14 @@
 {
   "name": "@telagod/foxnio",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "foxnio: web UI for the oh-my-pi (omp) coding agent, a fork of ompweb focused on agent customization",
   "homepage": "https://github.com/telagod/foxnio-public#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/telagod/foxnio-public.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "bugs": {
     "url": "https://github.com/telagod/foxnio-public/issues"
@@ -37,6 +40,7 @@
     "public",
     "scripts",
     "desktop",
+    "!**/*.test.*",
     "next.config.ts",
     "package.json"
   ],

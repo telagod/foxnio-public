@@ -1,9 +1,8 @@
 # foxnio
 
-[![npm version](https://img.shields.io/npm/v/@telagod/foxnio.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@telagod/foxnio)
+[![GitHub Packages](https://img.shields.io/badge/GitHub%20Packages-%40telagod%2Ffoxnio-181717?logo=github)](https://github.com/telagod/foxnio-public/packages)
 [![node version](https://img.shields.io/node/v/@telagod/foxnio.svg?logo=node.js&color=44cc11)](https://nodejs.org)
 [![license](https://img.shields.io/github/license/telagod/foxnio-public.svg?color=44cc11)](./LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/@telagod/foxnio.svg?color=44cc11)](https://www.npmjs.com/package/@telagod/foxnio)
 [![GitHub stars](https://img.shields.io/github/stars/telagod/foxnio-public.svg?logo=github)](https://github.com/telagod/foxnio-public/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/telagod/foxnio-public/pulls)
 
@@ -38,6 +37,22 @@ foxnio 是 [kahme247/ompweb](https://github.com/kahme247/ompweb) 的 fork，专�
 队列面板显示 omp 自身的队列（`get_state` 中的 `queuedMessages` 和 `queue_update` 事件，需 omp 18.4.4 或更高版本），因此查看同一会话的所有设备都会看到相同的排队消息。**Stop** 会将仍在队列中等待的消息文本放回输入框，而不是让智能体运行它们；但模型已通过实时引导接收的引导消息仍会运行。更早版本的 omp 不显示队列面板，Stop 也无法取回排队消息。
 
 ## 快速开始
+
+首次安装前需要配置 `@telagod` registry scope。
+
+私有包请使用具有 `read:packages` 权限的 classic personal access token 登录：
+
+```bash
+npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+Public 包无需 token，但仍需在用户级 npm 配置中设置 scope：
+
+```bash
+npm config set @telagod:registry https://npm.pkg.github.com
+```
+
+这两种方式都会配置全局安装和 foxnio 自更新使用的 scope。新包默认是私有的；首次发布后，可在 GitHub package 设置中将可见性改为 **Public**，以允许匿名安装。
 
 **免安装直接运行：**
 
@@ -102,6 +117,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 - **会话管理**：按项目浏览历史会话，支持会话分叉与分支回溯。
 - **草稿恢复**：未发送的文本按会话或新会话的工作区分别保存；浏览器存储可用时，在同一标签页后退、前进或重新加载后可恢复（最多 50 份草稿）。图片和文件附件仅保留在内存中。
 - **实时任务与子智能体**：可折叠面板实时展示任务清单（todo）与子智能体进度，并支持查看完整转录。
+- **工具预设与工作区启动配置**：新浏览器默认选择与 CLI 一致的 `full` 工具集；`default` 仅开放 `read`、`bash`、`edit`、`write`，`full` 保留 OMP 全部默认工具（包括搜索和子代理）。聊天中会显示当前会话的工具集。可从侧边栏工作区菜单配置 OMP profile 和额外启动参数，保存后下次启动或重新加载时生效。
 - **文件管理与预览**：与对话并排浏览文件，支持代码、Markdown、图片、音频及 PDF 预览。
 - **Git Worktree 支持**：直接在侧边栏切换与管理 Git 工作树。
 - **可视化设置**：在 Web 界面中直接配置模型、API 密钥、MCP 服务器、技能、插件及 OMP 原生设置。

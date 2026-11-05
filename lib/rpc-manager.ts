@@ -28,7 +28,7 @@ import {
   type AgentToolSessionOps,
 } from "./agent-tools";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
-import { PRESET_FULL } from "./tool-presets";
+import { getToolPresetStatus, PRESET_FULL, type ToolPresetStatus } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
@@ -212,7 +212,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = { find: "glob", search: "grep"
 const DROPPED_TOOL_NAMES = new Set(["ls"]);
 
 /** Translate pi-web preset tool names into omp builtin tool names. */
-export function mapPresetToolNames(toolNames: string[]): string[] {
+export function mapPresetToolNames(toolNames: readonly string[]): string[] {
   const out: string[] = [];
   for (const raw of toolNames) {
     const lower = raw.toLowerCase();
@@ -226,7 +226,7 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: readonly string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string, reapplyToolPresetOnResume = false): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
@@ -241,14 +241,12 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
     if (modelOverride && !modelOverride.startsWith("-") && !/\s/.test(modelOverride)) {
       args.push("--model", modelOverride);
     }
-  } else if (toolNames !== undefined) {
+  }
+  if (toolNames !== undefined && (!sessionFile || reapplyToolPresetOnResume)) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
       args.push("--no-tools");
-    } else if (presetKey === FULL_PRESET_KEY) {
-      // "Full" means everything: leave omp's complete default toolset intact
-      // rather than restricting it to the (much smaller) pi preset list.
-    } else {
+    } else if (presetKey !== FULL_PRESET_KEY) {
       const mapped = mapPresetToolNames(toolNames);
       if (mapped.length > 0) args.push("--tools", mapped.join(","));
     }
@@ -407,6 +405,10 @@ export class AgentSessionWrapper {
    * after `/advisor off`, `inherit` when the chat never chose (the child then
    * follows omp's config and the workspace launch flag). Restarts reuse it. */
   private _advisorChoice: AdvisorChoice;
+  /** OMP builtin tool preset used by the currently running child. */
+  private _toolPreset: ToolPresetStatus | null;
+  /** Original requested tool names; null means a resumed session's preset is unknown. */
+  private readonly _toolNames: readonly string[] | null | undefined;
   /** The cwd recorded in the session file header; null for brand-new sessions
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
@@ -423,11 +425,15 @@ export class AgentSessionWrapper {
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
+    toolPreset: ToolPresetStatus | null = "full",
+    toolNames: readonly string[] | null | undefined = undefined,
   ) {
     this.proc = proc;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
     this._advisorChoice = advisorChoice;
+    this._toolPreset = toolPreset;
+    this._toolNames = toolNames === null ? null : toolNames ? [...toolNames] : undefined;
     this._sessionId = expectedSessionId;
     this.disconnectDestroyMs = disconnectDestroyMs;
   }
@@ -438,6 +444,9 @@ export class AgentSessionWrapper {
 
   get sessionFile(): string {
     return this._sessionFile;
+  }
+  get toolPreset(): ToolPresetStatus | null {
+    return this._toolPreset;
   }
 
   isAlive(): boolean {
@@ -1769,6 +1778,9 @@ export class AgentSessionWrapper {
    * on boot, matching a fresh CLI launch. */
   private async restart(): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
+    if (this._toolPreset === null) {
+      throw new WebRpcError("Cannot reload because this session's tool preset is unknown. Start a new session with an explicit preset to avoid changing tool access.", "tool_preset_unknown");
+    }
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
@@ -1800,12 +1812,15 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
+      const launchConfig = launchConfigForCwd(this.cwd);
+      const toolNames = this._toolNames ?? undefined;
+      const toolPreset = getToolPresetStatus(toolNames, launchConfig?.extraArgs);
       const proc = new RpcProcess({
         cwd: this.cwd,
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this._advisorChoice === "on", launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", toolNames, this._advisorChoice === "on", launchConfig, undefined, true), "--extension", SESSION_EDIT_EXTENSION_PATH],
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1830,6 +1845,7 @@ export class AgentSessionWrapper {
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
         await this.applyAdvisorChoiceAfterSpawn();
+        this._toolPreset = toolPreset;
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
         this.unsubscribeFrames?.();
@@ -2683,6 +2699,9 @@ export async function startRpcSession(
       recordedCwd,
       advisor ?? "inherit",
       sessionFile ? sessionId : "",
+      undefined,
+      getToolPresetStatus(sessionFile ? undefined : toolNames, launchConfig?.extraArgs, sessionFile ? null : "full"),
+      sessionFile ? null : toolNames,
     );
     holder.wrapper = created;
     created.start();

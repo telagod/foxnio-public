@@ -145,7 +145,9 @@ async function runManagerGate() {
   }
   // App update via npm/bun
   const cmd = manager === "bun" ? (managerPath || "bun") : (managerPath || "npm");
-  const args = manager === "bun" ? ["add", "-g", `@telagod/foxnio@${target}`] : ["install", "-g", `@telagod/foxnio@${target}`];
+  const args = manager === "bun"
+    ? ["add", "-g", `@telagod/foxnio@${target}`]
+    : ["install", "-g", `@telagod/foxnio@${target}`];
   if (Array.isArray(managerPrefix) && managerPrefix.length) args.unshift(...managerPrefix);
   let retries = 0;
   let lastResult;

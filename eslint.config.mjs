@@ -5,6 +5,15 @@ const eslintConfig = [
   ...coreWebVitals,
   ...typescript,
   {
+    ignores: [".next/**", "dist-desktop/**", "desktop/runtime/**"],
+  },
+  {
+    files: ["desktop/**/*.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     rules: {
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",

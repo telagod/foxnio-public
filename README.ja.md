@@ -1,9 +1,8 @@
 # foxnio
 
-[![npm version](https://img.shields.io/npm/v/@telagod/foxnio.svg?logo=npm&color=e05d44)](https://www.npmjs.com/package/@telagod/foxnio)
+[![GitHub Packages](https://img.shields.io/badge/GitHub%20Packages-%40telagod%2Ffoxnio-181717?logo=github)](https://github.com/telagod/foxnio-public/packages)
 [![node version](https://img.shields.io/node/v/@telagod/foxnio.svg?logo=node.js&color=44cc11)](https://nodejs.org)
 [![license](https://img.shields.io/github/license/telagod/foxnio-public.svg?color=44cc11)](./LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/@telagod/foxnio.svg?color=44cc11)](https://www.npmjs.com/package/@telagod/foxnio)
 [![GitHub stars](https://img.shields.io/github/stars/telagod/foxnio-public.svg?logo=github)](https://github.com/telagod/foxnio-public/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/telagod/foxnio-public/pulls)
 
@@ -38,6 +37,22 @@ foxnio は [kahme247/ompweb](https://github.com/kahme247/ompweb) のフォーク
 キューパネルは omp 自身のキュー（`get_state` の `queuedMessages` と `queue_update` イベント、omp 18.4.4 以降）を表示するため、同じセッションを開いているすべての端末に同じキューが表示されます。**Stop** は、まだキューで待機中のメッセージをエージェントに実行させず、そのテキストを入力欄に戻します。ただし、ライブステアリングでモデルがすでに受け取ったステアは実行されます。それより古い omp ではキューパネルは表示されず、Stop でキュー内のメッセージを取り戻すこともできません。
 
 ## クイックスタート
+
+初回インストール前に `@telagod` registry scope を設定してください。
+
+非公開パッケージでは `read:packages` 権限を持つ classic personal access token でログインします:
+
+```bash
+npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+Public パッケージは token 不要ですが、ユーザー単位の npm 設定で scope を指定してください:
+
+```bash
+npm config set @telagod:registry https://npm.pkg.github.com
+```
+
+どちらもグローバルインストールと foxnio の自己更新で使う scope を設定します。新しいパッケージはデフォルトで非公開です。初回リリース後、匿名インストールを許可するには GitHub の package 設定で **Public** に変更してください。
 
 **インストールせずに直接実行:**
 
@@ -109,6 +124,7 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 - **セッション管理**: プロジェクトごとに履歴を一覧表示、分岐やフォークにも対応。
 - **下書きの復元**: 未送信のテキストを会話または新規セッションのワークスペースごとに保存し、ブラウザストレージが利用可能な場合は、同じタブでの「戻る」「進む」や再読み込み後に復元します（最大 50 件）。画像と添付ファイルはメモリ内にのみ保持されます。
 - **ライブタスク＆サブエージェント**: Todo リストと稼働中サブエージェントの進捗を折りたたみパネルでリアルタイム表示。
+- **ツールプリセットとワークスペース起動設定**: 新しいブラウザの初期値は CLI と同じ `full` です。`default` では組み込みツールが `read`、`bash`、`edit`、`write` に制限され、`full` では検索やサブエージェントを含む OMP の標準ツールセットを維持します。現在のセッションのツールセットはチャットに表示されます。サイドバーのワークスペースメニューから OMP profile と追加の起動引数を設定でき、次回の起動または再読み込みで適用されます。
 - **ファイル閲覧・プレビュー**: チャットと並べてファイルを閲覧、コード・Markdown・画像・音声・PDF をプレビュー。
 - **Git Worktree サポート**: サイドバーから直接 Git ワークツリーを切り替え・管理。
 - **GUI 設定管理**: 設定ファイルを直接編集することなく、モデル、API キー、MCP サーバー、スキル、プラグイン、OMP 設定を変更可能。

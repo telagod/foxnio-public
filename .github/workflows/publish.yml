@@ -1,4 +1,4 @@
-name: Publish npm package
+name: Publish GitHub Packages npm package
 
 on:
   push:
@@ -7,12 +7,13 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
   publish:
+    permissions:
+      contents: write
+      packages: write
     runs-on: ubuntu-latest
-    environment: npm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -27,9 +28,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          registry-url: https://registry.npmjs.org
 
-      - run: npm install --global npm@^11.5.1
       - run: npm ci
       - run: npm test
       - run: npm run build
@@ -41,17 +40,21 @@ jobs:
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
 
-      - name: Publish to npm
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: https://npm.pkg.github.com
         run: |
+          printf '\n//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" >> "$HOME/.npmrc"
           PACKAGE_NAME="$(node -p 'require("./package.json").name')"
           VERSION="$(node -p 'require("./package.json").version')"
-          if npm view "$PACKAGE_NAME@$VERSION" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+          if npm view "$PACKAGE_NAME@$VERSION" version --registry "$REGISTRY" >/dev/null 2>&1; then
             echo "$PACKAGE_NAME@$VERSION is already published"
           else
-            npm publish --provenance --access public
+            npm publish --registry "$REGISTRY"
           fi
 
       - name: Publish GitHub Release
@@ -71,6 +74,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           DISCORD_WEBHOOK_URL="$(printf '%s' "$DISCORD_WEBHOOK_URL" | tr -d '\r\n')"
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_RELEASES_WEBHOOK is not configured; skipping notification."
+            exit 0
+          fi
+
           case "$DISCORD_WEBHOOK_URL" in
             https://discord.com/api/webhooks/*/*) ;;
             *) echo 'DISCORD_RELEASES_WEBHOOK is not a valid Discord webhook URL' >&2; exit 1 ;;

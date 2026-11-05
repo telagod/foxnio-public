@@ -9,13 +9,14 @@ import test from "node:test";
 const WORKER = fileURLToPath(new URL("./omp-web-update-worker.js", import.meta.url));
 const ATTEMPT = "11111111-2222-3333-4444-555555555555";
 
-// Runs the worker for a systemd unit with stub `systemctl` and `npm` on PATH.
-function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0 } = {}) {
+// Runs the worker for a systemd unit with stub `systemctl` and package managers on PATH.
+function runWorker(t, { manager = "npm", npmExit = 0, bunExit = 0, startExit = 0, activeExit = 0 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "update-worker-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, "calls.log");
   writeFileSync(join(dir, "systemctl"), `#!/bin/sh\necho "systemctl $*" >> "${log}"\n[ "$2" = start ] && exit ${startExit}\n[ "$2" = is-active ] && { echo failed; exit ${activeExit}; }\nexit 0\n`, { mode: 0o755 });
   writeFileSync(join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> "${log}"\nexit ${npmExit}\n`, { mode: 0o755 });
+  writeFileSync(join(dir, "bun"), `#!/bin/sh\necho "bun $*" >> "${log}"\nexit ${bunExit}\n`, { mode: 0o755 });
   writeFileSync(join(dir, "status.json"), JSON.stringify({ attemptId: ATTEMPT, state: "running" }), { mode: 0o600 });
   writeFileSync(join(dir, `${ATTEMPT}.go`), "{}", { mode: 0o600 });
   const result = spawnSync(process.execPath, [
@@ -23,8 +24,8 @@ function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0 } = {}) {
     "--attempt", ATTEMPT,
     "--root", dir,
     "--package-dir", dir,
-    "--manager", "npm",
-    "--manager-path", "npm",
+    "--manager", manager,
+    "--manager-path", manager,
     "--target", "0.6.0",
     "--kind", "app",
     "--systemd-unit", "foxnio.service",
@@ -45,6 +46,12 @@ test("a systemd update stops the unit, installs, starts it and checks it stayed 
     "systemctl --user start foxnio.service",
     "systemctl --user is-active foxnio.service",
   ]);
+  assert.equal(status.state, "succeeded");
+});
+
+test("a Bun global update uses the scoped registry mapping without overriding npmjs", { skip: process.platform === "win32" }, (t) => {
+  const { calls, status } = runWorker(t, { manager: "bun" });
+  assert.equal(calls[1], "bun add -g @telagod/foxnio@0.6.0");
   assert.equal(status.state, "succeeded");
 });
 

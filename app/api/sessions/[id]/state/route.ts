@@ -15,7 +15,7 @@ export async function GET(
     if (rpc?.isAlive()) {
       try {
         const state = await rpc.send({ type: "get_state" });
-        return NextResponse.json({ running: true, state });
+        return NextResponse.json({ running: true, state, toolPreset: rpc.toolPreset });
       } catch (error) {
         if (error instanceof WebRpcError && error.code === "session_unresponsive") {
           return NextResponse.json({ running: false, recovered: true });

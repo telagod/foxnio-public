@@ -3,7 +3,7 @@ import { isUpdateDisabled } from "./update-policy";
 import { homedir } from "os";
 import { join, normalize, sep } from "path";
 
-const NPM_PACKAGE = "@telagod/foxnio";
+const GITHUB_RELEASES_URL = "https://api.github.com/repos/telagod/foxnio-public/releases/latest";
 const CHECK_TTL_MS = 60 * 60 * 1000;
 
 export interface NpmUpdateStatus {
@@ -47,12 +47,18 @@ export async function checkNpmUpdate(force = false): Promise<NpmUpdateStatus> {
   if (!force && cached && Date.now() - cached.checkedAt < CHECK_TTL_MS) return cached.status;
 
   try {
-    const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(NPM_PACKAGE)}/latest`, {
+    const response = await fetch(GITHUB_RELEASES_URL, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "foxnio",
+      },
       cache: "no-store",
       signal: AbortSignal.timeout(5_000),
     });
-    const data = response.ok ? await response.json() as { version?: unknown } : null;
-    const availableVersion = typeof data?.version === "string" ? data.version : null;
+    const data = response.ok ? await response.json() as { tag_name?: unknown } : null;
+    const tagName = typeof data?.tag_name === "string" ? data.tag_name : null;
+    const availableVersion = tagName?.replace(/^v/, "") ?? null;
     const status: NpmUpdateStatus = {
       currentVersion,
       availableVersion,

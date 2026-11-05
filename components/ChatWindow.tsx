@@ -9,6 +9,7 @@ import { collectToolResults, foldCompletedTurn, formatTurnDuration, isGroupAncho
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ToolPresetStatus } from "./ToolPresetStatus";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -538,6 +539,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
     externalRunActive,
     toolPreset,
+    activeToolset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
@@ -1128,6 +1130,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // bar stays so the status is never hidden.
   const hasStatusHostRow = todoPhases.length > 0 || subagents.length > 0;
   const chatInputElement = (
+    <>
+      <ToolPresetStatus
+        selectedPreset={toolPreset}
+        activeToolset={activeToolset}
+        hasSession={Boolean(session || activeToolset)}
+        onChange={handleToolPresetChange}
+      />
     <ChatInput
       draftIdentityMove={composerIdentityMove}
       ref={composerRef}
@@ -1199,6 +1208,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       statusText={hasStatusHostRow ? null : composerStatusText}
       onOpenProviders={onOpenProviders}
     />
+    </>
   );
 
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");

@@ -622,8 +622,8 @@ during the wait.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
-- Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@telagod/foxnio` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @telagod/foxnio` or `bun add -g @telagod/foxnio`).
+- `GET /api/app-update` checks the latest GitHub Release for foxnio and returns the install manager (`bun` vs `npm`, via `detectInstallMethod`), `updateAvailable`, and its terminal update command.
+- App self-updates target `@telagod/foxnio` through the package scope's user-level registry configuration. Do not pass a global `--registry`: the other runtime dependencies remain on the default npm registry.
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.

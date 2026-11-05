@@ -77,12 +77,12 @@ export async function POST(req: Request) {
       }
 
       if (promptCommand.type === "ensure_session") {
-        return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+        return NextResponse.json({ success: true, sessionId: realSessionId, toolPreset: session.toolPreset, data: null });
       }
 
       const result = await session.send(promptCommand);
 
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+      return NextResponse.json({ success: true, sessionId: realSessionId, toolPreset: session.toolPreset, data: result });
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp

@@ -25,7 +25,7 @@ import { toastBtwError, useBtw } from "@/hooks/useBtw";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
-import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
+import { getToolNamesForPreset, type ToolPreset, type ToolPresetStatus } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
@@ -240,6 +240,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // to avoid a server/client mismatch when the user stored a different preset.
   const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
   useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
+  const [activeToolset, setActiveToolset] = useState<{ running: boolean; preset: ToolPresetStatus | null } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
@@ -811,8 +812,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) return;
-      const agentState = await res.json() as { running: boolean; state?: AgentStateResponse };
+      const agentState = await res.json() as { running: boolean; state?: AgentStateResponse; toolPreset?: ToolPresetStatus | null };
       if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      setActiveToolset({ running: agentState.running, preset: agentState.running ? agentState.toolPreset ?? null : null });
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, agentState.state?.skillDiagnostics);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return; // stale snapshot — drop its thinking level too
@@ -907,7 +909,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession };
+        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; toolPreset?: ToolPresetStatus | null; exited?: ExitedRpcSession };
         if (!hookAliveRef.current) return null;
         if (sessionIdRef.current !== sid) {
           if (showLoading) setLoading(false);
@@ -921,6 +923,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return null;
         }
 
+        setActiveToolset({ running: agentState.running, preset: agentState.running ? agentState.toolPreset ?? null : null });
         const liveState = agentState.state;
         applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, liveState?.skillDiagnostics);
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
@@ -1078,6 +1081,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventCoalescer.reset();
     catchUp.disconnect();
     setSessionAdvisorSpawn(sid, "inherit");
+    setActiveToolset(null);
   }, [catchUp, eventCoalescer]);
 
   /** The runtime id of this chat, creating it on first use. A runtime created
@@ -1117,10 +1121,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as { sessionId: string };
+      const result = await res.json() as { sessionId: string; toolPreset?: ToolPresetStatus | null };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
-      // The toggle handler could not persist while the chat had no id; carry
+      setActiveToolset({ running: true, preset: result.toolPreset ?? null });
       // the pre-prompt choice over so it survives a reload after this point.
       if (advisorChoice !== "inherit") {
         setSessionAdvisorSpawn(realId, advisorChoice);
@@ -1836,12 +1840,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
-      const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+      const data = await res.json() as { running?: boolean; state?: AgentStateResponse; toolPreset?: ToolPresetStatus | null };
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
       if (!hookAliveRef.current || sessionIdRef.current !== sid || promptRunIdRef.current !== runId
         || responseRunVersionRef.current !== responseVersion) return;
+      setActiveToolset({ running: data.running === true, preset: data.running ? data.toolPreset ?? null : null });
       const state = data.state;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, state?.skillDiagnostics);
       if (!promptDispatchPendingRef.current && state?.responseObserved) runHadContentRef.current = true;
@@ -4168,7 +4173,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
-    agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, activeToolset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, skillDiagnostics, forkingEntryId, editingEntryId,
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,

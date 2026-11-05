@@ -2,80 +2,96 @@
 
 Each release publishes two artifacts:
 
-- npm package: `@telagod/foxnio`
+- GitHub Packages npm package: `@telagod/foxnio`
 - GitHub Release: [telagod/foxnio-public](https://github.com/telagod/foxnio-public)
 
-After the initial bootstrap release, publishing is performed by GitHub Actions
-with npm trusted publishing. No npm access token is stored in this repository
-or in GitHub secrets.
+The package is published to `https://npm.pkg.github.com` with the repository's
+`GITHUB_TOKEN`. It is not published to the public npm registry. New packages are
+private by default; change the package visibility to **Public** in GitHub if
+anonymous installs are desired.
 
-## Bootstrap the first release
+## Configure package access
 
-`@telagod/foxnio` is not registered on npm yet. npm exposes trusted-publisher settings
-only for an existing package, so version `0.2.0` must be published once from a
-reviewed local checkout using the authenticated npm account:
+For a private package, authenticate with a GitHub username and a classic
+personal access token that has `read:packages`:
+
+```bash
+npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+For a public package, no token is needed, but consumers must map the package
+scope in their user-level npm config:
+
+```bash
+npm config set @telagod:registry https://npm.pkg.github.com
+```
+
+Both commands configure the scope used by global installs and the in-app
+self-updater. The updater intentionally does not override the default registry,
+so unscoped dependencies continue to resolve from npmjs.
+
+The publish workflow uses the repository's `GITHUB_TOKEN`; confirm Actions are
+enabled and `.github/workflows/publish.yml` retains `packages: write`. If a
+package was created under another owner or repository, grant this repository
+access in the package's GitHub settings.
+
+## Publish the first release
+
+The first release candidate is `@telagod/foxnio@0.6.1`, continuing the upstream
+`0.6.0` version line. From a clean checkout of the `foxnio` branch, ensure the
+changelog and version are ready, then run:
 
 ```bash
 npm ci
-npm test
-npm run build
-npm pack --dry-run
-npm publish --access public
+npm run release:check
 ```
 
-Do not create a tag or GitHub Release for this bootstrap version: npm will
-reject a duplicate version.
-After this succeeds, configure trusted publishing before publishing any later
-version.
+The tag triggers the package and desktop workflows:
 
-## One-time trusted-publisher setup
+```bash
+git tag v0.6.1
+git push foxnio v0.6.1
+```
 
-1. In npm, open the `@telagod/foxnio` package settings and add a **GitHub Actions**
-   trusted publisher with:
-   - Owner: `telagod`
-   - Repository: `foxnio-public`
-   - Workflow filename: `publish.yml`
-   - Environment: `npm`
-2. In GitHub, create the `npm` environment for this repository. Add required
-   reviewers if releases need approval.
-3. Confirm Actions are enabled for the repository.
-
-The workflow at `.github/workflows/publish.yml` requests `contents: write` to
-create the GitHub Release and `id-token: write` for trusted publishing. It
-installs npm 11.5.1 or newer, as required for trusted publishing. The OIDC
-permission lets npm verify the GitHub Actions identity and generate provenance
-for the published package.
+The package workflow verifies the tag against `package.json`, installs from the
+lockfile, runs tests and the production build, creates a draft GitHub Release,
+and publishes to GitHub Packages. It makes the release public only after the
+package publish succeeds. The desktop workflow builds and uploads the Windows,
+macOS, and Linux installers. Once the package appears in GitHub, set its
+visibility to **Public** if unauthenticated installs are intended; otherwise,
+keep it private and grant access to consumers.
 
 ## Release later versions
 
-Run these from a clean `main` checkout after the release changes are merged.
+Run these from a clean `foxnio` checkout after the release changes are merged
+and `CHANGELOG.md` contains an entry for the new version:
 
 ```bash
 npm ci
-npm test
-npm run build
-npm version <major|minor|patch>
-git push origin main --follow-tags
+npm run release:check
+npm version patch
+git push foxnio foxnio --follow-tags
 ```
 
-`npm version` updates `package.json` and `package-lock.json`, creates a commit,
-and creates a `v<version>` tag. Review the generated commit before pushing.
+Use `npm version minor` or `npm version major` when appropriate. `npm version`
+updates `package.json` and `package-lock.json`, creates a commit, and creates a
+`v<version>` tag. Review the generated commit before pushing.
 
-Pushing the tag starts the `Publish npm package` workflow. It checks out that
-immutable tag, verifies the tag matches `package.json`, installs from the
-lockfile, runs tests and the production build, then creates a draft GitHub
-Release with generated notes. It publishes `foxnio` through the configured
-trusted publisher and makes that release public only after npm accepts the
-package. A rerun can safely finish a release if npm has already accepted its
-version.
+Pushing the tag starts both release workflows. The package workflow skips an
+already-published version, so a rerun can safely finish publishing the GitHub
+Release after a successful package publish. Discord release notifications are
+optional; set `DISCORD_RELEASES_WEBHOOK` only if they are wanted.
 
 ## Verify
 
+After authenticating to GitHub Packages when the package is private, verify the
+published version and metadata with:
+
 ```bash
 gh run list --repo telagod/foxnio-public --workflow publish.yml --limit 1
-npm view @telagod/foxnio@<version> version --registry https://registry.npmjs.org/
-npm view @telagod/foxnio@<version> --json --registry https://registry.npmjs.org/
+npm view @telagod/foxnio@<version> version --registry https://npm.pkg.github.com
+npm view @telagod/foxnio@<version> --json --registry https://npm.pkg.github.com
 ```
 
-Confirm the workflow succeeded, the exact package version resolves, and npm
-shows the expected provenance link.
+Confirm the workflow succeeded, the exact package version resolves from GitHub
+Packages, and the GitHub Release contains the expected notes and desktop assets.
