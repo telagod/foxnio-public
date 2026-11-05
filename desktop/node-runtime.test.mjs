@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import {
   isSupportedNodeVersion,
@@ -27,7 +28,7 @@ test("uses the packaged runtime before PATH", () => {
     "/opt/foxnio/resources/node/node",
     "/opt/foxnio/app/desktop/runtime/node/node",
     "/usr/bin/node",
-  ]);
+  ].map((candidate) => path.resolve(candidate)));
 });
 
 test("never accepts Electron as the Node runtime", () => {

@@ -31,6 +31,11 @@ export class UnresolvedSecretError extends Error {
   }
 }
 
+/** Name-based, so a route still recognizes the error when another copy of this module threw it (separate bundler layers, test loaders). */
+export function isUnresolvedSecretError(error: unknown): error is UnresolvedSecretError {
+  return error instanceof UnresolvedSecretError || (error instanceof Error && error.name === "UnresolvedSecretError");
+}
+
 /** Replace every non-empty value whose name is sensitive with the placeholder. */
 export function maskStringRecord(record: Record<string, unknown>, isSensitive: (name: string) => boolean): Record<string, unknown> {
   return Object.fromEntries(Object.entries(record).map(([name, value]) => [

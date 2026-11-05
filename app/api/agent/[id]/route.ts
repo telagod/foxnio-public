@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError, webRpcErrorStatus } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, resolveSpawnCwdResult, isWebRpcError, webRpcErrorStatus } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -36,7 +36,7 @@ function commandErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
-  if (error instanceof WebRpcError) {
+  if (isWebRpcError(error)) {
     return NextResponse.json({ error: error.message, code: error.code }, { status: webRpcErrorStatus(error) });
   }
   if (error instanceof RpcCommandError) {
@@ -166,7 +166,7 @@ export async function GET(
       const state = await session.send({ type: "get_state" });
       return NextResponse.json({ running: true, state, toolPreset: session.toolPreset });
     } catch (error) {
-      if (error instanceof WebRpcError && error.code === "session_unresponsive") {
+      if (isWebRpcError(error) && error.code === "session_unresponsive") {
         return NextResponse.json({ running: false, recovered: true });
       }
       throw error;

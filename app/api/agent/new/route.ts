@@ -4,7 +4,7 @@ import { existsSync } from "fs";
 import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
-import { WebRpcError, startRpcSession, webRpcErrorStatus } from "@/lib/rpc-manager";
+import { isWebRpcError, startRpcSession, webRpcErrorStatus } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -18,10 +18,10 @@ function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
-  if (error instanceof WebRpcError || error instanceof RpcCommandError) {
+  if (isWebRpcError(error) || error instanceof RpcCommandError) {
     return NextResponse.json(
-      { error: error.message, code: error instanceof WebRpcError ? error.code : (error.code ?? "rpc_command_failed") },
-      { status: error instanceof WebRpcError ? webRpcErrorStatus(error) : 400 },
+      { error: error.message, code: isWebRpcError(error) ? error.code : (error.code ?? "rpc_command_failed") },
+      { status: isWebRpcError(error) ? webRpcErrorStatus(error) : 400 },
     );
   }
   return apiErrorResponse(error);

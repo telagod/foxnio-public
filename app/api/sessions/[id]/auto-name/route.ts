@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
-import { getRpcSession, resolveSpawnCwdResult, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getRpcSession, resolveSpawnCwdResult, startRpcSession, isWebRpcError } from "@/lib/rpc-manager";
 import { invalidateSessionCaches, readSessionHeader } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 
@@ -48,7 +48,7 @@ export async function POST(
       } catch (error) {
         // A busy/restarting session reports a typed error the UI can show; any
         // other failure degrades to the fallback below.
-        if (error instanceof WebRpcError) {
+        if (isWebRpcError(error)) {
           return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
         }
       }

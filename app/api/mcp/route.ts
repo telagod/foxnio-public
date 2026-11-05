@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { WebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { isWebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
@@ -19,7 +19,7 @@ function mcpErrorResponse(error: unknown) {
 /** Stable client-safe message for the GET liveError field: raw child-process
  *  errors (spawn failures, stderr tails) must not reach the browser. */
 function sanitizeMcpLiveError(error: unknown): string {
-  if (error instanceof WebRpcError || error instanceof RpcCommandError) {
+  if (isWebRpcError(error) || error instanceof RpcCommandError) {
     return error.message;
   }
   console.error("[api/mcp] live server list failed:", error);
@@ -166,6 +166,6 @@ export async function PATCH(request: Request) {
     await session.changeMcp(body.action, typeof body.name === "string" ? body.name : undefined);
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: sanitizeMcpLiveError(error) }, { status: error instanceof WebRpcError && error.code === "session_busy" ? 409 : 400 });
+    return NextResponse.json({ error: sanitizeMcpLiveError(error) }, { status: isWebRpcError(error) && error.code === "session_busy" ? 409 : 400 });
   }
 }

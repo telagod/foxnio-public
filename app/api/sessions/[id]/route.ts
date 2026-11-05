@@ -27,12 +27,12 @@ import {
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
-import { clearExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { clearExitedRpcSession, getRpcSession, isWebRpcError, WebRpcError } from "@/lib/rpc-manager";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
 function sessionsErrorResponse(error: unknown): NextResponse {
-  if (error instanceof WebRpcError && error.code === "session_busy") {
+  if (isWebRpcError(error) && error.code === "session_busy") {
     return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
   }
   if (error instanceof SessionFileTooLargeError) {
@@ -285,7 +285,7 @@ export async function PATCH(
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
       } catch (error) {
-        if (error instanceof WebRpcError && error.code === "session_busy") throw error;
+        if (isWebRpcError(error) && error.code === "session_busy") throw error;
         // Fall back to the on-disk title slot below.
       }
     }

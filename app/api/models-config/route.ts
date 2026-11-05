@@ -12,7 +12,7 @@ import {
   writeModelsConfig,
   type ModelsFileConfig,
 } from "@/lib/omp/models-config";
-import { UnresolvedSecretError } from "@/lib/secret-mask";
+import { isUnresolvedSecretError } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -73,7 +73,7 @@ export async function PUT(req: Request) {
       config = restoreModelsConfigSecrets(body.config as ModelsFileConfig, current.config, renamedFrom);
       validateModelsConfig(config);
     } catch (error) {
-      const code = error instanceof UnresolvedSecretError ? error.code : undefined;
+      const code = isUnresolvedSecretError(error) ? error.code : undefined;
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) }, { status: 400 });
     }
     try {

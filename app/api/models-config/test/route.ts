@@ -11,7 +11,7 @@ import {
   validateModelsConfig,
 } from "@/lib/omp/models-config";
 import { type OmpModel, runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
-import { UnresolvedSecretError } from "@/lib/secret-mask";
+import { isUnresolvedSecretError } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
       config = restoreModelsConfigSecrets(candidate, readModelsConfigFile().config, { [providerName]: originalName }) as typeof candidate;
       validateModelsConfig(config);
     } catch (error) {
-      const code = error instanceof UnresolvedSecretError ? error.code : undefined;
+      const code = isUnresolvedSecretError(error) ? error.code : undefined;
       return NextResponse.json({ ok: false, error: errorMessage(error), ...(code ? { code } : {}) });
     }
 

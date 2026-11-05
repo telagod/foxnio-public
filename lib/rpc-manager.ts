@@ -147,6 +147,11 @@ export function webRpcErrorStatus(error: WebRpcError): number {
   return WEB_RPC_ERROR_STATUS[error.code] ?? 400;
 }
 
+/** Name-based, so a route still recognizes an error thrown by another copy of this module (separate bundler layers, test loaders). */
+export function isWebRpcError(error: unknown): error is WebRpcError {
+  return error instanceof WebRpcError || (error instanceof Error && error.name === "WebRpcError");
+}
+
 /** Entries of a set_host_tools / set_host_uri_schemes payload. A missing list is an empty registration; anything else must be a list of objects. */
 function hostRegistrationEntries(value: unknown, field: string): Array<Record<string, unknown>> {
   if (value === undefined) return [];

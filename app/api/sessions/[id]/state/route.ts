@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getExitedRpcSession, getRpcSession, isWebRpcError } from "@/lib/rpc-manager";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 export async function GET(
@@ -17,7 +17,7 @@ export async function GET(
         const state = await rpc.send({ type: "get_state" });
         return NextResponse.json({ running: true, state, toolPreset: rpc.toolPreset });
       } catch (error) {
-        if (error instanceof WebRpcError && error.code === "session_unresponsive") {
+        if (isWebRpcError(error) && error.code === "session_unresponsive") {
           return NextResponse.json({ running: false, recovered: true });
         }
         throw error;

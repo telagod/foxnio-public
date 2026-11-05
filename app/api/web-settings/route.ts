@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
 import { agentEnvRevision, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
-import { isSensitiveEnvName, maskStringRecord, restoreStringRecord, UnresolvedSecretError } from "@/lib/secret-mask";
+import { isSensitiveEnvName, isUnresolvedSecretError, maskStringRecord, restoreStringRecord } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -88,7 +88,7 @@ export async function PUT(req: Request) {
     try {
       patch.agentEnv = restoreStringRecord(parsed.values, loadWebServerSettings().agentEnv, "agentEnv") as Record<string, string>;
     } catch (error) {
-      if (!(error instanceof UnresolvedSecretError)) throw error;
+      if (!isUnresolvedSecretError(error)) throw error;
       return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
     }
   }
