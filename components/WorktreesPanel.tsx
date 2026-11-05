@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { Check, GitFork, Plus, Trash2 } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { displayCwd, type WorktreeContext } from "./SessionSidebar-helpers";
-import { PathLabel } from "./SessionSidebar-chrome";
+import { displayCwd } from "@/lib/display-cwd";
+import type { WorktreeContext } from "@/lib/worktree-context";
+import { PathLabel } from "./PathLabel";
 
 /** File-panel Worktrees tab: the active Git workspace's worktrees — the only
  *  place to switch, create, and remove them. Switching moves the sidebar's

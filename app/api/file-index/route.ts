@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import {
@@ -11,9 +9,7 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, parseResultLimit, type FileIndexEntry } from "@/lib/file-fuzzy";
-import { createChildProcessEnvironment } from "@/lib/project-command-env";
-
-const execFileAsync = promisify(execFile);
+import { execGit } from "@/lib/git-command";
 
 // Same skip lists as /api/files — only used for the non-git readdir fallback.
 // Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
@@ -82,19 +78,15 @@ function loadListing(cwd: string): Promise<FileListing> {
 
 async function listWithGit(cwd: string): Promise<FileListing | null> {
   try {
-    const gitOptions = {
-      timeout: 10_000,
-      maxBuffer: 64 * 1024 * 1024,
-      env: createChildProcessEnvironment({ LC_ALL: "C" }),
-    };
+    const gitOptions = { timeout: 10_000, maxBuffer: 64 * 1024 * 1024 };
     // --cached lists index entries, including files already removed from the
     // working tree. Those would show up as results that 404 the moment anyone
     // opens them, so subtract what git reports as deleted. That query is
     // auxiliary: a stale-but-complete listing beats throwing away the git
     // listing over it, which would fall back to the depth-capped readdir walk.
     const [listed, deleted] = await Promise.all([
-      execFileAsync("git", ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], gitOptions),
-      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions).catch(() => null),
+      execGit(cwd, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], gitOptions),
+      execGit(cwd, ["ls-files", "--deleted", "-z"], gitOptions).catch(() => null),
     ]);
     const missing = new Set((deleted?.stdout ?? "").split("\0").filter(Boolean));
     const all = listed.stdout.split("\0").filter((file) => file && !missing.has(file));

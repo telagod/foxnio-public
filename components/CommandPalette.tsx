@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Command } from "cmdk";
 import { Check, MessageSquare, Monitor, Moon, Plus, Sparkles, Sun } from "lucide-react";
@@ -8,6 +8,12 @@ import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { ALL_THEMES, useTheme } from "@/hooks/useTheme";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { useSessionStoreSelector } from "@/hooks/useSessionStore";
+import type { SessionStoreSnapshot } from "@/lib/session-store";
+
+const selectSessions = (snapshot: SessionStoreSnapshot) => snapshot.sessions;
+const selectSessionsLoading = (snapshot: SessionStoreSnapshot) => snapshot.sessionsStatus === "loading";
+
 type Props = {
   onSelectSession: (session: SessionInfo) => void;
   onNewSession: () => void;
@@ -33,32 +39,9 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
   useEffect(() => {
     if (openRequest > 0) setOpen(true);
   }, [openRequest]);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loading, setLoading] = useState(false);
-  const loadSeqRef = useRef(0);
+  const sessions = useSessionStoreSelector(selectSessions);
+  const loading = useSessionStoreSelector(selectSessionsLoading);
   const lastFocusedElementRef = useRef<HTMLElement | null>(null);
-
-  const loadSessions = useCallback(() => {
-    // Sequence-guard: open→close→reopen within one RTT must not let response
-    // #1 clobber #2 or drop the spinner early.
-    const seq = ++loadSeqRef.current;
-    setLoading(true);
-    void fetch("/api/sessions")
-      .then((response) => response.ok ? response.json() as Promise<{ sessions?: SessionInfo[] }> : Promise.reject(new Error("request failed")))
-      .then((data) => {
-        if (seq !== loadSeqRef.current) return;
-        setSessions(data.sessions ?? []);
-      })
-      .catch(() => {
-        if (seq !== loadSeqRef.current) return;
-        setSessions([]);
-      })
-      .finally(() => {
-        if (seq !== loadSeqRef.current) return;
-        setLoading(false);
-      });
-  }, []);
-
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -84,7 +67,6 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
     }
   }, [open]);
 
-  useEffect(() => { if (open) loadSessions(); }, [open, loadSessions]);
   if (!open || typeof document === "undefined") return null;
 
   const choose = (action: () => void) => { action(); setOpen(false); };

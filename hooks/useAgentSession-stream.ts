@@ -270,6 +270,48 @@ export const BASH_STATE_RECONCILE_MS = 1_000;
 // streams in; the only way their transcript advances is an explicit sync poll.
 // Fast enough to look live, far slower than the SSE path it stands in for.
 export const EXTERNAL_RUN_POLL_MS = 2_000;
+// While the event stream is open and delivered a frame this recently, frames
+// are authoritative and the healing polls (reconcile, catch-up) stay quiet.
+export const STREAM_FRESH_MS = 5_000;
+// Granularity of the local "is a healing poll due?" check, and the wait after
+// the first poll of a quiet stream; each further poll that finds it still
+// quiet doubles the wait, up to AGENT_STATE_RECONCILE_MS.
+export const RECONCILE_BACKOFF_MIN_MS = 2_000;
+// omp's tokensPerSecond / usage limit exist only in get_state, never in frames.
+export const AGENT_GAUGE_SAMPLE_MS = 4_000;
+
+/** Wait before the healing poll that follows `quietPolls` consecutive polls of a quiet stream. */
+export function reconcileDelayMs(quietPolls: number): number {
+  return Math.min(RECONCILE_BACKOFF_MIN_MS * 2 ** quietPolls, AGENT_STATE_RECONCILE_MS);
+}
+
+/**
+ * Calls `run` every `intervalMs`, but only while the tab is visible: the timer
+ * is cleared when the tab hides, and `run` fires once as soon as it is visible
+ * again before the interval resumes. Returns the stop function.
+ */
+export function startVisiblePoll(run: () => void, intervalMs: number): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  const pause = () => {
+    clearInterval(timer);
+    timer = undefined;
+  };
+  const onVisibility = () => {
+    if (document.hidden) {
+      pause();
+    } else if (timer === undefined) {
+      run();
+      timer = setInterval(run, intervalMs);
+    }
+  };
+  if (!document.hidden) timer = setInterval(run, intervalMs);
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    pause();
+    document.removeEventListener("visibilitychange", onVisibility);
+  };
+}
+
 // A tail that stopped growing is not a live foreign run any more (its omp died,
 // or the run was interrupted between a tool call and its result). Stop polling;
 // the cheap heuristic below re-arms the poll if the transcript grows again.

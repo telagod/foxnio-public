@@ -69,6 +69,9 @@ const nextConfig = (phase: string): NextConfig => {
     // earlier. Source maps in the browser bundle leak server path layout and
     // bloat downloads without helping end users of a published app.
     poweredByHeader: false,
+    // The app never uses next/image. With the optimizer on, /_next/image is a
+    // public fetch-and-resize endpoint; off, it answers 404.
+    images: { unoptimized: true },
     reactStrictMode: true,
     productionBrowserSourceMaps: false,
     // Next.js enables gzip/brotli compression for `next start` by default; no
@@ -94,11 +97,27 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "Referrer-Policy", value: "no-referrer" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
       ];
+      // The session export is a full HTML document produced from message
+      // text, raw HTML included. It runs in an opaque origin (sandbox without
+      // allow-same-origin) so its scripts cannot reach the app's cookie or
+      // APIs. The same overwrite rule applies, so the global CSP must not match
+      // it either; the route handler sets the same headers as a second layer.
+      const exportResponseHeaders = [
+        { key: "Content-Security-Policy", value: "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox" },
+        { key: "X-Content-Type-Options", value: "nosniff" },
+        { key: "X-Frame-Options", value: "DENY" },
+        { key: "Referrer-Policy", value: "no-referrer" },
+        { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+      ];
       const globalRule = {
-        // Everything except /api/files (negative lookahead, same pattern style
-        // as the proxy matcher).
-        source: "/((?!api/files/).*)",
+        // Everything except /api/files and the session export (negative
+        // lookahead, same pattern style as the proxy matcher).
+        source: "/((?!api/files/|api/sessions/[^/]+/export$).*)",
         headers: securityHeaders,
+      };
+      const exportRule = {
+        source: "/api/sessions/:id/export",
+        headers: exportResponseHeaders,
       };
       const fileRule = {
         source: "/api/files/:path*",
@@ -123,9 +142,9 @@ const nextConfig = (phase: string): NextConfig => {
 
       // Dev chunks have stable URLs whose content changes in place; caching
       // them immutably would serve stale module factories after a restart.
-      if (isDev) return [globalRule, fileRule, rootNoCacheRule];
+      if (isDev) return [globalRule, fileRule, exportRule, rootNoCacheRule];
 
-      return [globalRule, fileRule, staticImmutableRule, rootNoCacheRule];
+      return [globalRule, fileRule, exportRule, staticImmutableRule, rootNoCacheRule];
     },
     env: {
       NEXT_PUBLIC_APP_VERSION: version,

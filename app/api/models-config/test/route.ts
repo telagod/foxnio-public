@@ -5,10 +5,13 @@ import { join } from "path";
 import {
   type ModelDefinition,
   type ProviderConfig,
+  readModelsConfigFile,
+  restoreModelsConfigSecrets,
   serializeModelsConfig,
   validateModelsConfig,
 } from "@/lib/omp/models-config";
 import { type OmpModel, runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
+import { UnresolvedSecretError } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +28,7 @@ export async function POST(req: Request) {
   let tempDir: string | undefined;
 
   try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
+    const body = await req.json() as { providerName?: unknown; originalProviderName?: unknown; provider?: unknown; model?: unknown };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
     if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required", code: "provider_name_required" }, { status: 400 });
     if (!isRecord(body.provider)) return NextResponse.json({ ok: false, error: "provider is required", code: "provider_required" }, { status: 400 });
@@ -34,7 +37,13 @@ export async function POST(req: Request) {
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
     if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required", code: "model_id_required" }, { status: 400 });
 
-    const config = {
+    // The browser only ever holds SECRET_MASK for stored secrets; resolve them
+    // against models.yml so Test exercises the real key. `originalProviderName`
+    // is the name the provider has on disk when it was renamed in the editor.
+    const originalName = typeof body.originalProviderName === "string" && body.originalProviderName.trim()
+      ? body.originalProviderName.trim()
+      : providerName;
+    const candidate = {
       providers: {
         [providerName]: {
           ...(body.provider as ProviderConfig),
@@ -42,10 +51,13 @@ export async function POST(req: Request) {
         },
       },
     };
+    let config: typeof candidate;
     try {
+      config = restoreModelsConfigSecrets(candidate, readModelsConfigFile().config, { [providerName]: originalName }) as typeof candidate;
       validateModelsConfig(config);
     } catch (error) {
-      return NextResponse.json({ ok: false, error: errorMessage(error) });
+      const code = error instanceof UnresolvedSecretError ? error.code : undefined;
+      return NextResponse.json({ ok: false, error: errorMessage(error), ...(code ? { code } : {}) });
     }
 
     // Isolated throwaway agent dir: the spawned omp sees only this candidate

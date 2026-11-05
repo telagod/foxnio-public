@@ -10,6 +10,7 @@ import {
   loadSessionFile,
   MAX_SESSION_LOAD_BYTES,
   readSessionHeaderSync,
+  scanSessionInfo,
   resolveBlobRefsInEntries,
   type OmpSessionInfo,
   type ResolveBlobOptions,
@@ -35,6 +36,12 @@ import { PASSIVE_TOOL_CONTEXT } from "./chat-transcript-plan";
 
 export { getAgentDir };
 
+/** How a session header's `parentSession` is turned into a parent session id. */
+interface ParentIndex {
+  idForPath(path: string): string | undefined;
+  hasId(id: string): boolean;
+}
+
 /**
  * `header.parentSession` has two forms in omp: a session FILE PATH (branch /
  * createBranchedSession, the RPC path omp-web drives) and a bare SESSION ID
@@ -42,14 +49,46 @@ export { getAgentDir };
  * Resolve the path form first, then fall back to an id match, so TUI-forked
  * sessions are not rendered as unrelated roots.
  */
-function matchParentSessionId(
-  parentSession: string,
-  pathToId: Map<string, string>,
-  knownIds: Set<string>,
-): string | undefined {
-  const byPath = pathToId.get(sessionPathKey(parentSession));
-  if (byPath) return byPath;
-  return knownIds.has(parentSession) ? parentSession : undefined;
+function matchParentSessionId(parentSession: string, parents: ParentIndex): string | undefined {
+  return parents.idForPath(parentSession) ?? (parents.hasId(parentSession) ? parentSession : undefined);
+}
+
+/** The one place an on-disk scan becomes a list entry, shared by the full list and the by-id lookup. */
+function toSessionInfo(s: OmpSessionInfo, project: ProjectInfo | undefined, parents: ParentIndex): SessionInfo {
+  return {
+    path: s.path,
+    id: s.id,
+    cwd: s.cwd,
+    // omp renamed the display field to `title`; the internal shape keeps `name`.
+    name: s.title,
+    created: s.created instanceof Date && !Number.isNaN(s.created.getTime())
+      ? s.created.toISOString()
+      : s.modified.toISOString(),
+    modified: s.modified.toISOString(),
+    ...(s.lastMessageAt ? { lastMessageAt: s.lastMessageAt.toISOString() } : {}),
+    messageCount: s.messageCount,
+    firstMessage: s.firstMessage || "(no messages)",
+    parentSessionId: s.parentSessionPath ? matchParentSessionId(s.parentSessionPath, parents) : undefined,
+    projectRoot: project?.projectRoot ?? s.cwd,
+    projectKey: projectIdentityKey(project?.projectRoot ?? s.cwd),
+    ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
+  };
+}
+
+/** Resolve each unique cwd to its project root (main repo shared by all
+ *  worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
+ *  Bound concurrency so 100+ unique cwds don't spawn 100 parallel git processes. */
+async function resolveProjectsByCwd(ompSessions: readonly OmpSessionInfo[]): Promise<Map<string, ProjectInfo>> {
+  const uniqueCwds = [...new Set(ompSessions.map((s) => s.cwd).filter(Boolean))];
+  const projectByCwd = new Map<string, ProjectInfo>();
+  const CONCURRENCY = 6;
+  for (let i = 0; i < uniqueCwds.length; i += CONCURRENCY) {
+    const chunk = uniqueCwds.slice(i, i + CONCURRENCY);
+    await Promise.all(chunk.map(async (cwd) => {
+      projectByCwd.set(cwd, await resolveProject(cwd));
+    }));
+  }
+  return projectByCwd;
 }
 
 async function loadAllSessions(): Promise<SessionInfo[]> {
@@ -60,44 +99,87 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
     pathToId.set(sessionPathKey(s.path), s.id);
     knownIds.add(s.id);
   }
+  const parents: ParentIndex = {
+    idForPath: (path) => pathToId.get(sessionPathKey(path)),
+    hasId: (id) => knownIds.has(id),
+  };
 
-  // Resolve each unique cwd to its project root (main repo shared by all
-  // worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
-  // Bound concurrency so 100+ unique cwds don't spawn 100 parallel git processes.
-  const uniqueCwds = [...new Set(ompSessions.map((s) => s.cwd).filter(Boolean))];
-  const projectByCwd = new Map<string, ProjectInfo>();
-  const CONCURRENCY = 6;
-  for (let i = 0; i < uniqueCwds.length; i += CONCURRENCY) {
-    const chunk = uniqueCwds.slice(i, i + CONCURRENCY);
-    await Promise.all(chunk.map(async (cwd) => {
-      projectByCwd.set(cwd, await resolveProject(cwd));
-    }));
-  }
-
+  const projectByCwd = await resolveProjectsByCwd(ompSessions);
   return ompSessions.map((s) => {
     cacheSessionPath(s.id, s.path);
-    const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
-    return {
-      path: s.path,
-      id: s.id,
-      cwd: s.cwd,
-      // omp renamed the display field to `title`; the internal shape keeps `name`.
-      name: s.title,
-      created: s.created instanceof Date && !Number.isNaN(s.created.getTime())
-        ? s.created.toISOString()
-        : s.modified.toISOString(),
-      modified: s.modified.toISOString(),
-      ...(s.lastMessageAt ? { lastMessageAt: s.lastMessageAt.toISOString() } : {}),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage || "(no messages)",
-      parentSessionId: s.parentSessionPath
-        ? matchParentSessionId(s.parentSessionPath, pathToId, knownIds)
-        : undefined,
-      projectRoot: project?.projectRoot ?? s.cwd,
-      projectKey: projectIdentityKey(project?.projectRoot ?? s.cwd),
-      ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
-    };
+    return toSessionInfo(s, s.cwd ? projectByCwd.get(s.cwd) : undefined, parents);
   });
+}
+
+/** Requested ids, split into the sessions that exist (list order: newest first) and the ones with no file. */
+export interface SessionsByIds {
+  sessions: SessionInfo[];
+  missing: string[];
+}
+
+/**
+ * The list entries of just these sessions, without walking the sessions tree.
+ *
+ * Cheap path: every id resolves through the session path cache (filled by the
+ * last full list and by live sessions), the file is scanned with the same
+ * scanner as the list and projects come from the per-cwd project cache. A
+ * cached path whose file is gone is a definitive "missing".
+ *
+ * Falls back to the normal list (cached, coalesced; `listAllSessions`) and
+ * filters it, so the answer is the list's own objects, when an id cannot be
+ * located cheaply: an id the path cache has never seen (a new session), a file
+ * whose header id differs from the cached one, or a session with a parent link
+ * the caches cannot resolve (the list is the authority on orphans).
+ */
+export async function listSessionsByIds(ids: readonly string[]): Promise<SessionsByIds> {
+  const wanted = new Set(ids);
+  const fromList = async (): Promise<SessionsByIds> => {
+    const sessions = (await listAllSessions()).filter((s) => wanted.has(s.id));
+    const present = new Set(sessions.map((s) => s.id));
+    return { sessions, missing: [...wanted].filter((id) => !present.has(id)) };
+  };
+
+  const pathCache = getPathCache();
+  const found: OmpSessionInfo[] = [];
+  const missing: string[] = [];
+  for (const id of wanted) {
+    const cached = pathCache.get(id);
+    if (!cached) return fromList();
+    if (!existsSync(cached)) {
+      invalidateSessionPathCache(id);
+      missing.push(id);
+      continue;
+    }
+    const info = scanSessionInfo(cached);
+    if (!info) {
+      missing.push(id);
+      continue;
+    }
+    if (info.id !== id) return fromList();
+    found.push(info);
+  }
+
+  const hasId = (id: string): boolean => {
+    const path = pathCache.get(id);
+    return path !== undefined && existsSync(path);
+  };
+  const parents: ParentIndex = {
+    idForPath: (path) => {
+      const id = getPathToIdCache().get(sessionPathKey(path));
+      return id !== undefined && hasId(id) ? id : undefined;
+    },
+    hasId,
+  };
+  if (found.some((s) => s.parentSessionPath && matchParentSessionId(s.parentSessionPath, parents) === undefined)) {
+    return fromList();
+  }
+
+  found.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+  const projectByCwd = await resolveProjectsByCwd(found);
+  return {
+    sessions: found.map((s) => toSessionInfo(s, s.cwd ? projectByCwd.get(s.cwd) : undefined, parents)),
+    missing,
+  };
 }
 
 export async function listAllSessions(): Promise<SessionInfo[]> {

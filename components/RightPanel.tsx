@@ -23,7 +23,7 @@ import { FileViewer } from "./FileViewer";
 import { NotificationActions, NotificationList } from "./NotificationList";
 import { useUnreadNotificationCount } from "@/lib/notification-history";
 import { WorktreesPanel } from "./WorktreesPanel";
-import type { WorktreeContext } from "./SessionSidebar-helpers";
+import type { WorktreeContext } from "@/lib/worktree-context";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
 

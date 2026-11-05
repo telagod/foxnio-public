@@ -7,6 +7,7 @@
 // Call sites previously repeated the same 5-line fetch block 13× in
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
+import { translate } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import type { AdvisorChoice } from "@/lib/advisor-default";
 
@@ -33,18 +34,24 @@ export async function sendAgentCommand<T = unknown>(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(command),
   });
-  const body = (await res.json().catch(() => ({}))) as {
+  // `null` = the body was not JSON at all (a login page served by a proxy
+  // after the session expired, a gateway error page, ...).
+  const body = (await res.json().catch(() => null)) as {
     success?: boolean;
     data?: T;
     error?: string;
     code?: string;
-  };
-  if (!res.ok || body.error) {
+  } | null;
+  if (!res.ok || body?.error) {
     // Routes attach a stable `code` for well-known failures; these messages are
     // surfaced to the user as notices, so localize before throwing.
     throw new Error(
-      body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`,
+      body?.error || body?.code ? formatApiError(body) : `HTTP ${res.status}`,
     );
   }
+  // Every successful route answers `{ success: true, data }`. Anything else
+  // with a 2xx status did not come from the agent route, so the command was
+  // not accepted and callers must not report it as sent.
+  if (body?.success !== true) throw new Error(translate("agentSession.invalidResponse"));
   return body.data as T;
 }

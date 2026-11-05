@@ -158,3 +158,74 @@ export function openEventStream(channel: EventStreamChannel): EventStream {
   transport ??= connectTransport();
   return transport.open(channel);
 }
+
+/** Capped exponential delay between reopen attempts of a CLOSED stream. */
+export interface ReconnectBackoff {
+  minMs: number;
+  maxMs: number;
+}
+
+export const DEFAULT_RECONNECT_BACKOFF: ReconnectBackoff = { minMs: 1_000, maxMs: 30_000 };
+
+/** Delay before the reopen that follows `failures` consecutive CLOSED streams (0 = first). */
+export function reconnectDelayMs(failures: number, backoff: ReconnectBackoff = DEFAULT_RECONNECT_BACKOFF): number {
+  return Math.min(backoff.minMs * 2 ** failures, backoff.maxMs);
+}
+
+export interface ResilientEventStreamOptions {
+  backoff?: ReconnectBackoff;
+  /** Called each time the stream reaches OPEN (the first open and every reopen). */
+  onOpen?: () => void;
+  /** Called when a stream turns CLOSED, before the reopen is scheduled: drop
+   *  state derived from frames that will no longer be refreshed. */
+  onLost?: () => void;
+  /** Stream factory; defaults to `openEventStream`. */
+  open?: (channel: EventStreamChannel) => EventStream;
+}
+
+/**
+ * Subscribe to a channel for as long as the caller lives. A CLOSED stream is
+ * fatal for the stream object (auth expiry, 429/5xx on the open request,
+ * worker failure), so this opens a new one after a capped exponential
+ * backoff, reset by every successful open. CONNECTING errors are left alone:
+ * the stream reconnects itself. Returns the stop function; after it runs no
+ * stream stays open and no timer stays armed.
+ */
+export function openResilientEventStream(
+  channel: EventStreamChannel,
+  onFrame: (data: string) => void,
+  options: ResilientEventStreamOptions = {},
+): () => void {
+  const { backoff = DEFAULT_RECONNECT_BACKOFF, onOpen, onLost, open = openEventStream } = options;
+  let stopped = false;
+  let failures = 0;
+  let source: EventStream | null = null;
+  let timer: NodeJS.Timeout | undefined;
+
+  const connect = () => {
+    timer = undefined;
+    const stream = open(channel);
+    source = stream;
+    stream.onopen = () => {
+      failures = 0;
+      onOpen?.();
+    };
+    stream.onmessage = (event) => onFrame(event.data);
+    stream.onerror = () => {
+      if (stopped || source !== stream || stream.readyState !== EVENT_STREAM_CLOSED) return;
+      source = null;
+      onLost?.();
+      timer = setTimeout(connect, reconnectDelayMs(failures, backoff));
+      failures += 1;
+    };
+  };
+  connect();
+
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+    timer = undefined;
+    source?.close();
+    source = null;
+  };
+}

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync } from "fs";
+import { existsSync, mkdirSync, renameSync, statSync } from "fs";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, join } from "path";
 import { readModelsConfig, type ModelsFileConfig } from "./omp/models-config";
@@ -116,6 +116,58 @@ function migrateUsageDatabase(db: DatabaseSync): void {
   }
 }
 
+/** SQLite reports a damaged or non-SQLite file as SQLITE_NOTADB (26) or SQLITE_CORRUPT (11). */
+function isCorruptDatabaseError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { errcode, message } = error as { errcode?: unknown; message?: unknown };
+  if (typeof errcode === "number") return (errcode & 0xff) === 26 || (errcode & 0xff) === 11;
+  return typeof message === "string" && /not a database|malformed/i.test(message);
+}
+
+function initializeUsageDatabase(targetPath: string): DatabaseSync {
+  const db = new DatabaseSync(targetPath);
+  try {
+    // busy_timeout first: switching to WAL needs a lock another process may hold.
+    db.exec("PRAGMA busy_timeout = 5000;");
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA synchronous = NORMAL;");
+    migrateUsageDatabase(db);
+    return db;
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      // Preserve the initialization failure.
+    }
+    throw error;
+  }
+}
+
+/**
+ * Open and migrate the usage database. The file is only a cache of what the
+ * session files contain, so one that is not a valid database is set aside as
+ * `<name>.corrupt-<timestamp>` (with its WAL/SHM, which belong to it) and
+ * rebuilt from scratch instead of failing every usage request.
+ */
+function openUsageDatabaseFile(targetPath: string): DatabaseSync {
+  try {
+    return initializeUsageDatabase(targetPath);
+  } catch (error) {
+    if (!isCorruptDatabaseError(error)) throw error;
+    const suffix = `.corrupt-${Date.now()}`;
+    console.warn(`[omp-web] usage database is not valid (${error instanceof Error ? error.message : String(error)}); moving it to ${targetPath}${suffix} and rebuilding`);
+    try {
+      renameSync(targetPath, `${targetPath}${suffix}`);
+      for (const sidecar of ["-wal", "-shm"]) {
+        if (existsSync(`${targetPath}${sidecar}`)) renameSync(`${targetPath}${sidecar}`, `${targetPath}${suffix}${sidecar}`);
+      }
+    } catch {
+      throw error;
+    }
+    return initializeUsageDatabase(targetPath);
+  }
+}
+
 /**
  * Open or reuse the persistent SQLite database for usage tracking.
  */
@@ -148,16 +200,7 @@ export function getUsageDatabase(customPath?: string): DatabaseSync {
     mkdirSync(dir, { recursive: true });
   }
 
-  const db = new DatabaseSync(targetPath);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 5000;");
-  db.exec("PRAGMA synchronous = NORMAL;");
-  try {
-    migrateUsageDatabase(db);
-  } catch (err) {
-    db.close();
-    throw err;
-  }
+  const db = openUsageDatabaseFile(targetPath);
 
   globalThis.__ompUsageDatabase = db;
   globalThis.__ompUsageDatabasePath = targetPath;

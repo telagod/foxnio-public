@@ -60,7 +60,7 @@ Shared foundations in `lib/omp/`:
 
 ```
 app/api/
-  sessions/route.ts               GET  list all sessions
+  sessions/route.ts               GET  list all sessions (ETag/304); `?ids=a,b` returns only those sessions + `missing` (delta updates, max 100)
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
@@ -95,6 +95,7 @@ app/api/
   stt/[jobId]/route.ts            GET job state | POST retry with kept audio | DELETE ?claim= claim/discard
   stt/[jobId]/audio/route.ts      GET the kept recording (audio/* only) for playback
   worktrees/route.ts              GET/POST/DELETE git worktrees
+  session-ui/route.ts             GET/PATCH { pin?, unpin? } — pinned sessions (server-side, shared by every device)
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
@@ -139,10 +140,24 @@ lib/
   navigation-history.ts  pure back/forward view-history stack + shortcut matcher (⌘[/⌘], Alt+←/→)
   word-prediction.ts   pure ghost-text arithmetic (advance/accept) for composer word prediction
   worktree.ts          project/worktree resolution and git worktree operations
+  fs-atomic.ts         atomic file writes for omp/foxnio config: temp+rename in the same dir, keeps the target's mode (0600 for new files), writes through symlinks, never leaves temp files
+  git-command.ts      the one place that builds read-only git invocations (--no-optional-locks, --literal-pathspecs, core.fsmonitor=false, no textconv/ext-diff); use it for every read-only git call
+  jsonl-lines.ts      allocation-light JSONL scanner over raw buffers (transcript search)
+  login-throttle.ts   bounded in-memory failure backoff + concurrency cap for /api/web-auth/session
+  request-security.ts Origin + Host checks (loopback-only Host without a password; OMP_WEB_ALLOWED_HOSTS)
+  secret-mask.ts      SECRET_MASK sentinel + predicates: stored secrets are masked in GET responses and restored on PUT
+  session-store.ts    client data store (sessions, projects, running/exited, unread, recent runs, pins); owns the single `running` subscription; ETag + delta fetching
+  session-ui-state.ts server pins (`~/.omp/agent/omp-web/session-ui.json`) behind /api/session-ui
+  session-tree.ts     pure helpers: project keys/labels, display titles, relative time, fork tree
+  settings-patch.ts   patch semantics for native settings (clients send changed keys, never snapshots)
+  sidebar-*.ts        Sidebar v2: contract types, pure row model, persisted UI state, search controller, keyboard navigation (see 'Sidebar v2')
+  virtual-rows.ts     windowing math for the sidebar list
+  drawer-gesture.ts   pure drag/snap math for the mobile drawers
+  worktree-context.ts / display-cwd.ts  shared type/helper for the Worktrees tab and path labels
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  session tree + FileExplorer
+  sidebar/            Sidebar v2: container (Sidebar.tsx) + presentational SidebarView, virtual list, rows, menus (see 'Sidebar v2')
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
@@ -179,11 +194,24 @@ hooks/
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
+  useSessionStore.ts       selectors/lifecycle over lib/session-store.ts (the only place components read session data from)
+  useSidebarSearch.ts      sidebar search controller hook
+  useViewportHeight.ts     visualViewport → --app-viewport-height / html[data-keyboard-open]
+  useNativeSettingsPatches.ts  settings dialogs send patches with rollback
 ```
 
 ---
 
 ## Key Design Decisions & Traps
+
+### Security boundaries (read before touching auth, files, spawn or config writers)
+- The server runs `omp` agents with a shell, so anything that can call the API, or run script in the app origin, is code execution as the server user. Treat XSS, CSRF, Host spoofing, path escapes and argument injection as RCE.
+- `proxy.ts` order: Host check (only when no password hash is configured: loopback names plus `OMP_WEB_ALLOWED_HOSTS`, else 403 — blocks DNS rebinding), Origin check for `/api/*`, password / trusted-header / session cookie. `start:lan` goes through the launcher (non-loopback needs a password hash). Login: async scrypt, `lib/login-throttle.ts` (5 failures → lockout with backoff, at most 2 verifications in flight, 429).
+- Documents omp generates (`/api/sessions/[id]/export`) must never run on the app origin: they get `Content-Security-Policy: sandbox allow-scripts` from a dedicated `next.config.ts` rule (config headers overwrite route headers, so the global rule excludes that path). `/_next/image` is disabled (`images.unoptimized`); only `/_next/static/`, icons and `/sw.js` bypass the password gate (anchored in the matcher).
+- Secrets: omp/foxnio config files are written only through `lib/fs-atomic.ts` (keeps 0600). GET responses mask stored secrets with `SECRET_MASK` (`lib/secret-mask.ts`); PUT keeps the stored value when it receives the mask. `models.yml` PUT carries a `revision` (409 on mismatch, `models.yml.bak` kept); settings clients send patches (`lib/settings-patch.ts`). `PUT /api/omp-settings` is an allow-list of known keys.
+- Child processes: spawn through `createChildProcessEnvironment` (`lib/project-command-env.ts` strips PORT/NODE_ENV/NEXT_* and every `OMP_WEB_*_KEY|TOKEN|SECRET|PASSWORD|HASH`); read-only git through `lib/git-command.ts`; never pass user strings that start with `-` to a CLI (validate, use `--`).
+- `/api/files` credential deny-list (`isConfigRootCredentialPath`) covers omp/foxnio secret files and their SQLite sidecars, checked on the lexical AND the real path.
+- Web Push subscriptions accept only known push-service hosts (FCM, Mozilla, Apple, Windows) plus `OMP_WEB_PUSH_ALLOWED_HOSTS`; push errors in API responses are generic.
 
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
@@ -390,6 +418,7 @@ during the wait.
   CLOSED = fatal (e.g. 409 for a wrapper-less session; the chat hook then
   retries with backoff). Dead tabs are detected with a lifetime Web Lock —
   MessagePort has no close event.
+- Streams that must survive 401/429/5xx (host tools, notifications, running indicators) use `openResilientEventStream` (`lib/event-stream.ts`): capped exponential backoff, closes on unmount. The session store has its own recovery loop because it must also hand authority back to fetched snapshots on error.
 - Channels (`lib/event-stream-hub.ts`): `running` (sidebar badges +
   session-list hints), `notifications` (one tab's toasts and in-page system
   notifications, keyed by its `clientId`), `host-tools` (cross-session
@@ -404,8 +433,8 @@ during the wait.
   (which unmounts while Settings is open).
 
 ### Running state + reconciliation
-- The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
-- `useAgentSession` still treats its `session` channel as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
+- `lib/session-store.ts` holds the app's ONE `running` subscription (and `sessions-changed`). The sidebar, session tabs and command palette read from it via `useSessionStoreSelector`; components never fetch `/api/sessions` themselves.
+- `useAgentSession` treats its `session` channel as primary for chat events. While a run is active the repairing `GET /api/agent/[id]` is sent only when the tab is visible and the stream has delivered no frame for 5 s (then at 2, 4, 8 … 15 s, reset by any frame); coming back to the tab and `online` reconcile once. tokens/s and usage limits exist only in `get_state`, so a separate 4 s sampler runs while visible (one request in flight). This fixes missed `agent_end` events from background tabs or half-open connections without polling hidden tabs.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
@@ -520,7 +549,7 @@ during the wait.
 - Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
 - New worktrees are created under `<repoRoot>-worktrees/<sanitized-branch>`. Existing branches are reused; otherwise `git worktree add -b` creates the branch.
 - Removing a dirty worktree returns `409` with `{ dirty: true }` so the UI can ask before retrying with `force`.
-- The file panel's **Worktrees** tab (`components/WorktreesPanel.tsx`) switches, creates, and removes worktrees; the new-session screen's worktree `<select>` (AppShell, shown when the selected workspace has 2+ worktrees) only switches. `SessionSidebar` owns the per-repo worktree cache and the actions and emits them as a `WorktreeContext` (`onWorktreeContextChange`, null unless the active workspace is a Git top-level repo); AppShell hands it to both. Switching moves the sidebar's effective cwd (where a new session starts), not the open session.
+- The file panel's **Worktrees** tab (`components/WorktreesPanel.tsx`) switches, creates, and removes worktrees; the new-session screen's worktree `<select>` (AppShell, shown when the selected workspace has 2+ worktrees) only switches. The sidebar container (`components/sidebar/useSidebarWorktrees.ts`) owns the per-repo worktree cache and the actions and emits them as a `WorktreeContext` (`lib/worktree-context.ts`, `onWorktreeContextChange`, null unless the active workspace is a Git top-level repo); AppShell hands it to both. Switching moves the sidebar's effective cwd (where a new session starts), not the open session.
 - Explorer, Git, and file viewers use `explorerCwd` in AppShell: the open session's cwd first, then the sidebar's cwd, then the new-session cwd. Mention/copy-path helpers resolve relative paths against the same value.
 - Sessions whose cwd points at a removed worktree are inferred back into the main project instead of becoming a phantom project row.
 
@@ -547,14 +576,23 @@ during the wait.
   sort is active, rows get a pin toggle: pinned projects (`pinOrder` in the
   registry, pinned to the end of the group) lead in their own manual order and
   alone keep Move up/down and drag; pins are ignored under "None".
-  Expanded project paths live
-  in `localStorage` (`omp-web:expanded-projects`), defaulting to only the
-  active/restored project expanded, and stale keys are pruned against the
+  Expanded and explicitly collapsed project paths live in `localStorage`
+  (`omp-web:expanded-projects`, `omp-web:collapsed-projects`); the selected workspace is
+  open unless the user collapsed it, and stale keys are pruned against the
   current project list (only after the first project fetch — an empty
-  still-loading list must never wipe storage).
-- Each project's session tree is capped at 5 roots with a show-more toggle;
-  project rows are cards matching the session items' height/margins/accent
-  treatment. Rows show no worktree/branch selector (see the Worktrees tab).
+  still-loading list must never wipe storage). Rows show no worktree/branch
+  selector (see the Worktrees tab).
+
+### Sidebar v2 (`components/sidebar/`, `lib/sidebar-*.ts`, `lib/session-store.ts`)
+- Layers: `lib/session-store.ts` (data) → `lib/sidebar-model.ts` (pure rows) → `components/sidebar/SidebarView.tsx` (presentation, virtualized) ← `components/sidebar/Sidebar.tsx` (container: store, UI state, search, actions, dialogs, worktrees, `?session=` restore). Contract: `lib/sidebar-types.ts`. Props are the old `SessionSidebar` props minus `refreshKey` (call `store.refresh()`) plus `mobile`.
+- Rows are flat (`section | group | session | more | placeholder`) with one fixed height per kind and density (`SIDEBAR_ROW_HEIGHTS`; `compact` / `comfortable` / `touch`; touch for `(hover: none), (pointer: coarse)` or the "accessible" touch-target setting — headless Chromium reports `hover: none`, so patch `matchMedia` to see desktop density). `VirtualList` mounts the visible window + 240 px overscan + the focused / menu-open / renaming rows; keep per-row work independent of the total number of sessions.
+- Sections: **Active** (waiting / running / exited / unread across workspaces, hidden when empty), **Pinned** (server-side pins), **Workspaces**. "Waiting" is derived from the notification history (`sessionIdsWaitingForInput`). A session can appear in several sections (distinct row keys).
+- Watermark (from dsh): an open workspace shows its first 5 roots (fork children count as rows), raised so every running / waiting / unread / exited / selected session within the first 50 roots stays visible; "Show 20 more" adds rows (`ui.extraRows`, not persisted). Workspaces do not reorder on activity unless the sort is "Last updated"; `orderFrozen` freezes order while a new session is pending; a workspace you navigate away from stays open for the page's life (`stickyOpenProjects`, not persisted).
+- UI state: `lib/sidebar-ui-state.ts` (writes debounced 250 ms, flushed on `pagehide`; corrupt storage falls back to defaults).
+- Search: `lib/sidebar-search.ts`: instant local scoring (title, first message, workspace alias/label), then a 250 ms-debounced streaming `/api/sessions/search` (NDJSON `{ scores }`), aborted by every new query; total score is `max(local, server)`; at most 200 hits kept; per-session search fields are cached by id + modified + name + firstMessage. The route returns scores only, so rows have no snippet today.
+- Keyboard: `role="tree"` with roving tabindex (`lib/sidebar-keyboard.ts`): arrows, Home/End, Enter, F2, Delete, `p`, Shift+F10 / ContextMenu; `/` focuses search; `Mod+B` toggles the sidebar (drawer on mobile). Menus are popovers on pointer devices and bottom sheets on touch (long-press 500 ms). The sheet opens under the finger, so the click some browsers send when the finger lifts lands on its backdrop and would dismiss it; `SidebarList` swallows that one click at `window` capture (`consumeFired`) and any later press clears the exemption.
+- Mobile (AppShell, `hooks/useMobileSidebarGestures.ts`, `lib/drawer-gesture.ts`): the drawer is a `min(88vw, 360px)` sheet with a backdrop. It opens by dragging from the 24 px edge strip (`[data-drawer-edge]`, `touch-action: pan-y`; without it the browser cancels horizontal pointer streams), follows the finger (`--drawer-progress`, `data-dragging`) and snaps by position (> 40%) or velocity (>= 0.35 px/ms); the files panel uses the same engine. `useViewportHeight` publishes `--app-viewport-height` and `html[data-keyboard-open]` from `visualViewport`. Touch targets are >= 44 px (pseudo-element hit areas must not overlap neighbours). Styles: `app/sidebar.css` (`sb-` prefix) and the drawer rules in `app/globals.css`.
+- Data rules: `sessions-changed` frames update the store with `GET /api/sessions?ids=…` deltas (at least 1.5 s apart, one in flight); full reloads (ETag) are rate-limited to one per 5 s. Measured with 3000 sessions: a 20 s append storm on one session cost 15 small delta requests (before: 46 full 2.2 MB responses); the sidebar DOM stays ~430-590 nodes (before: 1472, and 9062 after expanding the largest workspace).
 
 ### Clone a repository as a new workspace (`/api/projects/clone`)
 - The Add-workspace `DirectoryPicker` takes an optional Git URL; "Clone here"
@@ -569,8 +607,7 @@ during the wait.
   disconnect cancels and cleans up too. An existing target is refused (409).
 
 ### File access allow-list
-- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
-- `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- `/api/files` serves anything under the allowed roots; the allow-list scopes what the UI browses, it is NOT a security boundary against an authenticated caller. Roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, the omp config roots, and every location made browsable with `allowFileRoot()` (`/api/cwd/validate`, `/api/default-cwd`, `/api/worktrees`, `/api/projects`, new sessions): picking `/` or `$HOME` makes everything under it readable. Credential files stay denied inside allowed roots (see Security boundaries).
 
 ### Session list caching — new sessions must appear immediately
 - `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL
@@ -583,6 +620,7 @@ during the wait.
   compaction, renames) must therefore ALSO clear the walk cache via
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
+- `GET /api/sessions?ids=` (delta) builds entries with the same builder as the full list (`toSessionInfo`), resolving ids through the path cache; unknown ids fall back to the cached full list.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
@@ -627,11 +665,14 @@ during the wait.
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
+- Installing `@telagod/foxnio` from GitHub Packages always needs a token and a scope mapping, even for a public package. The update worker therefore pre-flights `npm view <pkg>@<v>` (bun: `bun info`) BEFORE stopping anything and fails with a pointer to the scope/token setup; the target version must match `\d+.\d+.\d+(-[0-9A-Za-z.-]+)?`.
+- Restart strategy is detected in this order: systemd unit, an armed plain launcher (`lib/self-update.ts` arms it over IPC with ack; the worker stops only the server and the launcher stays alive), launchd / tray. A plain launcher restarts through `restart-request.json` (`protocol`, `action: "start"`, `generation`) and `complete.json` + `complete-ack.json`; a failed install restarts the previous release. The desktop app sets `OMP_WEB_DISABLE_AUTOUPDATE=1`.
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`, `get_logout_accounts`, `logout`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which foxnio never touches directly. `/api/auth/accounts/[provider]` lists stored accounts and removes one by `credentialId`; omp without those commands reports `supported: false` and the UI falls back to the read-only `omp usage` account list.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
+- Native settings clients (`SettingsConfig`, Providers tab) send patches and roll back on failure; `models.yml` / agent env / model roles are loaded with a `revision` (or merge on the server) and their editors stay read-only with a Retry button until a good load, so a failed GET can never be saved over real data.
 
 ### Navigate back / forward (`lib/navigation-history.ts`, `hooks/useNavigationHistory.ts`)
 - Browser-style back/forward over visited chat views (sessions + the new-chat
@@ -785,9 +826,10 @@ during the wait.
 - A crash notifies "Run failed" while a run is live or while background work
   started by it has not settled yet (`unsettled`, cleared by `session_settled`).
 - The Settings test button pushes through the server for subscribed devices
-  (502 with the push service's answer on failure) and shows a local
+  (502 with a generic status message on failure; details go to the server log) and shows a local
   notification otherwise, or a toast where none are allowed.
-- `/sw.js` and `/badge-96.png` are exempt from the password gate (`proxy.ts`):
+- Push subscriptions: https, port 443, no credentials, hostname on the push-service allow-list (FCM, Mozilla, Apple, Windows; extend with `OMP_WEB_PUSH_ALLOWED_HOSTS`); anything else is rejected at registration and dropped on read.
+- `/sw.js`, `/badge-96.png`, the browser icons and `/_next/static/` are exempt from the password gate (`proxy.ts` matcher, anchored):
   browsers re-fetch the worker for updates without the session cookie.
 - Notification clicks survive an expired sign-in: `proxy.ts` sends `/?session=…`
   to `/login?next=/?session=…`, and `LoginForm` returns there (only `/?…`

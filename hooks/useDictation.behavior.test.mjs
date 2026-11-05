@@ -158,6 +158,7 @@ beforeEach(() => {
   world.retries = 0;
   world.retryResponse = { ok: true, status: 200, json: async () => ({ status: "pending" }) };
   world.scopeJobs = [];
+  world.scopeLookups = 0;
   world.audioUrls = [];
   world.uploadGate = null;
   world.postedAfter = null;
@@ -166,7 +167,10 @@ beforeEach(() => {
   // Optional scripted claim answers (shifted per claim) before the default.
   world.claimResponses = [];
   override(globalThis, "fetch", async (url, init) => {
-    if (url.startsWith("/api/stt?scope=")) return { ok: true, status: 200, json: async () => ({ jobs: world.scopeJobs }) };
+    if (url.startsWith("/api/stt?scope=")) {
+      world.scopeLookups++;
+      return { ok: true, status: 200, json: async () => ({ jobs: world.scopeJobs }) };
+    }
     if (init?.method === "POST" && url === "/api/stt") {
       world.postedFiles.push(init.body.get("file"));
       world.postedAfter = init.body.get("after");
@@ -513,15 +517,25 @@ test("a job from another browser is not adopted over an active recording", async
   assert.equal(view.result.current.transcribeError, null);
 });
 
-test("a browser left open picks up a job started elsewhere without a focus change", async () => {
+test("an idle composer looks up its scope once, never on a timer, and again when the tab is refocused", async () => {
   world.pollResponses = [{ ok: true, status: 200, json: async () => ({ status: "done", text: "started elsewhere" }) }];
   const { transcripts } = mountDictation("session-1");
   await settle(50);
+  assert.equal(world.scopeLookups, 1, "mounting looks the scope up once");
   assert.deepEqual(transcripts, []);
 
+  // The old poll fired every 4 s while visible and idle, forever.
   world.scopeJobs = [{ id: "job-1", status: "pending" }];
-  await waitUntil(() => transcripts.length === 1, 6000);
+  await settle(4500);
+  assert.equal(world.scopeLookups, 1, "an idle composer with no job must not keep listing the scope");
+  assert.deepEqual(transcripts, []);
+
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  await waitUntil(() => transcripts.length === 1);
   assert.deepEqual(transcripts, ["started elsewhere"]);
+  assert.equal(world.scopeLookups, 2);
 });
 
 test("switching sessions stops following the old job without discarding it", async () => {
@@ -724,10 +738,106 @@ test("a job from another browser that vanishes stands down instead of erroring",
   await settle(50);
 
   world.scopeJobs = [{ id: "job-1", status: "pending" }];
-  await waitUntil(() => world.polls >= 1, 6000);
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  await waitUntil(() => world.polls >= 1);
 
   assert.deepEqual(errors, []);
   assert.equal(world.polls, 1, "a 404 is final, not a poll until the deadline");
   assert.equal(view.result.current.isTranscribing, false);
   assert.equal(view.result.current.transcribeError, null);
 });
+
+function deferredStream() {
+  let resolve;
+  const promise = new Promise((yes) => { resolve = yes; });
+  const track = new FakeTrack();
+  override(navigator, "mediaDevices", { getUserMedia: () => promise });
+  return { track, arrive: () => resolve({ getTracks: () => [track] }) };
+}
+
+test("a microphone granted after the composer unmounted is released and never records", async () => {
+  const mic = deferredStream();
+  const { view, errors } = mountDictation("session-1");
+  await act(async () => {
+    void view.result.current.start();
+  });
+  view.unmount();
+  mic.arrive();
+  await settle(50);
+
+  assert.equal(mic.track.stopped, true, "the late stream's tracks must be stopped");
+  assert.equal(world.recorders.length, 0, "no recorder may start on a dead composer");
+  assert.deepEqual(errors, []);
+});
+
+test("cancelling while the microphone permission is pending keeps the late stream from recording", async () => {
+  const mic = deferredStream();
+  const { view } = mountDictation("session-1");
+  await act(async () => {
+    void view.result.current.start();
+  });
+  await act(async () => {
+    view.result.current.cancel();
+  });
+  mic.arrive();
+  await settle(50);
+
+  assert.equal(mic.track.stopped, true);
+  assert.equal(world.recorders.length, 0);
+  assert.equal(view.result.current.isRecording, false);
+});
+
+for (const [how, endMicrophone] of [
+  ["the recorder stops itself", () => world.recorders[0].stop()],
+  ["the microphone track ends", () => world.tracks[0].onended()],
+]) {
+  test(`when ${how} (device unplugged) the recording ends and a new one can start`, async () => {
+    const { view, errors } = mountDictation("session-1");
+    await act(async () => {
+      view.result.current.toggle();
+    });
+    await settle();
+    assert.equal(view.result.current.isRecording, true);
+
+    await act(async () => {
+      endMicrophone();
+    });
+    await settle();
+
+    assert.equal(view.result.current.isRecording, false, "the deck must not keep showing a live recording");
+    assert.equal(view.result.current.isPaused, false);
+    assert.equal(view.result.current.isReviewing, true, "what was captured is offered for review");
+    assert.equal(view.result.current.captureRef.current.analyser, null);
+    assert.equal(world.tracks[0].stopped, true, "the microphone is released");
+    assert.deepEqual(errors, []);
+
+    await act(async () => {
+      view.result.current.cancel();
+    });
+    await act(async () => {
+      await view.result.current.start();
+    });
+    assert.equal(world.recorders.length, 2, "start() is not blocked by the finished recording");
+    assert.equal(view.result.current.isRecording, true);
+  });
+}
+
+for (const [name, expected] of [
+  ["NotAllowedError", "Microphone access denied"],
+  ["NotFoundError", "Microphone not found"],
+  ["NotReadableError", "Device busy"],
+]) {
+  test(`a ${name} from getUserMedia is reported as "${expected}"`, async () => {
+    override(navigator, "mediaDevices", {
+      getUserMedia: async () => { throw new DOMException("Device busy", name); },
+    });
+    const { view, errors } = mountDictation("session-1");
+    await act(async () => {
+      await view.result.current.start();
+    });
+    assert.deepEqual(errors, [expected]);
+    assert.equal(view.result.current.isRecording, false);
+  });
+}

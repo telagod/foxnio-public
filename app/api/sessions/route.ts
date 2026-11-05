@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { listAllSessions } from "@/lib/session-reader";
+import { listAllSessions, listSessionsByIds } from "@/lib/session-reader";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
+import { isValidSessionId } from "@/lib/session-file-references-core";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -13,8 +14,36 @@ const SESSION_LIST_HEADERS = {
   Vary: "Cookie",
 } as const;
 
+/** Most sessions one `?ids=` request may ask for. */
+const MAX_PARTIAL_SESSION_IDS = 100;
+
+/**
+ * GET /api/sessions?ids=<id>,<id>... — only these sessions, built exactly like
+ * list entries, for clients that learned from the event stream which sessions
+ * changed and should not re-download the whole list. Answers
+ * `{ sessions, missing, runningSessionIds, runningSessions, partial: true }`;
+ * `missing` lists requested ids with no session file. Small, so no ETag.
+ */
+async function partialSessions(rawIds: string): Promise<NextResponse> {
+  const ids = [...new Set(rawIds.split(","))];
+  if (ids.length > MAX_PARTIAL_SESSION_IDS || !ids.every((id) => isValidSessionId(id))) {
+    return NextResponse.json(
+      { error: `ids must be 1-${MAX_PARTIAL_SESSION_IDS} comma-separated session ids`, code: "invalid_session_ids" },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const { sessions, missing } = await listSessionsByIds(ids);
+  const runningSessions = getRunningRpcSessions();
+  return NextResponse.json(
+    { sessions, missing, runningSessionIds: runningSessions.map((s) => s.id), runningSessions, partial: true },
+    { headers: SESSION_LIST_HEADERS },
+  );
+}
+
 export async function GET(req: Request) {
   try {
+    const rawIds = new URL(req.url).searchParams.get("ids");
+    if (rawIds !== null) return await partialSessions(rawIds);
     const sessions = await listAllSessions();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);

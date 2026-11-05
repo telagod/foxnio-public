@@ -714,6 +714,23 @@ html, body {
   overscroll-behavior: none;
 }
 
+/* The app shell is exactly the visible viewport. On touch devices the soft
+   keyboard shrinks only the visual viewport on iOS, so useViewportHeight
+   publishes --app-viewport-height while an editable element is focused; an
+   installed PWA has no browser chrome, where 100vh is the stable height. */
+@media (pointer: coarse) {
+  html, body {
+    height: var(--app-viewport-height, 100dvh);
+    max-height: var(--app-viewport-height, 100dvh);
+  }
+}
+@media (pointer: coarse) and (display-mode: standalone) {
+  html, body {
+    height: var(--app-viewport-height, 100vh);
+    max-height: var(--app-viewport-height, 100vh);
+  }
+}
+
 /* Thin custom scrollbars (WebKit/Blink). Firefox uses scrollbar-color below. */
 ::-webkit-scrollbar {
   width: 8px;
@@ -1610,146 +1627,17 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   outline-offset: -2px;
 }
 
-/* Sidebar session rows: keyboard access */
-.session-item-button {
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-}
-.session-item-button:focus-visible,
-.session-item-icon-button:focus-visible,
 .provider-usage-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   border-radius: 4px;
 }
 
-.session-item-trailing {
-  width: 68px;
-  gap: 2px;
-  height: 24px;
-}
-.session-item-metadata {
-  width: auto;
-}
-.session-item-time {
-  width: 42px;
-}
-.session-item-menu-button {
-  width: 24px;
-  height: 24px;
-}
-.sidebar-project-actions {
-  /* Match the session status column after reserving timestamp + menu space;
-     grows when the pin toggle sits beside the menu. */
-  min-width: 46px;
-  display: flex;
-  justify-content: flex-end;
-  gap: 2px;
-}
-
-/* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
 @media (hover: none), (pointer: coarse) {
-  .sidebar-project-actions {
-    min-width: 56px;
-  }
-  .sidebar-icon-button,
-  .sidebar-project-action,
-  .sidebar-project-toggle {
-    width: 40px !important;
-    height: 40px !important;
-  }
-  .sidebar-new-session {
+  .sidebar-icon-button {
+    width: 44px !important;
     height: 44px !important;
   }
-  .sidebar-project-header {
-    min-height: 44px;
-  }
-  .session-item-row {
-    min-height: 44px;
-  }
-  .session-item-trailing {
-    width: 78px;
-    height: 44px;
-  }
-  .session-item-time {
-    width: 32px;
-  }
-  .session-item-menu-button {
-    width: 44px;
-    height: 44px;
-    flex-shrink: 0;
-  }
-  .session-item-row .session-item-button {
-    align-self: stretch;
-  }
-}
-
-.sidebar-project-header > button:focus-visible,
-.sidebar-project-identity:focus-visible,
-.sidebar-project-action:focus-visible,
-.sidebar-new-session:focus-visible,
-.sidebar-settings-row:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-/* The sidebar is its own inline-size container so the header can adapt to the
-   user-adjustable width. Below ~240px the title plus five header icons no
-   longer fit, so the navigate back/forward buttons drop out first (they stay
-   reachable via ⌘[/⌘] / Alt+←/→); Archive/Import/Refresh are kept — with the
-   nav pair hidden, the header fits down to the 200px minimum. The wrapper's
-   display/gap live here, NOT as an inline style — an inline display:flex
-   would out-rank the container query's display:none and break the hiding. */
-.sidebar-shell {
-  container-type: inline-size;
-}
-.sidebar-nav-buttons {
-  display: flex;
-  gap: 2px;
-}
-@container (max-width: 240px) {
-  .sidebar-nav-buttons {
-    display: none;
-  }
-}
-
-/* Sidebar overflow menus: compact items with a subtle warm hover highlight. */
-.sidebar-menu-item {
-  display: block;
-  width: 100%;
-  border: none;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out-warm);
-}
-.sidebar-menu-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-.sidebar-menu-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  border-radius: 6px;
-}
-
-/* Project navigation: give each workspace a quiet, tactile surface. The
-   indicator uses transform/opacity so active-session updates stay cheap. */
-.sidebar-project {
-  position: relative;
-  isolation: isolate;
-  transition: margin var(--dur-med) var(--ease-out-warm);
-}
-.sidebar-project-header {
-  position: relative;
-  z-index: 1;
-}
-.sidebar-project[data-active="true"] > .sidebar-project-header {
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* New-session workspace picker: keep the destination legible without turning
@@ -1874,38 +1762,6 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   .new-session-workspace-chevron {
     transition: none;
   }
-}
-.sidebar-project-sessions {
-  animation: sidebar-sessions-in var(--dur-med) var(--ease-out-warm) both;
-  transform-origin: top center;
-}
-@keyframes sidebar-sessions-in {
-  from { opacity: 0; transform: translateY(-5px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-/* Workspace activity stays beside the project name, including on hover. */
-.sidebar-project-activity[data-running="true"] .sidebar-project-activity-dot {
-  position: relative;
-  isolation: isolate;
-  animation: sidebar-activity-breathe 2.2s var(--ease-out-warm) infinite;
-  will-change: transform, opacity;
-}
-.sidebar-project-activity[data-running="true"] .sidebar-project-activity-dot::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
-  border-radius: 50%;
-  animation: sidebar-activity-ring 2.2s var(--ease-out-warm) infinite;
-  pointer-events: none;
-}
-@keyframes sidebar-activity-breathe {
-  0%, 100% { opacity: 0.82; transform: scale(0.92); }
-  45% { opacity: 1; transform: scale(1); }
-}
-@keyframes sidebar-activity-ring {
-  0% { opacity: 0.7; transform: scale(0.9); }
-  70%, 100% { opacity: 0; transform: scale(2.15); }
 }
 .sidebar-running-spinner {
   display: block;
@@ -2222,7 +2078,7 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   .composer-toolbar { flex-wrap: nowrap !important; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-project-sessions, .composer-control-shelf { animation: none; }
+  .composer-control-shelf { animation: none; }
 }
 
 @media (max-width: 640px) {
@@ -2233,9 +2089,7 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   /* Own row above the controls, so it never squeezes the model picker. */
   .composer-usage-limit-badge { order: -1; flex-basis: 100%; max-width: none; }
 
-  .sidebar-icon-button,
-  .sidebar-project-action,
-  .sidebar-project-toggle {
+  .sidebar-icon-button {
     min-width: 44px;
     min-height: 44px;
   }
@@ -3528,8 +3382,8 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   }
 @media (max-width: 640px) {
   .shell-toolbar-btn {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
   .right-panel-toolbar {
     --right-panel-close-width: 44px;
@@ -3547,8 +3401,8 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
     min-height: 44px;
   }
   .right-panel-toolbar > [role="toolbar"] > button {
-    min-width: 40px;
-    min-height: 40px;
+    min-width: 44px;
+    min-height: 44px;
   }
   .right-panel-toolbar .tabbar-scroll {
     width: 100%;
@@ -3565,6 +3419,17 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
 @media (min-width: 641px) {
   html[data-touch-targets="accessible"] {
     --shell-topbar-height: 44px;
+  }
+}
+/* Landscape phones and tablets are wider than the phone breakpoint but still
+   touch devices: the same 44 px bar and buttons as on a phone. */
+@media (min-width: 641px) and (pointer: coarse) {
+  html:not([data-touch-targets="compact"]) {
+    --shell-topbar-height: 44px;
+  }
+  html:not([data-touch-targets="compact"]) .shell-toolbar-btn {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 .shell-topbar {
@@ -3794,11 +3659,29 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   outline: 2px solid var(--accent) !important;
   outline-offset: 2px;
 }
-.sidebar-session-search:focus-visible,
-.sidebar-project-identity input:focus-visible,
-.session-item-row input:focus-visible {
-  outline: 2px solid var(--accent) !important;
-  outline-offset: 1px;
+.sidebar-resize-handle {
+  position: relative;
+  width: 5px;
+  flex-shrink: 0;
+  margin-left: -5px;
+  z-index: 205;
+  background: transparent;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+  transition: background var(--dur-fast) var(--ease-out-warm);
+}
+/* A wider hit area than the 5 px line, centred on the sidebar edge. */
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: -3px;
+}
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:focus-visible,
+.sidebar-resize-handle[data-resizing] {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .process-details-label {
@@ -4180,12 +4063,12 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   .sidebar-container {
     position: relative;
     overflow: hidden;
-    --sidebar-width: 260px;
+    --sidebar-width: 280px;
     transition: width var(--dur-med) var(--ease-out-warm), min-width var(--dur-med) var(--ease-out-warm);
   }
   .sidebar-container.sidebar-open {
-    width: var(--sidebar-width, 260px);
-    min-width: var(--sidebar-width, 260px);
+    width: var(--sidebar-width, 280px);
+    min-width: var(--sidebar-width, 280px);
   }
   .sidebar-container.sidebar-closed {
     width: 0;
@@ -4194,11 +4077,11 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .sidebar-container > * {
-    width: var(--sidebar-width, 260px);
-    min-width: var(--sidebar-width, 260px);
+    width: var(--sidebar-width, 280px);
+    min-width: var(--sidebar-width, 280px);
   }
   /* no easing while the user drags the resize handle */
-  .sidebar-container.sidebar-resizing {
+  .sidebar-container[data-resizing] {
     transition: none;
   }
 }
@@ -4265,52 +4148,133 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   .chat-stats-center {
     display: none !important;
   }
+  /* Phone drawers share one engine (hooks/useMobileSidebarGestures.ts): the
+     open state sets --drawer-progress to 0 or 1, a drag overrides it inline
+     with data-dragging (no transition), and a release settles it with the
+     transition below. Only transform moves; the closed sheet is also
+     visibility:hidden (after the exit finishes) so it is never focusable. */
   .sidebar-container {
+    --drawer-progress: 0;
     position: fixed !important;
-    inset: 0;
-    /* Full-screen drawer: safe-area padding (the list adds its own bottom). */
-    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
-    transition: transform var(--dur-slow) var(--ease-out-warm);
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(88vw, 360px);
+    /* The sidebar header adds the top inset and the footer the bottom one. */
+    padding-left: env(safe-area-inset-left, 0px);
+    box-shadow: var(--shadow-modal);
+    overscroll-behavior: contain;
+    transform: translateX(calc((var(--drawer-progress) - 1) * 100%));
+    transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s linear var(--dur-slow);
+    visibility: hidden;
   }
   .sidebar-container.sidebar-open {
-    transform: translateX(0);
+    --drawer-progress: 1;
+    visibility: visible;
+    transition-delay: 0s;
   }
-  .sidebar-container.sidebar-closed {
-    transform: translateX(-100%);
+  /* Before hydration the markup says "open"; keep it off-screen until JS decides. */
+  .sidebar-container.sidebar-mobile-pending {
+    --drawer-progress: 0 !important;
+    visibility: hidden !important;
+    transition: none !important;
+  }
+  /* The drawer and the file panel take programmatic focus when they open (they
+     are dialogs); the container is not a control, so it shows no ring. */
+  .sidebar-container:focus-visible,
+  .right-panel-container:focus-visible {
+    outline: none;
+  }
+  /* Horizontal drags are ours inside the drawer; vertical ones scroll the list. */
+  .sidebar-container,
+  .sidebar-container * {
+    touch-action: pan-y;
+  }
+  .drawer-backdrop {
+    --drawer-progress: 0;
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+    background: rgba(0, 0, 0, 0.4);
+    opacity: var(--drawer-progress);
+    visibility: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: opacity 200ms var(--ease-out-warm), visibility 0s linear 200ms;
+  }
+  .drawer-backdrop[data-open="true"] {
+    --drawer-progress: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+  .sidebar-container[data-dragging],
+  .drawer-backdrop[data-dragging],
+  .right-panel-container[data-dragging] {
+    visibility: visible;
+    transition: none;
+  }
+  /* While a drawer covers the page nothing behind it may be scrolled or tapped. */
+  html[data-drawer-open] #main-content {
+    pointer-events: none;
+  }
+  /* Edge zones: drag handles that exist only while the matching drawer is shut
+     (or, for "close", over the open file panel). pan-y keeps the browser from
+     claiming a sideways drag; a plain tap is forwarded to the control below. */
+  .drawer-edge {
+    position: fixed;
+    top: var(--shell-topbar-height);
+    bottom: 0;
+    width: 24px;
+    z-index: 150;
+    touch-action: pan-y;
+  }
+  .drawer-edge-left {
+    left: 0;
+  }
+  .drawer-edge-right {
+    right: 0;
+  }
+  .drawer-edge-close {
+    left: 0;
+    z-index: 220;
   }
 
-  /* Full-screen overlay that slides in from the right edge. Closed panels are
-     hidden only after the exit slide finishes (visibility delay). Safe-area
-     padding keeps the panel clear of notches and rounded corners; the toolbar
-     takes the top inset so its background fills it, like the top bar's. */
+  /* The file panel covers the whole screen and follows the finger from the
+     right edge. Safe-area padding keeps it clear of notches and rounded
+     corners; the toolbar takes the top inset so its background fills it, like
+     the top bar's. */
   .right-panel-container {
+    --drawer-progress: 0;
     position: fixed;
     inset: 0;
     padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     overflow: hidden;
-    transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s;
+    touch-action: pan-y;
+    transform: translateX(calc((1 - var(--drawer-progress)) * 100%));
+    transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s linear var(--dur-slow);
+    visibility: hidden;
   }
   .right-panel-toolbar {
     padding-top: env(safe-area-inset-top, 0px);
     min-height: var(--shell-topbar-height) !important;
+    touch-action: pan-y;
   }
   .right-panel-container.right-panel-open {
-    transform: none;
+    --drawer-progress: 1;
     visibility: visible;
+    transition-delay: 0s;
     /* The panel mounts on its first open, already open: start that first
        render off-screen so it slides in too. */
     @starting-style {
       transform: translateX(100%);
     }
   }
-  .right-panel-container.right-panel-closed {
-    transform: translateX(100%);
-    visibility: hidden;
-    transition-delay: 0s, var(--dur-slow);
-  }
-  /* Reduced motion: hide the closed panel immediately, not after the slide. */
+  /* Reduced motion: no slide, and a closed drawer disappears immediately. */
   @media (prefers-reduced-motion: reduce) {
-    .right-panel-container {
+    .sidebar-container,
+    .right-panel-container,
+    .drawer-backdrop {
+      transition-duration: 0s !important;
       transition-delay: 0s !important;
     }
   }
@@ -4449,8 +4413,6 @@ html[data-touch-targets="accessible"] :is(
   .composer-context-control,
   .shell-toolbar-btn,
   .sidebar-icon-button,
-  .sidebar-project-action,
-  .sidebar-project-toggle,
   .right-panel-toolbar [role="toolbar"] > button,
   .git-clear-filter,
   .git-refresh,
@@ -4459,7 +4421,6 @@ html[data-touch-targets="accessible"] :is(
   .git-change-footer-open,
   .file-explorer-search-input,
   .file-explorer-search-clear,
-  .sidebar-session-search,
   .attachment-remove-button,
   .archive-search-input,
   .archive-search-clear
@@ -4486,10 +4447,8 @@ html[data-touch-targets="accessible"] :is(
     min-height: 44px;
 }
 html[data-touch-targets="accessible"] :is(
-  .sidebar-new-session,
   .process-details-toggle,
   .activity-row-trigger,
-  .session-item-icon-button,
   .tool-call-input-toggle
 ) {
     min-height: 44px !important;
@@ -4555,20 +4514,6 @@ html[data-touch-targets="compact"] .composer-toolbar > button,
 html[data-touch-targets="compact"] .composer-toolbar > div > button {
   min-height: 28px !important;
 }
-html[data-touch-targets="compact"] .session-item-row {
-  min-height: 30px !important;
-}
-html[data-touch-targets="compact"] .session-item-trailing {
-  height: 24px !important;
-  width: 68px !important;
-}
-html[data-touch-targets="compact"] .session-item-menu-button {
-  width: 24px !important;
-  height: 24px !important;
-}
-html[data-touch-targets="compact"] .session-item-row .session-item-button {
-  padding-right: 70px !important;
-}
 html[data-touch-targets="compact"] .settings-card {
   padding: 10px 16px !important;
   margin-bottom: 6px !important;
@@ -4577,7 +4522,7 @@ html[data-touch-targets="compact"] .settings-card {
 
 @media (max-width: 640px) and (pointer: coarse) and (hover: none) {
   html:not([data-touch-targets="compact"]):not([data-touch-targets="accessible"]) .composer-primary-action {
-    min-height: 40px;
+    min-height: 44px;
   }
 }
 
@@ -4647,3 +4592,75 @@ html[data-touch-targets="accessible"] .extension-dialog-footer > button {
 @media (prefers-reduced-motion: reduce) { .mcp-spin { animation: none; } .mcp-management * { transition: none !important; } }
 
 .settings-card.mcp-source-card, .settings-card.mcp-other-configs, .settings-card.mcp-editor-card { display: block; padding: 0; margin-bottom: 0; }
+
+/* Touch targets on touch devices: every control reaches 44 x 44 CSS px. A
+   control that is visually smaller gets an invisible ::after of that size
+   (centred, so the layout does not change); composer controls get real size
+   because they sit shoulder to shoulder. Compact density is an explicit choice
+   of small targets and keeps them. */
+@media (hover: none), (pointer: coarse) {
+  html:not([data-touch-targets="compact"]) :is(
+    .shell-title-action,
+    .message-copy-action,
+    .message-overflow-toggle,
+    div:has(> .message-copy-actions) > button,
+    div:has(> .message-copy-actions) > :not(.message-copy-actions) button,
+    #main-content button[style*="height: 24px"]
+  ) {
+    position: relative;
+  }
+  html:not([data-touch-targets="compact"]) :is(
+    .shell-title-action,
+    .message-copy-action,
+    .message-overflow-toggle,
+    div:has(> .message-copy-actions) > button,
+    div:has(> .message-copy-actions) > :not(.message-copy-actions) button,
+    #main-content button[style*="height: 24px"]
+  )::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+  html:not([data-touch-targets="compact"]) :is(
+    .composer-toolbar > button,
+    .composer-toolbar > div > button,
+    .composer-model-control > button,
+    .composer-thinking-control > button,
+    .composer-primary-action
+  ) {
+    min-height: 44px;
+  }
+  html:not([data-touch-targets="compact"]) :is(
+    .composer-toolbar > button:not(.composer-primary-action),
+    .composer-toolbar > div > button,
+    .composer-thinking-control > button
+  ) {
+    min-width: 44px;
+  }
+  html:not([data-touch-targets="compact"]) .composer-thinking-control {
+    max-width: none;
+    flex: 0 0 44px;
+  }
+  html:not([data-touch-targets="compact"]) .composer-textarea:not([data-composer-expanded] *) {
+    min-height: 44px !important;
+    padding-block: 10px;
+  }
+  html:not([data-touch-targets="compact"]) select:not([multiple]) {
+    min-height: 44px !important;
+  }
+}
+/* Phones: six 44 px controls do not fit beside the model name, so the toolbar
+   takes two rows: plus + model name, then the icon controls and Send. */
+@media (max-width: 640px) and (hover: none), (max-width: 640px) and (pointer: coarse) {
+  html:not([data-touch-targets="compact"]) .composer-toolbar {
+    flex-wrap: wrap;
+  }
+  html:not([data-touch-targets="compact"]) .composer-toolbar > .composer-model-control {
+    flex: 1 0 calc(100% - 52px);
+    max-width: none;
+  }
+}

@@ -19,21 +19,29 @@ npm run desktop:dist
 
 Artifacts are written to `dist-desktop/`:
 
-- Windows: NSIS installer and portable executable;
+- Windows: NSIS installer (`foxnio-Setup-<version>-win-x64.exe`) and portable executable (`foxnio-<version>-win-x64-portable.exe`). The two use different `artifactName` patterns because electron-builder falls back to the global pattern for every target, which would make them overwrite each other and leave `latest.yml` describing whichever was written last;
 - macOS: DMG and ZIP;
 - Linux: AppImage and Debian package.
 
-The installer includes only the production `.next` output: Next.js development output, webpack caches, build traces, and type-check artifacts are excluded. Runtime-traced `lib/` assets and `public/` static assets are retained. Dependency source maps are excluded from desktop packages; they are not loaded by the app at runtime, and `productionBrowserSourceMaps` is disabled.
+The installer includes only the production `.next` output: Next.js development output, webpack caches, build traces, and type-check artifacts are excluded. Runtime-traced `lib/` assets and `public/` static assets are retained. Test files (`*.test.*`) are excluded from the app. Dependency source maps are excluded from desktop packages; they are not loaded by the app at runtime, and `productionBrowserSourceMaps` is disabled.
 
 The build bundles a standalone Node.js executable copied from `OMP_WEB_NODE_BIN`, or from the Node.js executable running `desktop:prepare-runtime`. The Electron process itself is **never** used to run `bin/omp-web.js`; the launcher selects this Node.js `>=24` runtime explicitly. If no suitable runtime is available, packaging fails.
 
 The `omp` executable is deliberately external for this first desktop release. This keeps provider credentials, native Agent distribution, and platform-specific `omp` licensing/versioning separate from foxnio. Set `OMP_WEB_OMP_BIN` before launching the desktop app when `omp` is not on the GUI process's `PATH`.
 
+## Runtime behavior
+
+- The app starts its own local server on `127.0.0.1:30177`. The stable port keeps browser storage (UI preferences) in one origin. When the port is taken, for example by a CLI or service instance, the app uses the next free port (up to 30196) and logs it. A port set through `OMP_WEB_DESKTOP_PORT` (or `PORT`) is used as given and the app refuses to start if it is busy. The app also stops with an error when its server process exits before answering, instead of attaching to another server on that port.
+- The in-app updater is disabled (`OMP_WEB_DISABLE_AUTOUPDATE=1` in the server environment) because it would stop the server process the desktop app owns. Install a newer installer to update.
+- Links leaving the app open in the default browser or mail client only for `http:`, `https:` and `mailto:`; every other scheme (for example `file:`) is ignored.
+
 ## Targets and CI
 
 The configured first-party CI targets are Windows x64, macOS x64/arm64, and Linux x64. Add Windows/Linux arm64 only after a matching native runner is configured; this packaging flow intentionally builds the bundled Node.js runtime on the same host and architecture as the installer.
 
-Build each target on a matching GitHub Actions runner. Do not cross-copy a Linux Node binary into a Windows or macOS installer, and do not reuse a `node_modules` tree across operating systems: `sharp` is native and must be installed on the build runner for the target. Code signing and notarization are intentionally not configured in this repository; provide the platform credentials in CI before publishing public installers.
+Build each target on a matching GitHub Actions runner. Do not cross-copy a Linux Node binary into a Windows or macOS installer, and do not reuse a `node_modules` tree across operating systems: `sharp` is native and must be installed on the build runner for the target. Code signing and notarization are intentionally not configured in this repository, so the installers are unsigned (Windows SmartScreen warns; on macOS use right-click **Open** or `xattr -dr com.apple.quarantine /Applications/foxnio.app`). Provide the platform credentials in CI before publishing installers to a wider audience.
+
+The desktop workflow uploads only installers, blockmaps and update metadata (not the `*-unpacked` build directories) as workflow artifacts kept for 7 days. On `v*` tags a separate `release` job, the only one with `contents: write`, attaches them to the GitHub Release. macOS does not upload `latest-mac.yml`: the arm64 and x64 builds write the same file name and the app has no auto-update consumer for it. See [`release.md`](./release.md) for the interplay with the package workflow.
 
 ## Mobile boundary
 

@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
+import { getSessionStore, useSessionStoreSelector } from "@/hooks/useSessionStore";
+import { resolveStoreSession, type ResolvedSession } from "@/lib/resolve-session";
+import type { SessionStoreSnapshot } from "@/lib/session-store";
 import {
   SESSION_TABS_STORAGE_KEY,
   closeSessionTab,
@@ -20,23 +23,18 @@ import {
   type SessionTab,
 } from "@/lib/session-tabs";
 
-/** Coalesces the bursts of list-change hints (agent_start + title update + file signal). */
-const LIST_REFRESH_DEBOUNCE_MS = 400;
-
-export type ResolvedSession = SessionInfo | null | "unavailable";
+const selectSessions = (snapshot: SessionStoreSnapshot) => snapshot.sessions;
+const selectSessionsReady = (snapshot: SessionStoreSnapshot) => snapshot.sessionsStatus === "ready";
 
 /**
  * Open session tabs for the desktop tab strip. The selected session is always
  * a tab; the list persists per browser and is reconciled with the session list
- * so titles stay current and deleted or archived sessions fall away.
- *
- * `refreshToken` is any value that changes when the session list may have
- * changed (the shell's refresh key, the running channel's list hint).
+ * so titles stay current and deleted or archived sessions fall away. The
+ * list comes from the shared session store; this hook never fetches it.
  */
-export function useSessionTabs({ enabled, selectedSession, refreshToken }: {
+export function useSessionTabs({ enabled, selectedSession }: {
   enabled: boolean;
   selectedSession: SessionInfo | null;
-  refreshToken: number;
 }) {
   const [tabs, setTabs] = useState<SessionTab[]>([]);
   const [storageLoaded, setStorageLoaded] = useState(false);
@@ -48,7 +46,8 @@ export function useSessionTabs({ enabled, selectedSession, refreshToken }: {
   // reconciliation must not mistake them for deleted ones.
   const openedRef = useRef(new Set<string>());
   const scrollAnchorsRef = useRef(new Map<string, ScrollAnchor>());
-  const sessionsEtagRef = useRef<string | null>(null);
+  const sessions = useSessionStoreSelector(selectSessions);
+  const sessionsReady = useSessionStoreSelector(selectSessionsReady);
 
   useEffect(() => {
     if (!enabled || storageLoaded) return;
@@ -82,34 +81,15 @@ export function useSessionTabs({ enabled, selectedSession, refreshToken }: {
 
   const hasTabs = tabs.length > 0;
   useEffect(() => {
-    if (!enabled || !storageLoaded || !hasTabs) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      const headers: Record<string, string> = {};
-      if (sessionsEtagRef.current) headers["If-None-Match"] = sessionsEtagRef.current;
-      fetch("/api/sessions", { headers, signal: controller.signal })
-        .then(async (response) => {
-          if (response.status === 304 || !response.ok) return;
-          const data = (await response.json()) as { sessions?: SessionInfo[] };
-          if (!data.sessions) return;
-          sessionsEtagRef.current = response.headers.get("ETag");
-          const keep = new Set(openedRef.current);
-          const tabIds = new Set(tabsRef.current.map((tab) => tab.id));
-          for (const session of data.sessions) {
-            if (tabIds.has(session.id)) sessionCacheRef.current.set(session.id, session);
-          }
-          const sessions = data.sessions;
-          setTabs((current) => reconcileSessionTabs(current, sessions, keep));
-        })
-        .catch(() => {
-          // Aborted or offline: the next change hint tries again.
-        });
-    }, LIST_REFRESH_DEBOUNCE_MS);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [enabled, storageLoaded, hasTabs, refreshToken]);
+    // Before the first answer the list is empty, which would read as "every tab was deleted".
+    if (!enabled || !storageLoaded || !hasTabs || !sessionsReady) return;
+    const tabIds = new Set(tabsRef.current.map((tab) => tab.id));
+    for (const session of sessions) {
+      if (tabIds.has(session.id)) sessionCacheRef.current.set(session.id, session);
+    }
+    const keep = new Set(openedRef.current);
+    setTabs((current) => reconcileSessionTabs(current, sessions, keep));
+  }, [enabled, storageLoaded, hasTabs, sessionsReady, sessions]);
 
   /** Closes a tab. Returns the tab to show next when the closed one was on screen. */
   const closeTab = useCallback((id: string): SessionTab | null => {
@@ -147,14 +127,7 @@ export function useSessionTabs({ enabled, selectedSession, refreshToken }: {
   const resolveSession = useCallback(async (id: string): Promise<ResolvedSession> => {
     const cached = sessionCacheRef.current.get(id);
     if (cached) return cached;
-    try {
-      const response = await fetch("/api/sessions");
-      if (!response.ok) return "unavailable";
-      const data = (await response.json()) as { sessions?: SessionInfo[] };
-      return data.sessions?.find((session) => session.id === id) ?? null;
-    } catch {
-      return "unavailable";
-    }
+    return resolveStoreSession(getSessionStore(), id);
   }, []);
 
   const getScrollAnchor = useCallback((id: string): ScrollAnchor | null => scrollAnchorsRef.current.get(id) ?? null, []);

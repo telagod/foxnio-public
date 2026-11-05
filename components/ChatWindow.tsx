@@ -1424,11 +1424,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {/* Also while held: a finished reply stays until its saved row
-                replaces it in the same render (useAgentSession-stream). */}
+                replaces it in the same render (useAgentSession-stream). Only
+                a reply still streaming is "live"; a held one is complete and
+                shows its actions. */}
             {streamState.streamingMessage && (
               <MessageView
                 key={streamState.streamingMessage.timestamp ?? "stream"}
                 message={streamState.streamingMessage as AgentMessage}
+                isStreaming={streamState.isStreaming}
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}

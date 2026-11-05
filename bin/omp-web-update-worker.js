@@ -12,6 +12,10 @@ const os = require("node:os");
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const STAGES = ["preparing", "stopping", "installing", "restarting", "finalizing"];
+// Same grammar as the version parser in lib/npm-update.ts, minus the optional "v" prefix.
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+// Control-file protocol shared with bin/omp-web.js (UPDATE_PROTOCOL there).
+const LAUNCHER_PROTOCOL = 1;
 
 function arg(name) {
   const idx = process.argv.indexOf(name);
@@ -31,13 +35,10 @@ const kind = arg("--kind") || "app";
 // Set when the server runs as this systemd unit; systemd stops and starts it.
 const systemdUnit = arg("--systemd-unit");
 const systemctlScope = arg("--systemd-user") === "1" ? ["--user"] : [];
-let descriptor;
 let managerPrefix;
 try {
-  descriptor = JSON.parse(arg("--descriptor") || "null");
   managerPrefix = JSON.parse(arg("--manager-prefix") || "[]");
 } catch {
-  descriptor = null;
   managerPrefix = [];
 }
 
@@ -87,23 +88,61 @@ function systemctl(action) {
   }
 }
 
-async function stopOriginalProcesses() {
-  updateStatus({ stage: "stopping" });
-  if (systemdUnit) {
-    systemctl("stop");
-    return { systemd: true, launchd: false, tray: false };
+function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+async function waitForExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessAlive(pid)) {
+    if (Date.now() > deadline) return false;
+    await sleep(100);
   }
-  // Detect services
+  return true;
+}
+
+// The launcher that started the server registered for this attempt: it stays alive while
+// the server is stopped and starts the new release when asked (restartViaLauncher).
+function isLauncherArmed() {
+  const armed = readJson(markerFile("armed.json"));
+  return Boolean(armed && armed.protocol === LAUNCHER_PROTOCOL && armed.attemptId === attemptId);
+}
+
+// What brings the server back after the install; null when nothing would.
+function detectRestartMethod() {
+  if (systemdUnit) return { systemd: true };
+  if (isLauncherArmed()) return { launcher: true };
   const launchd = isLaunchdActive();
   const tray = isTrayActive();
-  if (launchd) {
+  return launchd || tray ? { launchd, tray } : null;
+}
+
+// Only the server is stopped: the launcher stays up and restarts it on request.
+async function stopServerProcess() {
+  if (!Number.isInteger(serverPid) || serverPid <= 0 || serverPid === process.pid) throw new Error("The server process is unknown");
+  try { process.kill(serverPid, "SIGTERM"); } catch (e) { if (e.code === "ESRCH") return; throw e; }
+  if (await waitForExit(serverPid, 10000)) return;
+  try { process.kill(serverPid, "SIGKILL"); } catch {}
+  if (!await waitForExit(serverPid, 5000)) throw new Error("The server did not stop");
+}
+
+async function stopOriginalProcesses(info) {
+  updateStatus({ stage: "stopping" });
+  if (info.systemd) {
+    systemctl("stop");
+    return;
+  }
+  if (info.launcher) {
+    await stopServerProcess();
+    return;
+  }
+  if (info.launchd) {
     try {
       const uid = typeof process.getuid === "function" ? process.getuid() : 501;
       cp.spawnSync("launchctl", ["bootout", `gui/${uid}/com.telagod.foxnio`], { timeout: 15000, windowsHide: true });
     } catch {}
     await sleep(500);
   }
-  if (tray) {
+  if (info.tray) {
     try {
       const trayBin = path.join(packageDir, "bin", "omp-web-tray.js");
       if (fs.existsSync(trayBin)) {
@@ -112,21 +151,42 @@ async function stopOriginalProcesses() {
     } catch {}
     await sleep(500);
   }
-  // Plain next: try to kill launcher/server pids with SIGTERM 5s -> SIGKILL
-  if (!launchd && !tray) {
-    for (const pid of [launcherPid, serverPid]) {
-      if (!Number.isInteger(pid) || pid <= 0) continue;
-      try { process.kill(pid, "SIGTERM"); } catch {}
-    }
-    await sleep(5000);
-    for (const pid of [launcherPid, serverPid]) {
-      if (!Number.isInteger(pid) || pid <= 0) continue;
-      try { process.kill(pid, 0); process.kill(pid, "SIGKILL"); } catch {}
-    }
-    // waitForPort 90s simplified: sleep 1s (real impl would poll port)
-    await sleep(1000);
+}
+
+// The npm `.cmd` shim cannot be spawned without a shell, and a shell would parse
+// the arguments. On Windows run npm's own entry point with the current node instead.
+function npmCliPath() {
+  const cli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  return fs.existsSync(cli) ? cli : null;
+}
+function runManager(args, timeout) {
+  const isBun = manager === "bun";
+  const bin = managerPath || (isBun ? "bun" : "npm");
+  const fullArgs = Array.isArray(managerPrefix) && managerPrefix.length ? [...managerPrefix, ...args] : args;
+  const options = { timeout, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" } };
+  if (!isBun && process.platform === "win32") {
+    const cli = bin === "npm" ? npmCliPath() : null;
+    if (cli) return cp.spawnSync(process.execPath, [cli, ...fullArgs], options);
+    // Last resort: `target` and the prefix were validated, so the shell sees no metacharacters.
+    return cp.spawnSync(bin === "npm" ? "npm.cmd" : bin, fullArgs, { ...options, shell: true });
   }
-  return { launchd, tray };
+  return cp.spawnSync(bin, fullArgs, options);
+}
+
+// Availability comes from GitHub Releases but the install reads GitHub Packages, which
+// needs a token even for public packages. Check that the registry serves the target
+// before anything is stopped.
+function preflightRegistry() {
+  const spec = `@telagod/foxnio@${target}`;
+  const result = runManager(manager === "bun" ? ["info", spec, "version"] : ["view", spec, "version"], 60 * 1000);
+  const stdout = result.stdout ? result.stdout.toString() : "";
+  if (result.status === 0 && stdout.split(/[\s:]+/).includes(target)) return;
+  const hint = manager === "bun"
+    ? "Map the @telagod scope to https://npm.pkg.github.com with a read:packages token (bunfig.toml [install.scopes] or ~/.npmrc)"
+    : "Add '@telagod:registry=https://npm.pkg.github.com' and a read:packages token to ~/.npmrc";
+  const stderr = result.stderr ? result.stderr.toString().trim().split("\n")[0] : "";
+  const detail = stderr || (result.error ? String(result.error.message || result.error.code) : "");
+  throw new Error(`${spec} is not readable from the registry. ${hint}.${detail ? ` ${detail}` : ""}`);
 }
 
 async function runManagerGate() {
@@ -144,15 +204,13 @@ async function runManagerGate() {
     return;
   }
   // App update via npm/bun
-  const cmd = manager === "bun" ? (managerPath || "bun") : (managerPath || "npm");
   const args = manager === "bun"
     ? ["add", "-g", `@telagod/foxnio@${target}`]
     : ["install", "-g", `@telagod/foxnio@${target}`];
-  if (Array.isArray(managerPrefix) && managerPrefix.length) args.unshift(...managerPrefix);
   let retries = 0;
   let lastResult;
   while (retries <= 1) {
-    const result = cp.spawnSync(cmd, args, { timeout: 5 * 60 * 1000, windowsHide: true, env: process.env, shell: process.platform === "win32" });
+    const result = runManager(args, 5 * 60 * 1000);
     lastResult = result;
     const stderr = result.stderr ? result.stderr.toString() : "";
     const spawnError = result.error ? String(result.error.code || result.error.message || "") : "";
@@ -172,6 +230,30 @@ async function runManagerGate() {
   }
 }
 
+let launcherRestartRequested = false;
+// The launcher accepts one start request per attempt (generation 1) and answers with an ack.
+async function restartViaLauncher() {
+  launcherRestartRequested = true;
+  atomicWrite(markerFile("restart-request.json"), { protocol: LAUNCHER_PROTOCOL, attemptId, action: "start", generation: 1, requestedAt: new Date().toISOString() });
+  const ackFile = markerFile("restart-ack.json");
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const ack = readJson(ackFile);
+    if (ack && ack.protocol === LAUNCHER_PROTOCOL && ack.attemptId === attemptId && ack.generation === 1) return;
+    if (!isProcessAlive(launcherPid)) throw new Error("The foxnio launcher exited before it restarted the server");
+    await sleep(100);
+  }
+  throw new Error("The foxnio launcher did not restart the server");
+}
+
+// Lets the launcher go back to normal operation; it answers with complete-ack.json.
+async function releaseLauncher() {
+  try {
+    atomicWrite(markerFile("complete.json"), { protocol: LAUNCHER_PROTOCOL, attemptId, completedAt: new Date().toISOString() });
+    for (let i = 0; i < 50 && !fs.existsSync(markerFile("complete-ack.json")); i++) await sleep(100);
+  } catch {}
+}
+
 async function restartServices(info) {
   updateStatus({ stage: "restarting" });
   if (info.systemd) {
@@ -181,6 +263,10 @@ async function restartServices(info) {
     // shortcut: one check after 3s, not a port probe; upgrade if slow-starting crashes slip through.
     await sleep(3000);
     systemctl("is-active");
+    return;
+  }
+  if (info.launcher) {
+    await restartViaLauncher();
     return;
   }
   if (info.launchd) {
@@ -199,23 +285,16 @@ async function restartServices(info) {
       }
     } catch {}
     await sleep(1000);
-    return;
   }
-  // Plain next: ask launcher to restart via armed marker handshake
-  try {
-    const restartRequest = path.join(root, attemptId + ".restart-request.json");
-    const restartAck = path.join(root, attemptId + ".restart-ack.json");
-    atomicWrite(restartRequest, { attemptId, port: descriptor && descriptor.port, hostname: descriptor && descriptor.hostname, requestedAt: new Date().toISOString() });
-    // Wait up to 30s for ack
-    for (let i = 0; i < 30; i++) {
-      if (fs.existsSync(restartAck)) break;
-      await sleep(1000);
-    }
-  } catch {}
 }
 
 async function main() {
   if (!/^[0-9a-f-]{36}$/i.test(attemptId || "") || !root || !packageDir || !target) {
+    process.exit(1);
+  }
+  if (!VERSION_PATTERN.test(target)) {
+    // target ends up in package manager arguments (through a shell on old Windows setups)
+    updateStatus({ state: "failed", error: "Refusing to install an invalid target version", finishedAt: new Date().toISOString(), cleanupReady: true });
     process.exit(1);
   }
   // Check abort
@@ -234,9 +313,16 @@ async function main() {
   updateStatus({ state: "running", stage: "preparing", startedAt: new Date().toISOString() });
   await sleep(1000); // PREPARING_MIN 1s
 
-  let svcInfo = { launchd: false, tray: false };
+  let svcInfo = null;
+  let stopAttempted = false;
   try {
-    if (kind !== "omp") svcInfo = await stopOriginalProcesses();
+    if (kind !== "omp") {
+      svcInfo = detectRestartMethod();
+      if (!svcInfo) throw new Error("foxnio is not running under a launcher or service that can restart it after an update");
+      preflightRegistry();
+      stopAttempted = true;
+      await stopOriginalProcesses(svcInfo);
+    }
     await runManagerGate();
     try {
       const pkgPath = path.join(packageDir, "package.json");
@@ -249,15 +335,22 @@ async function main() {
     } catch {}
     if (kind !== "omp") await restartServices(svcInfo);
     await sleep(500);
+    // Before the terminal status: once the UI sees it, it may clean the control files up.
+    if (svcInfo && svcInfo.launcher) await releaseLauncher();
     updateStatus({ state: "succeeded", stage: "finalizing", finishedAt: new Date().toISOString(), cleanupReady: true });
-    // write complete marker
-    try { atomicWrite(markerFile("complete.json"), { attemptId, completedAt: new Date().toISOString() }); } catch {}
   } catch (e) {
     let msg = e instanceof Error ? e.message : String(e);
-    // Never leave the service stopped after a failed install.
-    if (systemdUnit) {
-      try { systemctl("start"); } catch { msg = `${systemdUnit} is still stopped: ${msg}`; }
+    // Never leave the service stopped after a failed install. Nothing was stopped
+    // when the pre-flight failed, so there is nothing to bring back.
+    if (stopAttempted) {
+      if (systemdUnit) {
+        try { systemctl("start"); } catch { msg = `${systemdUnit} is still stopped: ${msg}`; }
+      } else if (!launcherRestartRequested) {
+        // A launcher that was asked once and did not answer is not asked again.
+        try { await restartServices(svcInfo); } catch { msg = `The service could not be restarted: ${msg}`; }
+      }
     }
+    if (svcInfo && svcInfo.launcher) await releaseLauncher();
     updateStatus({ state: "failed", error: msg.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true });
   }
 }

@@ -1,6 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join } from "path";
+import { createHash } from "crypto";
+import { existsSync, readFileSync } from "fs";
 import { isMap, isScalar, isSeq, parseDocument, stringify, type Document } from "yaml";
+import { writeFileAtomic } from "../fs-atomic";
+import {
+  isSensitiveHeaderName,
+  maskStringRecord,
+  restoreStringRecord,
+  SECRET_MASK,
+  UnresolvedSecretError,
+} from "../secret-mask";
 import { getModelsConfigPath } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -111,9 +119,27 @@ export class ModelsConfigParseError extends Error {
   }
 }
 
+/** Revision of a models.yml that does not exist yet. */
+export const MISSING_REVISION = "missing";
+/** Revision of a models.yml that exists but could not be read. */
+const UNREADABLE_REVISION = "unreadable";
+
+/** Thrown when models.yml changed after the caller loaded it. */
+export class ModelsConfigConflictError extends Error {
+  readonly path: string;
+  constructor(path: string) {
+    super(`${path} changed since it was loaded`);
+    this.name = "ModelsConfigConflictError";
+    this.path = path;
+  }
+}
+
 export interface ModelsConfigFile {
   path: string;
   exists: boolean;
+  /** sha256 of the file bytes (MISSING_REVISION when absent). A write based on a
+   * different revision would silently discard the newer edits. */
+  revision: string;
   /** Raw file text, kept so writes can merge into the original document. */
   source?: string;
   /** Empty when `parseError` is set — never write this back over the file. */
@@ -138,34 +164,37 @@ function sanitizeModelsConfig(config: ModelsFileConfig): ModelsFileConfig {
 /** Read models.yml, reporting rather than swallowing parse failures. */
 export function readModelsConfigFile(): ModelsConfigFile {
   const path = getModelsConfigPath();
-  if (!existsSync(path)) return { path, exists: false, config: { providers: {} } };
+  if (!existsSync(path)) return { path, exists: false, revision: MISSING_REVISION, config: { providers: {} } };
 
-  let source: string;
+  let bytes: Buffer;
   try {
-    source = readFileSync(path, "utf8");
+    bytes = readFileSync(path);
   } catch (error) {
-    return { path, exists: true, config: { providers: {} }, parseError: String(error) };
+    return { path, exists: true, revision: UNREADABLE_REVISION, config: { providers: {} }, parseError: String(error) };
   }
+  const revision = createHash("sha256").update(bytes).digest("hex");
+  const source = bytes.toString("utf8");
 
   // parseDocument collects syntax errors instead of throwing on the first one.
   const doc = parseDocument(source);
   if (doc.errors.length > 0) {
-    return { path, exists: true, source, config: { providers: {} }, parseError: doc.errors[0].message };
+    return { path, exists: true, revision, source, config: { providers: {} }, parseError: doc.errors[0].message };
   }
   const parsed = doc.toJS() as unknown;
   if (parsed === null || parsed === undefined) {
-    return { path, exists: true, source, config: { providers: {} } };
+    return { path, exists: true, revision, source, config: { providers: {} } };
   }
   if (!isRecord(parsed)) {
     return {
       path,
       exists: true,
+      revision,
       source,
       config: { providers: {} },
       parseError: "the top level of models.yml must be a mapping",
     };
   }
-  return { path, exists: true, source, config: sanitizeModelsConfig(parsed as ModelsFileConfig) };
+  return { path, exists: true, revision, source, config: sanitizeModelsConfig(parsed as ModelsFileConfig) };
 }
 
 /** Tolerant read for consumers that only inspect the config (a broken file
@@ -278,24 +307,99 @@ export interface WriteModelsConfigOptions {
   /** Replace an unparseable models.yml instead of refusing — destroys whatever
    * the user has in the file, so only pass it on an explicit user request. */
   overwriteUnparseable?: boolean;
+  /** Revision the caller's edit was based on (from readModelsConfigFile()).
+   * The write is refused when the file has changed since. */
+  expectedRevision?: string;
 }
 
 export function writeModelsConfig(config: ModelsFileConfig, options: WriteModelsConfigOptions = {}): void {
   const current = readModelsConfigFile();
+  if (options.expectedRevision !== undefined && options.expectedRevision !== current.revision) {
+    throw new ModelsConfigConflictError(current.path);
+  }
   if (current.parseError && !options.overwriteUnparseable) {
     throw new ModelsConfigParseError(current.path, current.parseError);
   }
   const text = serializeModelsConfig(sanitizeModelsConfig(config), current.parseError ? undefined : current.source);
-  const dir = dirname(current.path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  // Write-then-rename: a crash mid-write must not leave models.yml truncated,
-  // which would disable every custom model until the user repairs it by hand.
-  const temp = join(dir, `.${basename(current.path)}.omp-web-${process.pid}-${Date.now()}.tmp`);
-  try {
-    writeFileSync(temp, text, "utf8");
-    renameSync(temp, current.path);
-  } catch (error) {
-    rmSync(temp, { force: true });
-    throw error;
-  }
+  // Atomic replace: a crash mid-write must not leave models.yml truncated, which
+  // would disable every custom model until the user repairs it by hand. The
+  // previous contents stay in models.yml.bak.
+  writeFileAtomic(current.path, text, { backup: true });
+}
+
+/** Providers' secret-bearing fields, as the models.yml schema defines them:
+ * `apiKey`, plus `headers` at provider, model and model-override level. */
+interface SecretRewriter {
+  apiKey(value: unknown, stored: unknown, location: string): unknown;
+  headers(value: Record<string, unknown>, stored: unknown, location: string): Record<string, unknown>;
+}
+
+function rewriteProviderSecrets(
+  config: ModelsFileConfig,
+  stored: ModelsFileConfig | undefined,
+  renamedFrom: Record<string, string>,
+  rewriter: SecretRewriter,
+): ModelsFileConfig {
+  if (!isRecord(config.providers)) return config;
+  const storedProviders = isRecord(stored?.providers) ? stored.providers : {};
+  const providers = Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => {
+    if (!isRecord(provider)) return [name, provider];
+    const originalName = Object.hasOwn(renamedFrom, name) ? renamedFrom[name] : name;
+    const previousProvider = Object.hasOwn(storedProviders, originalName) ? storedProviders[originalName] : undefined;
+    const previous: Record<string, unknown> = isRecord(previousProvider) ? previousProvider : {};
+    const where = `providers.${name}`;
+    const next: Record<string, unknown> = { ...provider };
+    if (next.apiKey !== undefined) next.apiKey = rewriter.apiKey(next.apiKey, previous.apiKey, `${where}.apiKey`);
+    if (isRecord(next.headers)) next.headers = rewriter.headers(next.headers, previous.headers, `${where}.headers`);
+    if (Array.isArray(next.models)) {
+      const previousModels = Array.isArray(previous.models) ? previous.models : [];
+      next.models = next.models.map((model: unknown) => {
+        if (!isRecord(model) || !isRecord(model.headers)) return model;
+        const previousModel = previousModels.find((candidate) => isRecord(candidate) && candidate.id === model.id);
+        const previousHeaders = isRecord(previousModel) ? previousModel.headers : undefined;
+        return { ...model, headers: rewriter.headers(model.headers, previousHeaders, `${where}.models.${String(model.id)}.headers`) };
+      });
+    }
+    if (isRecord(next.modelOverrides)) {
+      const previousOverrides = isRecord(previous.modelOverrides) ? previous.modelOverrides : {};
+      next.modelOverrides = Object.fromEntries(Object.entries(next.modelOverrides).map(([modelId, override]) => {
+        if (!isRecord(override) || !isRecord(override.headers)) return [modelId, override];
+        const previousOverride = Object.hasOwn(previousOverrides, modelId) ? previousOverrides[modelId] : undefined;
+        const previousHeaders = isRecord(previousOverride) ? previousOverride.headers : undefined;
+        return [modelId, { ...override, headers: rewriter.headers(override.headers, previousHeaders, `${where}.modelOverrides.${modelId}.headers`) }];
+      }));
+    }
+    return [name, next];
+  }));
+  return { ...config, providers };
+}
+
+/** Copy of `config` that is safe to send to the browser: every API key and every
+ * credential-looking header value is replaced by SECRET_MASK. */
+export function maskModelsConfigSecrets(config: ModelsFileConfig): ModelsFileConfig {
+  return rewriteProviderSecrets(config, undefined, {}, {
+    apiKey: (value) => (typeof value === "string" && value !== "" ? SECRET_MASK : value),
+    headers: (value) => maskStringRecord(value, isSensitiveHeaderName),
+  });
+}
+
+/**
+ * Inverse of maskModelsConfigSecrets: every SECRET_MASK in `config` becomes the
+ * value `stored` holds for the same field. `renamedFrom` maps a provider's new
+ * name to the name it had in `stored`. Throws UnresolvedSecretError when a
+ * placeholder has no stored counterpart.
+ */
+export function restoreModelsConfigSecrets(
+  config: ModelsFileConfig,
+  stored: ModelsFileConfig,
+  renamedFrom: Record<string, string> = {},
+): ModelsFileConfig {
+  return rewriteProviderSecrets(config, stored, renamedFrom, {
+    apiKey: (value, previous, location) => {
+      if (value !== SECRET_MASK) return value;
+      if (typeof previous !== "string") throw new UnresolvedSecretError(location);
+      return previous;
+    },
+    headers: (value, previous, location) => restoreStringRecord(value, previous, location),
+  });
 }

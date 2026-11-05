@@ -54,6 +54,16 @@ const DENIED_NAMES: ReadonlySet<string> = new Set([
   // override would be discarded without a word.
   "PORT",
   "NODE_ENV",
+  // Code-execution hooks. Each of these makes a child run attacker-chosen code
+  // before or instead of the program the user asked for (the LD_* / DYLD_*
+  // loader variables are covered by DENIED_PREFIXES):
+  "BASH_ENV", // bash sources this file on every non-interactive start
+  "ENV", // sh/dash/ksh source this file on interactive start
+  "BUN_OPTIONS", // bun counterpart of NODE_OPTIONS (--preload, ...)
+  "GIT_SSH_COMMAND", // git runs this command for every ssh remote
+  "GIT_EXTERNAL_DIFF", // git runs this program for every diff
+  "PYTHONSTARTUP", // python executes this file at startup
+  "PYTHONPATH", // python imports modules from here ahead of the stdlib
 ]);
 
 /** Prefixes that may never be overridden (compared uppercased). */
@@ -61,6 +71,8 @@ const DENIED_PREFIXES: readonly string[] = [
   "OMP_WEB_", // foxnio's own plumbing (auth, ports, binary overrides)
   "NEXT_", // stripped by sanitizeProjectCommandEnvironment
   "_", // shell-internal namespace
+  "LD_", // glibc loader: LD_PRELOAD / LD_LIBRARY_PATH / LD_AUDIT load attacker code into every child
+  "DYLD_", // macOS loader equivalent (DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, ...)
 ];
 
 export interface AgentEnvParseResult {
@@ -75,6 +87,7 @@ export interface AgentEnvErrorLabels {
   emptyName?: (line: number) => string;
   invalidName?: (line: number, name: string) => string;
   deniedName?: (line: number, name: string) => string;
+  invalidValue?: (line: number, name: string) => string;
 }
 
 const DEFAULT_LABELS: Required<AgentEnvErrorLabels> = {
@@ -82,12 +95,25 @@ const DEFAULT_LABELS: Required<AgentEnvErrorLabels> = {
   emptyName: (line) => `Line ${line}: missing variable name`,
   invalidName: (line, name) => `Line ${line}: "${name}" is not a valid variable name`,
   deniedName: (line, name) => `Line ${line}: "${name}" is reserved by foxnio and cannot be set`,
+  invalidValue: (line, name) => `Line ${line}: the value of "${name}" contains a NUL or line-break character`,
 };
 
 /** True when the name is reserved by omp-web and may not be overridden. */
 export function isDeniedAgentEnvName(name: string): boolean {
   const comparable = name.toUpperCase();
   return DENIED_NAMES.has(comparable) || DENIED_PREFIXES.some((prefix) => comparable.startsWith(prefix));
+}
+
+/** NUL truncates a value at the C level and CR/LF break `K=V` line formats. */
+const UNSAFE_VALUE = /[\0\r\n]/;
+
+/** The first problem with one name/value pair, or undefined when it is acceptable. */
+function validateEntry(name: string, value: string, line: number, message: Required<AgentEnvErrorLabels>): string | undefined {
+  if (!name) return message.emptyName(line);
+  if (!NAME_PATTERN.test(name)) return message.invalidName(line, name);
+  if (isDeniedAgentEnvName(name)) return message.deniedName(line, name);
+  if (UNSAFE_VALUE.test(value)) return message.invalidValue(line, name);
+  return undefined;
 }
 
 /**
@@ -114,19 +140,13 @@ export function parseAgentEnvText(raw: string, labels?: AgentEnvErrorLabels): Ag
       return;
     }
     const name = body.slice(0, separator).trim();
-    if (!name) {
-      errors.push(message.emptyName(line));
+    const value = body.slice(separator + 1).trim();
+    const problem = validateEntry(name, value, line, message);
+    if (problem) {
+      errors.push(problem);
       return;
     }
-    if (!NAME_PATTERN.test(name)) {
-      errors.push(message.invalidName(line, name));
-      return;
-    }
-    if (isDeniedAgentEnvName(name)) {
-      errors.push(message.deniedName(line, name));
-      return;
-    }
-    values[name] = body.slice(separator + 1).trim();
+    values[name] = value;
   });
   return { values, errors };
 }
@@ -138,11 +158,20 @@ export function parseAgentEnvText(raw: string, labels?: AgentEnvErrorLabels): Ag
  */
 export function sanitizeAgentEnvValues(input: unknown, labels?: AgentEnvErrorLabels): AgentEnvParseResult {
   if (!isRecord(input)) return { values: {}, errors: [] };
-  const text = Object.entries(input)
-    .filter(([, value]) => typeof value === "string")
-    .map(([name, value]) => `${name}=${value as string}`)
-    .join("\n");
-  return parseAgentEnvText(text, labels);
+  const message = { ...DEFAULT_LABELS, ...labels };
+  const values: Record<string, string> = {};
+  const errors: string[] = [];
+  // Entries are validated one by one, never joined into `K=V` text and parsed
+  // back: a value containing a newline would otherwise turn into extra variables.
+  Object.entries(input)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .forEach(([name, value], index) => {
+      const trimmed = value.trim();
+      const problem = validateEntry(name, trimmed, index + 1, message);
+      if (problem) errors.push(problem);
+      else values[name] = trimmed;
+    });
+  return { values, errors };
 }
 
 /** Canonical `KEY=VALUE` text, sorted by name so saves are stable and diffable. */

@@ -7,7 +7,7 @@
 // password they write. See issue #239.
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { randomBytes, scryptSync, timingSafeEqual } = require("node:crypto");
+const { randomBytes, scrypt, scryptSync, timingSafeEqual } = require("node:crypto");
 
 /** Salt length in bytes. */
 const SALT_BYTES = 16;
@@ -78,6 +78,14 @@ function isPasswordHash(value) {
   return parsePasswordHash(value) !== null;
 }
 
+/** scrypt arguments for verifying against a parsed hash. */
+function verificationParams(parsed) {
+  return {
+    salt: Buffer.from(parsed.salt, "base64url"),
+    options: { N: 2 ** parsed.logN, r: parsed.r, p: parsed.p, maxmem: maxMemoryFor(parsed.logN, parsed.r) },
+  };
+}
+
 /**
  * Check a candidate password against a stored hash. A malformed or too-weak
  * hash never matches: configured-but-unusable must fail closed, not open.
@@ -85,16 +93,32 @@ function isPasswordHash(value) {
 function verifyPassword(candidate, stored) {
   const parsed = parsePasswordHash(stored);
   if (!parsed) return false;
+  const { salt, options } = verificationParams(parsed);
   let digest;
   try {
-    digest = scryptSync(candidate, Buffer.from(parsed.salt, "base64url"), DIGEST_BYTES, {
-      N: 2 ** parsed.logN,
-      r: parsed.r,
-      p: parsed.p,
-      maxmem: maxMemoryFor(parsed.logN, parsed.r),
-    });
+    digest = scryptSync(candidate, salt, DIGEST_BYTES, options);
   } catch {
     // Out-of-memory or unsupported parameters: treat as a failed sign-in.
+    return false;
+  }
+  return equals(digest.toString("base64url"), parsed.digest);
+}
+
+/**
+ * `verifyPassword` on the libuv thread pool. The server uses this for sign-in:
+ * the synchronous variant holds the whole event loop for the ~60 ms a
+ * full-cost hash takes, which every request would then wait behind.
+ */
+async function verifyPasswordAsync(candidate, stored) {
+  const parsed = parsePasswordHash(stored);
+  if (!parsed) return false;
+  const { salt, options } = verificationParams(parsed);
+  let digest;
+  try {
+    digest = await new Promise((resolve, reject) => {
+      scrypt(candidate, salt, DIGEST_BYTES, options, (error, key) => (error ? reject(error) : resolve(key)));
+    });
+  } catch {
     return false;
   }
   return equals(digest.toString("base64url"), parsed.digest);
@@ -111,4 +135,5 @@ module.exports = {
   parsePasswordHash,
   isPasswordHash,
   verifyPassword,
+  verifyPasswordAsync,
 };

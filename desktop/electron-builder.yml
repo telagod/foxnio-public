@@ -17,9 +17,12 @@ files:
   - lib/**/*
   - public/**/*
   - desktop/main.cjs
+  - desktop/external-url.cjs
   - desktop/node-runtime.cjs
+  - desktop/startup.cjs
   - next.config.ts
   - "!node_modules/**/*.map"
+  - "!**/*.test.*"
   - package.json
 extraResources:
   - from: desktop/runtime/node
@@ -33,7 +36,11 @@ win:
     - nsis
     - portable
   icon: public/omp-web.ico
+portable:
+  artifactName: ${productName}-${version}-${os}-${arch}-portable.${ext}
 nsis:
+  # NSIS and portable would both resolve to the global pattern and overwrite each other.
+  artifactName: ${productName}-Setup-${version}-${os}-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

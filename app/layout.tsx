@@ -7,6 +7,7 @@ import { IosFocusZoomGuard } from "@/components/IosFocusZoomGuard";
 import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import { getInstallName } from "@/lib/install-name";
 import "./globals.css";
+import "./sidebar.css";
 
 const geist = Geist({
   subsets: ["latin"],

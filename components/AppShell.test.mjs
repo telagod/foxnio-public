@@ -1,13 +1,59 @@
+import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { createJiti } from "jiti";
 
-test("sidebar drag scales pointer deltas by the interface zoom", async () => {
-  const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
+const layout = await jiti.import("./AppShell-layout.tsx");
+
+test("sidebar drag scales pointer deltas by the interface zoom", () => {
   // clientX is viewport pixels while --sidebar-width is zoomed layout pixels;
   // without the correction the edge overshoots at 110/120% scale.
-  assert.match(source, /--ui-scale/);
-  assert.match(source, /\(ev\.clientX - startX\) \/ uiScale/);
+  assert.equal(layout.dragSidebarWidth(280, 500, 560, 1), 340);
+  assert.equal(layout.dragSidebarWidth(280, 500, 560, 1.2), 330);
+  assert.equal(layout.dragSidebarWidth(300, 500, 460, 0.8), 250, "zoom below 1 enlarges the delta");
+  // The result is always inside the allowed range.
+  assert.equal(layout.dragSidebarWidth(280, 0, 5000, 1), layout.SIDEBAR_MAX_WIDTH);
+  assert.equal(layout.dragSidebarWidth(280, 0, -5000, 1), layout.SIDEBAR_MIN_WIDTH);
+});
+
+test("the interface scale is read from the --ui-scale custom property", () => {
+  const root = document.documentElement;
+  assert.equal(layout.readUiScale(), 1);
+  root.style.setProperty("--ui-scale", "1.25");
+  assert.equal(layout.readUiScale(), 1.25);
+  root.style.setProperty("--ui-scale", "garbage");
+  assert.equal(layout.readUiScale(), 1);
+  root.style.setProperty("--ui-scale", "0");
+  assert.equal(layout.readUiScale(), 1);
+  root.style.removeProperty("--ui-scale");
+});
+
+test("sidebar keyboard resizing: arrows 12 px, Shift 32, Home/End limits, Enter resets", () => {
+  assert.equal(layout.sidebarWidthForKey("ArrowRight", false, 300), 312);
+  assert.equal(layout.sidebarWidthForKey("ArrowLeft", false, 300), 288);
+  assert.equal(layout.sidebarWidthForKey("ArrowRight", true, 300), 332);
+  assert.equal(layout.sidebarWidthForKey("ArrowLeft", true, 300), 268);
+  assert.equal(layout.sidebarWidthForKey("ArrowLeft", true, layout.SIDEBAR_MIN_WIDTH + 5), layout.SIDEBAR_MIN_WIDTH);
+  assert.equal(layout.sidebarWidthForKey("ArrowRight", false, layout.SIDEBAR_MAX_WIDTH - 5), layout.SIDEBAR_MAX_WIDTH);
+  assert.equal(layout.sidebarWidthForKey("Home", false, 300), layout.SIDEBAR_MIN_WIDTH);
+  assert.equal(layout.sidebarWidthForKey("End", false, 300), layout.SIDEBAR_MAX_WIDTH);
+  assert.equal(layout.sidebarWidthForKey("Enter", false, 400), layout.SIDEBAR_DEFAULT_WIDTH);
+  assert.equal(layout.sidebarWidthForKey("a", false, 300), null);
+  assert.equal(layout.sidebarWidthForKey("ArrowUp", false, 300), null);
+});
+
+test("the stored sidebar width is clamped and falls back to the default", () => {
+  localStorage.removeItem(layout.SIDEBAR_WIDTH_STORAGE_KEY);
+  assert.equal(layout.loadSidebarWidth(), layout.SIDEBAR_DEFAULT_WIDTH);
+  localStorage.setItem(layout.SIDEBAR_WIDTH_STORAGE_KEY, "9999");
+  assert.equal(layout.loadSidebarWidth(), layout.SIDEBAR_MAX_WIDTH);
+  localStorage.setItem(layout.SIDEBAR_WIDTH_STORAGE_KEY, "100");
+  assert.equal(layout.loadSidebarWidth(), layout.SIDEBAR_MIN_WIDTH);
+  localStorage.setItem(layout.SIDEBAR_WIDTH_STORAGE_KEY, "nope");
+  assert.equal(layout.loadSidebarWidth(), layout.SIDEBAR_DEFAULT_WIDTH);
+  localStorage.removeItem(layout.SIDEBAR_WIDTH_STORAGE_KEY);
 });
 
 test("the expand-thinking preference reaches the thinking block, off unless stored", async () => {

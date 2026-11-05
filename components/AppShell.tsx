@@ -9,8 +9,9 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
 import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
-import { SessionSidebar } from "./SessionSidebar";
-import type { WorktreeContext } from "./SessionSidebar-helpers";
+import { useViewportHeight } from "@/hooks/useViewportHeight";
+import { Sidebar } from "@/components/sidebar";
+import type { WorktreeContext } from "@/lib/worktree-context";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
@@ -61,20 +62,22 @@ import {
   RIGHT_PANEL_WIDTH_STORAGE_KEY,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_WIDTH_STORAGE_KEY,
+  SidebarResizeHandle,
   clampRightPanelWidth,
-  clampSidebarWidth,
   loadRightPanelWidth,
   loadSidebarWidth,
-  projectLabel,
+  readUiScale,
   WorkspaceState,
 } from "./AppShell-layout";
+import { projectLabel } from "@/lib/session-tree";
 import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
-import { openEventStream } from "@/lib/event-stream";
+import { openResilientEventStream } from "@/lib/event-stream";
 import { SessionTabs } from "./SessionTabs";
 import { useSessionTabs } from "@/hooks/useSessionTabs";
-import { useRunningSessionIds } from "@/hooks/useRunningSessionIds";
+import { getSessionStore, useSessionStoreLifecycle } from "@/hooks/useSessionStore";
+import { resolveStoreSession } from "@/lib/resolve-session";
 import { SESSION_TABS_ENABLED_STORAGE_KEY, type SessionTab } from "@/lib/session-tabs";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
@@ -123,6 +126,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { t, locale } = useI18n();
   const isMobile = useIsMobile();
+  useSessionStoreLifecycle();
   const isCompactOverlay = useIsCompactOverlay();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -136,7 +140,6 @@ export function AppShell({ appName }: { appName: string }) {
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [explorerRefreshing, setExplorerRefreshing] = useState(false);
@@ -171,15 +174,11 @@ export function AppShell({ appName }: { appName: string }) {
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
   // null until localStorage is read (see the load effect).
   const [sessionTabsPref, setSessionTabsPref] = useState<boolean | null>(null);
-  const [sidebarResizing, setSidebarResizing] = useState(false);
-  // Active drag handlers so an unmount mid-drag can detach them.
-  const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
-  // DOM element + live width during a drag (see handleSidebarResizeStart).
+  // Phone drawer focus handling; on desktop the ref only lets the resize handle write --sidebar-width.
   const sidebarContainerRef = useModalDialog<HTMLElement>({
     onClose: () => setSidebarOpen(false),
     active: isMobile && mobileSidebarReady && sidebarOpen && !settingsTab,
   });
-  const pendingSidebarWidthRef = useRef<number>(SIDEBAR_DEFAULT_WIDTH);
   useEffect(() => {
     setSidebarWidth(loadSidebarWidth());
     try {
@@ -267,22 +266,21 @@ export function AppShell({ appName }: { appName: string }) {
       // The preference still applies for this page load.
     }
   }, []);
-  // Persist the committed width (after each change; skipped mid-drag, then
-  // written once the drag ends). The first run is skipped so the mount-time
-  // default cannot overwrite the stored width before it is loaded.
+  // Persist the committed width (a drag commits once on release). The first run
+  // is skipped so the mount-time default cannot overwrite the stored width
+  // before it is loaded.
   const sidebarWidthMountedRef = useRef(false);
   useEffect(() => {
     if (!sidebarWidthMountedRef.current) {
       sidebarWidthMountedRef.current = true;
       return;
     }
-    if (sidebarResizing) return;
     try {
       window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
     } catch {
       // ignore storage quota / privacy-mode errors
     }
-  }, [sidebarWidth, sidebarResizing]);
+  }, [sidebarWidth]);
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
   const [appUpdateDialogOpen, setAppUpdateDialogOpen] = useState(false);
   const [appUpdatePhase, setAppUpdatePhase] = useState<AppUpdatePhase>("idle");
@@ -738,7 +736,6 @@ export function AppShell({ appName }: { appName: string }) {
   const [systemPromptLoading, setSystemPromptLoading] = useState(false);
   const systemPromptLoaderRef = useRef<(() => Promise<void>) | null>(null);
   const systemPromptLoadIdRef = useRef(0);
-  const systemBtnRef = useRef<HTMLButtonElement>(null);
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
     setSystemPrompt(prompt);
     setSystemPromptLoading(false);
@@ -845,82 +842,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSidebarOpen((open) => !open);
   }, [isMobile]);
 
-  const resetSidebarWidth = useCallback(() => {
-    setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
-  }, []);
 
-  const changeSidebarWidth = useCallback((delta: number) => {
-    setSidebarWidth((prev) => clampSidebarWidth(prev + delta));
-  }, []);
-
-  const handleSidebarResizeKey = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      changeSidebarWidth(-10);
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      changeSidebarWidth(10);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      resetSidebarWidth();
-    }
-  }, [changeSidebarWidth, resetSidebarWidth]);
-
-  const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
-    if (isMobile) return;
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = sidebarWidth;
-    // Interface Scale (html[data-ui-scale] zoom) leaves clientX in viewport
-    // pixels while the sidebar width is zoomed layout pixels: scale the drag
-    // delta so the edge tracks the pointer at any zoom (same --ui-scale
-    // ground truth as the zoom-aware menus in SessionSidebar-chrome).
-    let uiScale = 1;
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-      const value = parseFloat(raw);
-      if (Number.isFinite(value) && value > 0) uiScale = value;
-    } catch {
-      // SSR/unavailable: fall back to unscaled math.
-    }
-    setSidebarResizing(true);
-    const onMove = (ev: MouseEvent) => {
-      const next = clampSidebarWidth(startWidth + (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      sidebarContainerRef.current?.style.setProperty("--sidebar-width", `${next}px`);
-      pendingSidebarWidthRef.current = next;
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      sidebarResizeHandlersRef.current = null;
-      setSidebarResizing(false);
-      // Commit the final width so state and the persisted value agree with
-      // what the user actually dragged to.
-      setSidebarWidth(pendingSidebarWidthRef.current);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    pendingSidebarWidthRef.current = startWidth;
-    sidebarResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [isMobile, sidebarWidth]);
-
-  // If the app unmounts mid-drag, remove the window listeners and restore the
-  // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
-  useEffect(() => () => {
-    const handlers = sidebarResizeHandlersRef.current;
-    if (!handlers) return;
-    window.removeEventListener("mousemove", handlers.onMove);
-    window.removeEventListener("mouseup", handlers.onUp);
-    sidebarResizeHandlersRef.current = null;
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-  }, []);
 
   const resetRightPanelWidth = useCallback(() => {
     rightPanelRef.current?.style.removeProperty("--right-panel-width");
@@ -963,14 +885,7 @@ export function AppShell({ appName }: { appName: string }) {
       ?? RIGHT_PANEL_MIN_WIDTH;
     // Same --ui-scale ground truth as the left sidebar handle: clientX is in
     // viewport pixels while the panel width is zoomed layout pixels.
-    let uiScale = 1;
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-      const value = parseFloat(raw);
-      if (Number.isFinite(value) && value > 0) uiScale = value;
-    } catch {
-      // SSR/unavailable: fall back to unscaled math.
-    }
+    const uiScale = readUiScale();
     setRightPanelResizing(true);
     const onMove = (ev: MouseEvent) => {
       // Dragging the left edge left grows the panel: inverse of the sidebar.
@@ -1088,13 +1003,22 @@ export function AppShell({ appName }: { appName: string }) {
     rightPanelRef.current = element;
     setRightPanelMounted(element !== null);
   }, [rightPanelRef]);
+  useViewportHeight();
   useMobileSidebarGestures({
     enabled: isMobile && mobileSidebarReady && !settingsTab,
     leftOpen: sidebarOpen,
     rightOpen: rightPanelOpen,
     onLeftOpenChange: setSidebarOpen,
     onRightOpenChange: setRightPanelOpen,
+    onRightPrepare: () => setRightPanelHasOpened(true),
   });
+  // While a phone drawer covers the page, nothing behind it may scroll.
+  const phoneDrawerOpen = isMobile && !settingsTab && (sidebarOpen || rightPanelOpen);
+  useEffect(() => {
+    if (!phoneDrawerOpen) return;
+    document.documentElement.setAttribute("data-drawer-open", "");
+    return () => document.documentElement.removeAttribute("data-drawer-open");
+  }, [phoneDrawerOpen]);
   const pendingRightPanelWidthRef = useRef<number | null>(null);
   const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
   useEffect(() => {
@@ -1295,11 +1219,10 @@ export function AppShell({ appName }: { appName: string }) {
   }, [router, isMobile]);
 
   const sessionTabsActive = !isMobile && sessionTabsPref === true;
-  const { runningIds: runningSessionIds, listVersion: runningListVersion } = useRunningSessionIds(sessionTabsActive);
   const {
     tabs: sessionTabs, closeTab, removeTab: removeSessionTabById, renameTabId, moveTab, shiftTab,
     resolveSession: resolveTabSession, getScrollAnchor, setScrollAnchor,
-  } = useSessionTabs({ enabled: sessionTabsActive, selectedSession, refreshToken: refreshKey + runningListVersion });
+  } = useSessionTabs({ enabled: sessionTabsActive, selectedSession });
 
   // ---- In-app Navigate back / forward over visited chat views ----
   // Own stack, not the browser History API (that one belongs to the mobile
@@ -1325,19 +1248,6 @@ export function AppShell({ appName }: { appName: string }) {
     });
   }, [navSessionId, navSessionCwd, newSessionCwd, recordNavigationView]);
 
-  // Resolves a history entry's session id against the live list. `null`
-  // means the id is gone (entry should be dropped); "unavailable" means the
-  // list itself could not be fetched (keep the entry, abort this navigation).
-  const fetchSessionForNavigation = useCallback(async (sessionId: string): Promise<SessionInfo | null | "unavailable"> => {
-    try {
-      const res = await fetch("/api/sessions");
-      if (!res.ok) return "unavailable";
-      const data = (await res.json()) as { sessions?: SessionInfo[] };
-      return data.sessions?.find((s) => s.id === sessionId) ?? null;
-    } catch {
-      return "unavailable";
-    }
-  }, []);
 
   const navigateInHistory = useCallback(async (direction: -1 | 1): Promise<void> => {
     // Dead entries (deleted sessions) are skipped, like browser history
@@ -1355,7 +1265,9 @@ export function AppShell({ appName }: { appName: string }) {
         return;
       }
       const versionAtPress = navViewVersionRef.current;
-      const session = await fetchSessionForNavigation(entry.sessionId);
+      // `null` means the id is gone (entry should be dropped); "unavailable"
+      // means the list itself could not be loaded (keep the entry, abort this navigation).
+      const session = await resolveStoreSession(getSessionStore(), entry.sessionId);
       if (navViewVersionRef.current !== versionAtPress) return; // user moved on: do nothing
       if (session === "unavailable") return; // list fetch failed: keep the entry, try again next press
       if (session) {
@@ -1367,7 +1279,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (direction === -1) navigationHistory.dropPeekedBack();
       else navigationHistory.dropPeekedForward();
     }
-  }, [navigationHistory, peekNavigationBack, peekNavigationForward, fetchSessionForNavigation, handleNewSession, handleSelectSession]);
+  }, [navigationHistory, peekNavigationBack, peekNavigationForward, handleNewSession, handleSelectSession]);
 
   // Shared by the sidebar buttons and the global shortcuts. The keyboard
   // layer always swallows the keystroke, so both directions stop dead at the
@@ -1381,7 +1293,8 @@ export function AppShell({ appName }: { appName: string }) {
 
   // Tooltip shortcut labels follow the platform (⌘[ vs Alt+←). Computed from
   // navigator after mount state to keep SSR markup stable.
-  const [navIsMac] = useState(() => isMacPlatform());
+  const [navIsMac, setNavIsMac] = useState(false);
+  useEffect(() => setNavIsMac(isMacPlatform()), []);
   const sidebarNavigation = useMemo(() => ({
     canBack: navigationHistory.canBack,
     canForward: navigationHistory.canForward,
@@ -1397,31 +1310,28 @@ export function AppShell({ appName }: { appName: string }) {
     onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
     onNavigateBack: handleNavigateBack,
     onNavigateForward: handleNavigateForward,
+    onToggleSidebar: settingsTab ? undefined : handleSidebarToggle,
     activeCwd,
     scopeNativeSelectAll,
   });
 
   // Client-built transient SessionInfo (new session / fork) lacks the
   // server-computed projectRoot, which the same-project check in
-  // handleCwdChange relies on. Hydrate it from the session list so switching
+  // handleCwdChange relies on. Hydrate it from the session store so switching
   // worktrees right after creating a session doesn't close the chat.
-  const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
-      .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
-      .then((d) => {
-        const full = d?.sessions.find((s) => s.id === sessionId);
-        if (!full) return;
-        setSelectedSession((prev) => (prev && prev.id === sessionId && (!prev.projectRoot || prev.path === "") ? full : prev));
-      })
-      .catch(() => {});
+  const hydrateSelectedSession = useCallback(async (sessionId: string) => {
+    const full = await getSessionStore().ensureSession(sessionId);
+    if (!full) return;
+    setSelectedSession((prev) => (prev && prev.id === sessionId && (!prev.projectRoot || prev.path === "") ? full : prev));
   }, []);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
     setNewSessionCwd(null);
     setSelectedSession(session);
-    setRefreshKey((k) => k + 1);
-    hydrateSelectedSession(session.id);
+    // The new session's workspace may not be a known project yet.
+    void getSessionStore().refresh({ projects: true });
+    void hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
 
@@ -1430,15 +1340,15 @@ export function AppShell({ appName }: { appName: string }) {
     activeSessionIdRef.current = newId;
     renameTabId(oldId, newId);
     setSelectedSession((current) => current?.id === oldId ? { ...current, id: newId, path: "" } : current);
-    setRefreshKey((key) => key + 1);
-    hydrateSelectedSession(newId);
+    void getSessionStore().refresh();
+    void hydrateSelectedSession(newId);
     // This is the same conversation. Preserve ChatWindow's run/edit fences
     // and its mounted composer, including unfinished attachments and audio.
     router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
   }, [router, hydrateSelectedSession, renameTabId]);
 
   const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
+    void getSessionStore().refresh();
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
@@ -1451,19 +1361,11 @@ export function AppShell({ appName }: { appName: string }) {
     if (isCompactOverlay) setRightPanelOpen(false);
     // A full load (not router navigation) so an expired sign-in reaches proxy.ts and the login page.
     const sessionUrl = new URL(`/?session=${encodeURIComponent(sessionId)}`, window.location.origin).href;
-    void fetch("/api/sessions")
-      .then((r) => {
-        if (!r.ok) {
-          window.location.assign(sessionUrl);
-          return;
-        }
-        return (r.json() as Promise<{ sessions: SessionInfo[] }>).then((d) => {
-          const session = d.sessions.find((s) => s.id === sessionId);
-          if (session) handleSelectSession(session);
-          else toast.error(translate("notifications.sessionNotFound"));
-        });
-      })
-      .catch(() => window.location.assign(sessionUrl));
+    void resolveStoreSession(getSessionStore(), sessionId).then((session) => {
+      if (session === "unavailable") window.location.assign(sessionUrl);
+      else if (session) handleSelectSession(session);
+      else toast.error(translate("notifications.sessionNotFound"));
+    });
   }, [handleSelectSession, isCompactOverlay]);
 
   // Full-page Settings hides the chat, so its session counts as not viewed.
@@ -1487,7 +1389,7 @@ export function AppShell({ appName }: { appName: string }) {
 
       const title = body.title.trim();
       if (activeSessionIdRef.current !== sessionId) return;
-      setRefreshKey((key) => key + 1);
+      void getSessionStore().refresh();
       setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
       setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
       setAutoNameStatus({ kind: "success" });
@@ -1515,7 +1417,7 @@ export function AppShell({ appName }: { appName: string }) {
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
-    setRefreshKey((k) => k + 1);
+    void getSessionStore().refresh();
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
     setSelectedSession((prev) => ({
@@ -1525,7 +1427,7 @@ export function AppShell({ appName }: { appName: string }) {
       // fork shows up immediately instead of waiting for a refresh.
       path: "",
     }));
-    hydrateSelectedSession(newSessionId);
+    void hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
 
@@ -1534,7 +1436,8 @@ export function AppShell({ appName }: { appName: string }) {
     // otherwise keep the exit guard armed for unreachable content.
     clearDraft(sessionId);
     removeSessionTabById(sessionId);
-    setRefreshKey((k) => k + 1);
+    getSessionStore().removeSession(sessionId);
+    void getSessionStore().refresh();
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
@@ -1554,7 +1457,7 @@ export function AppShell({ appName }: { appName: string }) {
   const handleArchiveRestored = useCallback(async (sessionId: string) => {
     setArchiveBrowserOpen(false);
     publishSessionsChanged([sessionId]);
-    setRefreshKey((k) => k + 1);
+    void getSessionStore().refresh();
 
     // The poll must not yank the UI back to the restored session if the user
     // picks another one while we wait, and an untracked setTimeout chain would
@@ -1563,19 +1466,11 @@ export function AppShell({ appName }: { appName: string }) {
     const sessionAtRestoreStart = activeSessionIdRef.current;
     const selectRestoredSession = async (attemptsLeft = 5): Promise<void> => {
       if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
-      try {
-        const res = await fetch("/api/sessions");
-        if (res.ok) {
-          const data = (await res.json()) as { sessions?: SessionInfo[] };
-          const found = data.sessions?.find((s) => s.id === sessionId);
-          if (found) {
-            if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
-            handleSelectSession(found, false);
-            return;
-          }
-        }
-      } catch {
-        // network error / abort
+      const found = await resolveStoreSession(getSessionStore(), sessionId);
+      if (found && found !== "unavailable") {
+        if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
+        handleSelectSession(found, false);
+        return;
       }
 
       if (attemptsLeft > 0) {
@@ -1662,6 +1557,7 @@ export function AppShell({ appName }: { appName: string }) {
       });
     } catch (e) {
       console.error("Failed to send host tool result:", e);
+      toast.error(translate("appShell.hostToolResultFailed"));
     }
   }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab]);
   const crossSessionHostToolRef = useRef(handleCrossSessionHostTool);
@@ -1669,18 +1565,16 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     // Mounted with the shell (not the sidebar) so it keeps listening on the
     // full-page Settings view too.
-    const source = openEventStream({ kind: "host-tools" });
-    source.onmessage = (e) => {
+    return openResilientEventStream({ kind: "host-tools" }, (data) => {
       try {
-        const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
+        const call = JSON.parse(data) as CrossSessionHostToolCall & { type?: string };
         if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName) {
           void crossSessionHostToolRef.current({ sessionId: call.sessionId, id: call.id, toolName: call.toolName, arguments: call.arguments ?? {} });
         }
       } catch {
         // ignore malformed frames
       }
-    };
-    return () => source.close();
+    });
   }, []);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
@@ -1913,8 +1807,10 @@ export function AppShell({ appName }: { appName: string }) {
     return () => observer.disconnect();
   }, [windowTitle]);
 
+  const sidebarToggleLabel = sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar");
+  const sidebarShortcutHint = navIsMac ? "⌘B" : "Ctrl+B";
   const sidebarContent = (
-    <SessionSidebar
+    <Sidebar
       selectedSessionId={selectedSession?.id ?? null}
       optimisticSession={selectedSession?.path === "" ? selectedSession : null}
       onSelectSession={handleSelectSession}
@@ -1922,7 +1818,6 @@ export function AppShell({ appName }: { appName: string }) {
       initialSessionId={initialSessionId}
       skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
       onInitialRestoreDone={handleInitialRestoreDone}
-      refreshKey={refreshKey}
       onSessionDeleted={handleSessionDeleted}
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
       onCwdChange={handleCwdChange}
@@ -1937,6 +1832,7 @@ export function AppShell({ appName }: { appName: string }) {
       navigation={sidebarNavigation}
       updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
       onClose={isMobile ? handleSidebarToggle : undefined}
+      mobile={isMobile}
     />
   );
 
@@ -2043,11 +1939,7 @@ export function AppShell({ appName }: { appName: string }) {
           animation: none;
         }
       }
-      @media (max-width: 640px) {
-        .sidebar-container.sidebar-mobile-pending.sidebar-open {
-          transform: translateX(-100%);
-        }
-      }
+
     `}
     </style>
     <a href="#main-content" className="skip-link">{t("appShell.skipToContent")}</a>
@@ -2061,7 +1953,7 @@ export function AppShell({ appName }: { appName: string }) {
         aria-modal={isMobile ? true : undefined}
         tabIndex={-1}
         ref={sidebarContainerRef}
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}`}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
         aria-label={t("projects.heading")}
         aria-hidden={mobileSidebarReady && (!sidebarOpen || rightPanelIsModal) ? true : undefined}
         inert={mobileSidebarReady && (!sidebarOpen || rightPanelIsModal) ? true : undefined}
@@ -2079,33 +1971,29 @@ export function AppShell({ appName }: { appName: string }) {
         {sidebarContent}
       </nav>
 
-      {/* Resize handle — desktop only, hidden while the sidebar is closed */}
-      {!isMobile && sidebarOpen && (
+      {isMobile && (
         <div
-          className="sidebar-resize-handle"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t("appShell.resizeSidebar")}
-          tabIndex={0}
-          onMouseDown={handleSidebarResizeStart}
-          onDoubleClick={resetSidebarWidth}
-          onKeyDown={handleSidebarResizeKey}
-          title={t("appShell.resizeSidebarTitle")}
-          style={{
-            width: 5,
-            flexShrink: 0,
-            marginLeft: -5,
-            cursor: "col-resize",
-            background: "transparent",
-            zIndex: 205,
-            outline: "none",
-            transition: "background var(--dur-fast) var(--ease-out-warm)",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-          onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onBlur={(e) => { e.currentTarget.style.background = "transparent"; }}
+          className="drawer-backdrop"
+          data-drawer-backdrop="left"
+          data-open={mobileSidebarReady && sidebarOpen ? "true" : "false"}
+          aria-hidden="true"
+          onClick={() => setSidebarOpen(false)}
         />
+      )}
+      {/* Edge strips own the open/close drags; see hooks/useMobileSidebarGestures.ts. */}
+      {isMobile && mobileSidebarReady && !sidebarOpen && !rightPanelOpen && (
+        <>
+          <div className="drawer-edge drawer-edge-left" data-drawer-edge="left" aria-hidden="true" />
+          <div className="drawer-edge drawer-edge-right" data-drawer-edge="right" aria-hidden="true" />
+        </>
+      )}
+      {isMobile && mobileSidebarReady && rightPanelOpen && (
+        <div className="drawer-edge drawer-edge-close" data-drawer-edge="right-close" aria-hidden="true" />
+      )}
+
+      {/* Resize handle: desktop only, hidden while the sidebar is closed */}
+      {!isMobile && sidebarOpen && (
+        <SidebarResizeHandle sidebarRef={sidebarContainerRef} width={sidebarWidth} onCommit={setSidebarWidth} />
       )}
         </>
       )}
@@ -2165,8 +2053,9 @@ export function AppShell({ appName }: { appName: string }) {
               onClick={handleSidebarToggle}
               aria-expanded={sidebarOpen}
               aria-controls="workspace-sidebar"
-              title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
-              aria-label={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
+              title={`${sidebarToggleLabel} (${sidebarShortcutHint})`}
+              aria-label={sidebarToggleLabel}
+              aria-keyshortcuts={navIsMac ? "Meta+B" : "Control+B"}
               className="shell-toolbar-btn ui-focus-ring"
             >
               {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
@@ -2229,7 +2118,6 @@ export function AppShell({ appName }: { appName: string }) {
                   hasSession
                 />
                 <button
-                  ref={systemBtnRef}
                   onClick={handleSystemPromptToggle}
                   title={t("appShell.system")}
                   aria-label={t("appShell.system")}
@@ -2390,7 +2278,7 @@ export function AppShell({ appName }: { appName: string }) {
                       disabled={wandDisabled}
                       title={wandTooltip}
                       aria-label={wandLabel}
-                      className="ui-focus-ring"
+                      className="ui-focus-ring shell-title-action"
                       style={{
                         display: "inline-flex",
                         alignItems: "center",
@@ -2537,7 +2425,6 @@ export function AppShell({ appName }: { appName: string }) {
           <SessionTabs
             tabs={sessionTabs}
             activeId={selectedSession?.id ?? null}
-            runningIds={runningSessionIds}
             onSelect={handleSelectSessionTab}
             onClose={handleCloseSessionTab}
             onNew={handleNewSessionTab}

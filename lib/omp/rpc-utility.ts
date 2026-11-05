@@ -1,5 +1,5 @@
 import { homedir } from "os";
-import { RpcProcess } from "./rpc-process";
+import { RpcCommandTimeoutError, RpcProcess } from "./rpc-process";
 
 /**
  * Shared short-lived `omp` utility process for global registry/auth queries
@@ -141,7 +141,18 @@ export function runUtilityCommand<T = unknown>(
       if (!state.proc || !state.proc.isAlive) {
         state.proc = await startProcess(state);
       }
-      return await state.proc.sendCommand<T>(command, timeoutMs);
+      const proc = state.proc;
+      try {
+        return await proc.sendCommand<T>(command, timeoutMs);
+      } catch (error) {
+        // A timed-out child is wedged or stuck on a hung provider; every later
+        // command would queue behind it. Drop it so the next one spawns fresh.
+        if (error instanceof RpcCommandTimeoutError) {
+          if (state.proc === proc) state.proc = null;
+          void proc.dispose();
+        }
+        throw error;
+      }
     } finally {
       scheduleIdleKill(state);
     }

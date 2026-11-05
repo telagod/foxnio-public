@@ -22,7 +22,6 @@ export const MAX_RECORDING_MS = 300_000;
 const STT_TIMEOUT_MS = 6 * 60_000;
 const STT_POLL_INTERVAL_MS = 500;
 const STT_POLL_REQUEST_TIMEOUT_MS = 10_000;
-const STT_ADOPT_INTERVAL_MS = 4_000;
 const STT_OWNER_TOKEN_KEY = "omp-web:stt-owner-token";
 const STT_MOVED_JOB_PREFIX = "omp-web:stt-moved-job:";
 const STT_RECOVERY_STORAGE_ERROR = "Transcription recovery could not be saved; keep this tab open to recover the recording.";
@@ -118,6 +117,22 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+// Time actually recorded: wall time minus paused spans.
+function elapsedCaptureMs(capture: DictationCapture): number {
+  const now = performance.now();
+  return Math.max(0, now - capture.startedAt - (capture.pausedAccum + (capture.pausedAt !== null ? now - capture.pausedAt : 0)));
+}
+
+// getUserMedia rejects with a DOMException whose `name` identifies the cause;
+// its `message` is browser-specific English. The composer translates these
+// two fixed strings.
+function microphoneStartError(err: unknown): string {
+  const name = err && typeof err === "object" && "name" in err ? err.name : undefined;
+  if (name === "NotAllowedError") return "Microphone access denied";
+  if (name === "NotFoundError") return "Microphone not found";
+  return err instanceof Error ? err.message : "Microphone access denied";
+}
+
 export function useDictation({ onTranscript, onError, scope, identityMove }: UseDictationOptions) {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -137,6 +152,9 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
   const abortControllerRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
   const isStartingRef = useRef(false);
+  // Bumped whenever a capture is torn down (cancel, unmount, restart): a
+  // getUserMedia that resolves afterwards sees it was abandoned.
+  const startGenerationRef = useRef(0);
   const maxTimeoutRef = useRef<number | null>(null);
   const pausePreviewTimeoutRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -217,6 +235,7 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
   }, []);
 
   const cleanup = useCallback(() => {
+    startGenerationRef.current += 1;
     clearMaxTimeout();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
@@ -445,9 +464,11 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
     if (jobId) void followJob(jobId);
   }, [ownerToken, failTranscription, followJob]);
 
-  // Pick up this scope's job on mount, on focus or visibility, and every few
-  // seconds while visible: a recording another browser sent (or this one
-  // sent before a reload) shows here with playback and retry.
+  // Pick up this scope's job on mount, scope change, focus and visibility: a
+  // recording another browser sent (or this one sent before a reload) shows
+  // here with playback and retry. Never on a timer: an idle composer without
+  // a job used to list the scope every few seconds forever. Once a job id is
+  // known, followJob polls that one job.
   const idleRef = useRef(true);
   const adoptRef = useRef<((retry?: boolean) => Promise<void>) | null>(null);
   useEffect(() => {
@@ -520,13 +541,11 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
     adoptRef.current = adopt;
     const onVisible = () => void adopt();
     void adopt();
-    const timer = window.setInterval(onVisible, STT_ADOPT_INTERVAL_MS);
     window.addEventListener("focus", onVisible);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       disposed = true;
       if (adoptRef.current === adopt) adoptRef.current = null;
-      window.clearInterval(timer);
       window.removeEventListener("focus", onVisible);
       document.removeEventListener("visibilitychange", onVisible);
       // Only a backend-confirmed identity move preserves the in-flight job.
@@ -676,12 +695,7 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
     captureAfterRef.current = options?.after ?? null;
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
-    const capture = captureRef.current;
-    const finalMs = Math.max(
-      0,
-      performance.now() - capture.startedAt - (capture.pausedAccum + (capture.pausedAt !== null ? performance.now() - capture.pausedAt : 0)),
-    );
-    capture.finalDurationMs = finalMs;
+    captureRef.current.finalDurationMs = elapsedCaptureMs(captureRef.current);
     try {
       recorder.stop();
     } catch {}
@@ -730,8 +744,16 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
       onError?.("Microphone not supported in this browser or context");
       return;
     }
+    const generation = ++startGenerationRef.current;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Cancelled, unmounted (a session switch remounts the composer) or
+      // restarted while the permission prompt was open: nobody owns this
+      // stream any more, so release the microphone instead of recording.
+      if (startGenerationRef.current !== generation) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
 
       captureRef.current = { analyser: null, startedAt: performance.now(), pausedAccum: 0, pausedAt: null };
@@ -762,12 +784,25 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
       };
 
       recorder.onstop = () => {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-        if (cancelledRef.current) return;
+        stream.getTracks().forEach((track) => track.stop());
+        if (streamRef.current === stream) streamRef.current = null;
+        // A recorder that was cancelled, or replaced by a newer recording,
+        // must not touch the state of whatever owns the composer now.
+        if (cancelledRef.current || mediaRecorderRef.current !== recorder) return;
         clearMaxTimeout();
+        // The recorder also stops on its own when the microphone disappears
+        // (Bluetooth/USB unplugged) without finishCapture having run: end the
+        // capture here too, or start() stays blocked on a recording that is
+        // over. Both calls are no-ops after finishCapture.
+        const capture = captureRef.current;
+        capture.finalDurationMs ??= elapsedCaptureMs(capture);
+        capture.analyser = null;
+        if (audioContextRef.current) {
+          void audioContextRef.current.close().catch(() => {});
+          audioContextRef.current = null;
+        }
+        setIsRecording(false);
+        setIsPaused(false);
         if (chunksRef.current.length === 0) {
           const message = "No speech detected";
           setTranscribeError(message);
@@ -788,6 +823,15 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
           setupPreviewAudio(blob);
         }
       };
+      // Chrome stops the recorder itself when its tracks end; make sure every
+      // browser lands in onstop when the microphone goes away.
+      const stopWhenMicrophoneEnds = () => {
+        if (mediaRecorderRef.current !== recorder || recorder.state === "inactive") return;
+        try {
+          recorder.stop();
+        } catch {}
+      };
+      stream.getTracks().forEach((track) => { track.onended = stopWhenMicrophoneEnds; });
 
       recorder.start(100);
       setIsRecording(true);
@@ -795,8 +839,10 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
         finishCapture();
       }, MAX_RECORDING_MS);
     } catch (err) {
+      // Nothing to report to a composer that was cancelled or left.
+      if (startGenerationRef.current !== generation) return;
       cleanup();
-      onError?.(err instanceof Error ? err.message : "Microphone access denied");
+      onError?.(microphoneStartError(err));
     } finally {
       isStartingRef.current = false;
     }

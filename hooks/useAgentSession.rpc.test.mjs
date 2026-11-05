@@ -113,12 +113,14 @@ async function fetchStub(url, init = {}) {
   const method = (init.method ?? "GET").toUpperCase();
   const u = String(url);
   const body = typeof init.body === "string" ? safeParse(init.body) : null;
-  world.calls.push({ method, url: u, body });
+  world.calls.push({ method, url: u, body, at: Date.now() });
 
   for (let i = 0; i < world.holds.length; i++) {
     if (world.holds[i].match(method, u, body)) {
       const h = world.holds.splice(i, 1)[0];
-      const { status = 200, value } = await h.produce();
+      const { status = 200, value, notJson = false } = await h.produce();
+      // An HTML page (login redirect, gateway error) whose body is not JSON.
+      if (notJson) return { ok: status >= 200 && status < 300, status, json: async () => { throw new SyntaxError("Unexpected token <"); } };
       return jsonResponse(status, value);
     }
   }
@@ -289,7 +291,7 @@ const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
 const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
 const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
 const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
-const { toastCalls } = await jiti.import("@/components/ui/toast");
+const { toast, toastCalls } = await jiti.import("@/components/ui/toast");
 const { MessageView } = await jiti.import("@/components/MessageView");
 const { translate } = await jiti.import("@/lib/i18n");
 const { ChatWindow } = await jiti.import("@/components/ChatWindow");
@@ -1790,6 +1792,30 @@ test("unmount mid-run closes the stream and late frames cannot resurrect state",
   assert.equal(w.latest.agentRunning, true, "unmounted state must stay frozen");
 });
 
+test("an agent event handler that throws is logged with its event type and the stream keeps delivering", async (t) => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const errors = t.mock.method(console, "error", () => {});
+  const { w, es } = await startRun("s1", "q1");
+  await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+  // The MCP mount notice toasts synchronously inside the event handler.
+  t.mock.method(toast, "info", () => { throw new TypeError("toast failed"); });
+  await act(async () => {
+    es.emit({ type: "message_end", message: { role: "custom", customType: "xdev-mount-notice", content: "tools changed" } });
+    await Promise.resolve();
+  });
+  const logged = errors.mock.calls.filter((call) => String(call.arguments[0]).includes("message_end"));
+  assert.equal(logged.length, 1, "the failed frame must leave a console trace naming its type");
+  assert.ok(logged[0].arguments.some((arg) => arg instanceof TypeError && arg.message === "toast failed"));
+  assert.equal(es.closedByCaller, false, "a handler error must not tear the stream down");
+
+  // The stream still delivers the frames that follow.
+  await act(async () => { es.emit({ type: "agent_end", isTerminal: true }); await Promise.resolve(); });
+  await settle();
+  assert.equal(w.latest.agentRunning, false);
+  w.unmount();
+});
+
 test("unmount settles an unopened send connection without dispatching the prompt", async () => {
   resetWorld();
   primeSession("connecting-unmount", [userMsg("u0", "q")]);
@@ -1812,37 +1838,72 @@ test("unmount settles an unopened send connection without dispatching the prompt
   assert.equal(world.calls.some((call) => call.body?.type === "prompt"), false);
 });
 
-for (const operation of ["prompt", "btw"]) {
-  test(`unmount during ${operation} RPC startup cannot create an observer after teardown`, async (t) => {
-    resetWorld();
-    const sid = `startup-unmount-${operation}`;
-    primeSession(sid, [userMsg("u0", "q")]);
-    const w = await mountSession(sid);
-    let release;
-    t.after(() => release?.());
-    world.holds.push({
-      match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state",
-      produce: () => new Promise((resolve) => { release = () => resolve({ value: { success: true, data: {} } }); }),
-    });
-    let pending;
-    await act(async () => {
-      pending = operation === "prompt" ? w.latest.handleSend("must stay unsent") : w.latest.askBtw("must stay unasked");
-      await sleep(20);
-    });
-    assert.equal(typeof release, "function", "the supported startup RPC must be awaiting its response");
-    assert.equal(world.esInstances.length, 0, "startup has not yet acquired its observer");
-    let result;
-    await act(async () => {
-      w.unmount();
-      release();
-      result = await pending;
-    });
-    assert.equal(mountedRoots.size, 0, "the real React root must already have completed its cleanup");
-    assert.equal(world.esInstances.length, 0, "a late RPC response cannot create an observer its owner cannot close");
-    assert.equal(operation === "prompt" ? result.status : result, operation === "prompt" ? "rejected" : false);
-    assert.equal(world.calls.some((call) => call.body?.type === operation), false, "no follow-on operation may use the abandoned readiness");
+// The prompt is the user's work: switching tabs while a cold omp spawns must
+// not drop it. The server keeps running it, so the abandoned instance sends
+// the prompt but never attaches a stream nobody could close.
+test("unmount during prompt RPC startup still delivers the prompt without creating an observer", async (t) => {
+  resetWorld();
+  const sid = "startup-unmount-prompt";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  let release;
+  t.after(() => release?.());
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { success: true, data: {} } }); }),
   });
-}
+  let pending;
+  await act(async () => {
+    pending = w.latest.handleSend("sent while switching tabs");
+    await sleep(20);
+  });
+  assert.equal(typeof release, "function", "the supported startup RPC must be awaiting its response");
+  assert.equal(world.esInstances.length, 0, "startup has not yet acquired its observer");
+  let result;
+  await act(async () => {
+    w.unmount();
+    release();
+    result = await pending;
+  });
+  assert.equal(mountedRoots.size, 0, "the real React root must already have completed its cleanup");
+  assert.equal(world.esInstances.length, 0, "a late RPC response cannot create an observer its owner cannot close");
+  assert.equal(result.status, "accepted");
+  assert.equal(
+    callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "prompt" && call.body.message === "sent while switching tabs").length,
+    1,
+    "the prompt must reach omp exactly once",
+  );
+});
+
+test("unmount during btw RPC startup cannot create an observer or ask after teardown", async (t) => {
+  resetWorld();
+  const sid = "startup-unmount-btw";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  let release;
+  t.after(() => release?.());
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { success: true, data: {} } }); }),
+  });
+  let pending;
+  await act(async () => {
+    pending = w.latest.askBtw("must stay unasked");
+    await sleep(20);
+  });
+  assert.equal(typeof release, "function", "the supported startup RPC must be awaiting its response");
+  assert.equal(world.esInstances.length, 0, "startup has not yet acquired its observer");
+  let result;
+  await act(async () => {
+    w.unmount();
+    release();
+    result = await pending;
+  });
+  assert.equal(mountedRoots.size, 0, "the real React root must already have completed its cleanup");
+  assert.equal(world.esInstances.length, 0, "a late RPC response cannot create an observer its owner cannot close");
+  assert.equal(result, false);
+  assert.equal(world.calls.some((call) => call.body?.type === "btw"), false, "no follow-on operation may use the abandoned readiness");
+});
 
 test("StrictMode final unmount owns the observer attached after its first cleanup", async () => {
   resetWorld();
@@ -2664,6 +2725,32 @@ test("a second fork click while one is in flight sends no second fork command", 
   w.unmount();
 });
 
+test("a refused fork and a proxy page answering 200 both tell the user instead of failing silently", async (t) => {
+  resetWorld();
+  t.mock.method(console, "error", () => {});
+  primeSession("fork-fails", [userMsg("u0", "q")]);
+  const forked = [];
+  const w = await mountSession("fork-fails", undefined, { onSessionForked: (id) => forked.push(id) });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.startsWith("/api/agent/fork-fails") && body?.type === "fork",
+    produce: async () => ({ status: 400, value: { error: "Cannot fork right now", code: "rpc_command_failed" } }),
+  });
+  await act(async () => { await w.latest.handleFork("u0", false); });
+  assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  assert.ok(w.latest.notices[0].message.length > 0);
+
+  // A login page served by a proxy after the session expired is a 200 whose
+  // body is not JSON: the fork did not happen and must not look accepted.
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.startsWith("/api/agent/fork-fails") && body?.type === "fork",
+    produce: async () => ({ notJson: true }),
+  });
+  await act(async () => { await w.latest.handleFork("u0", false); });
+  assert.equal(w.latest.notices.length, 2);
+  assert.deepEqual(forked, []);
+  w.unmount();
+});
+
 // A native boundary, not an Edit callback double: active context follows parent
 // links in the persisted JSONL, and prompts consume that context independently
 // of what the hook happens to render. Metadata leaves never become model text.
@@ -3113,6 +3200,175 @@ test("relocation merges existing target attachments and preserves typing added w
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
   assert.equal(getDraft(sid), null);
+});
+
+// MessageView hides the copy / Fork / read-aloud row and the markdown re-render
+// shortcuts only for a reply that is still streaming; a held finished reply
+// (on screen until its saved copy replaces it) is complete and gets its row.
+test("the live reply shows no copy actions while it streams, and gains them once it finishes", async () => {
+  resetWorld();
+  const sid = "live-bubble";
+  primeSession(sid, [userMsg("u0", "question")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, isPromptRunning: true } });
+  const w = await mountMovableChat(sid);
+  const es = lastEs();
+  const reply = { ...assistantMsg("a1", "streamed answer"), timestamp: 42 };
+  const liveRow = () => w.view.container.querySelector('[data-live="true"]');
+  const actions = () => w.view.container.querySelectorAll(".message-copy-action").length;
+  const baseline = actions(); // the committed user message already has its own
+
+  await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+  await act(async () => { es.emit({ type: "message_update", message: reply }); await Promise.resolve(); });
+  await settle(120);
+  assert.ok(liveRow(), "the streaming reply must render as live");
+  assert.match(liveRow().textContent, /streamed answer/);
+  assert.equal(liveRow().querySelectorAll(".message-copy-action").length, 0, "no copy actions under a reply that is still streaming");
+  assert.equal(actions(), baseline);
+
+  saveSession(sid, [userMsg("u0", "question")]);
+  await act(async () => { es.emit({ type: "message_end", message: reply }); await Promise.resolve(); });
+  await act(async () => { es.emit({ type: "agent_end", isTerminal: true }); await Promise.resolve(); });
+  await settle();
+  assert.equal(liveRow(), null, "a finished reply is no longer live");
+  assert.match(w.view.container.textContent, /streamed answer/, "the finished reply stays on screen");
+  assert.ok(actions() > baseline, "the finished reply offers its copy actions");
+  w.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// Poll cadence of a running session. Simulated time comes from node's mock
+// clock; the requests counted are GET /api/agent/<id>, each of which makes
+// the server send get_state to the omp child. Before the cadence work a
+// running session issued 34 of them per minute whether the tab was visible
+// or not and whether frames were flowing or not (2s gauge + 15s reconcile).
+// ---------------------------------------------------------------------------
+const { AGENT_GAUGE_SAMPLE_MS } = await jiti.import("@/hooks/useAgentSession-stream");
+const STATE_GETS_PER_MINUTE_BEFORE = 34;
+
+async function startPollSession(t, { visible }) {
+  resetWorld();
+  const sid = `poll-${t.name.replace(/\W+/g, "-")}`;
+  primeSession(sid, [userMsg("u0", "q")]);
+  // A live but idle wrapper makes the hook attach its observer stream.
+  world.agents.set(sid, { running: true, state: { isStreaming: false, isPromptRunning: false } });
+  visibilityState = visible ? "visible" : "hidden";
+  const w = await mountSession(sid);
+  await act(async () => { lastEs().open(); });
+  await settle();
+  const es = lastEs();
+  world.agents.set(sid, { running: true, state: { isStreaming: true, isPromptRunning: true } });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  await act(async () => { es.emit({ type: "agent_start" }); await flush(); });
+  assert.equal(w.latest.agentRunning, true, "the run must be live before the window opens");
+  const windowStart = Date.now();
+  return {
+    w, es, sid,
+    stateGets: () => world.calls.filter((call) => call.method === "GET" && call.url === `/api/agent/${sid}`).length,
+    /** When each reconcile ran after the run started. Its response handler refreshes the subagent roster, which nothing else does periodically. */
+    healingPollTimes: () => world.calls
+      .filter((call) => call.at > windowStart && call.method === "POST" && call.url === `/api/agent/${sid}` && call.body?.type === "get_subagents")
+      .map((call) => call.at),
+    /** Advance simulated time in 1s steps, optionally delivering a frame every `frameEveryMs`. */
+    async advance(ms, { frameEveryMs = null } = {}) {
+      for (let elapsed = 0; elapsed < ms; elapsed += 1000) {
+        await act(async () => {
+          if (frameEveryMs !== null && elapsed % frameEveryMs === 0) {
+            es.emit({ type: "message_update", message: assistantMsg("a1", "x".repeat(elapsed / 1000 + 1)) });
+          }
+          t.mock.timers.tick(1000);
+          await flush();
+        });
+      }
+    },
+    setVisible: async (value) => {
+      visibilityState = value ? "visible" : "hidden";
+      await act(async () => { document.dispatchEvent(new window.Event("visibilitychange")); await flush(); });
+    },
+  };
+}
+
+async function stateGetsPerMinute(t, { visible, frameEveryMs }) {
+  const session = await startPollSession(t, { visible });
+  const before = session.stateGets();
+  await session.advance(60_000, { frameEveryMs });
+  const count = session.stateGets() - before;
+  session.w.unmount();
+  return count;
+}
+
+test("a hidden tab sends no state polls while the run goes on", async (t) => {
+  const perMinute = await stateGetsPerMinute(t, { visible: false, frameEveryMs: 1000 });
+  assert.equal(perMinute, 0, `before: ${STATE_GETS_PER_MINUTE_BEFORE}/min`);
+});
+
+test("with frames flowing only the throughput gauge polls, at its own slow cadence", async (t) => {
+  const perMinute = await stateGetsPerMinute(t, { visible: true, frameEveryMs: 1000 });
+  // No healing poll while every frame is fresher than STREAM_FRESH_MS.
+  assert.ok(perMinute <= 60_000 / AGENT_GAUGE_SAMPLE_MS, `${perMinute}/min: more than the gauge alone (before: ${STATE_GETS_PER_MINUTE_BEFORE}/min)`);
+  assert.ok(perMinute >= 1, "the tokens/s gauge still gets its samples");
+});
+
+test("a quiet stream is healed by polls that back off instead of ticking at a fixed rate", async (t) => {
+  const session = await startPollSession(t, { visible: true });
+  const before = session.stateGets();
+  await session.advance(60_000);
+  const quiet = session.stateGets() - before;
+  const times = session.healingPollTimes();
+  const gaps = times.slice(1).map((at, i) => at - times[i]);
+  session.w.unmount();
+  // After the 5s freshness window: one poll, then waits of 2s, 4s, 8s, then the 15s cap.
+  assert.ok(times.length >= 5 && times.length <= 7, `${times.length} healing polls in a quiet minute`);
+  assert.equal(gaps[0], 2000);
+  assert.ok(gaps.every((gap, i) => i === 0 || gap >= gaps[i - 1]), `waits must not shrink: ${gaps}`);
+  assert.ok(gaps.every((gap) => gap <= 16_000), `waits are capped at 15s (one 2s check of slack): ${gaps}`);
+  assert.ok(quiet < STATE_GETS_PER_MINUTE_BEFORE / 1.5, `${quiet}/min (before: ${STATE_GETS_PER_MINUTE_BEFORE}/min)`);
+});
+
+test("with frames flowing no healing poll runs at all", async (t) => {
+  const session = await startPollSession(t, { visible: true });
+  await session.advance(60_000, { frameEveryMs: 1000 });
+  assert.deepEqual(session.healingPollTimes(), []);
+  session.w.unmount();
+});
+
+test("a frame resets the backoff, so a stream that goes quiet again is polled quickly", async (t) => {
+  const session = await startPollSession(t, { visible: true });
+  await session.advance(40_000); // quiet long enough to back off to the cap
+  const beforeFrame = session.healingPollTimes().length;
+  await act(async () => { session.es.emit({ type: "message_update", message: assistantMsg("a1", "back") }); });
+  await session.advance(14_000);
+  const times = session.healingPollTimes().slice(beforeFrame);
+  session.w.unmount();
+  assert.ok(times.length >= 2, `${times.length} polls in the 14s after the frame`);
+  assert.equal(times[1] - times[0], 2000, "the wait starts over at 2s, not at the old 15s");
+});
+
+test("returning to a hidden tab reconciles once; nothing runs while it stays hidden", async (t) => {
+  const session = await startPollSession(t, { visible: true });
+  await session.setVisible(false);
+  const hiddenAt = session.stateGets();
+  const healingAt = session.healingPollTimes().length;
+  await session.advance(30_000);
+  assert.equal(session.stateGets(), hiddenAt, "no request while hidden");
+  assert.equal(session.healingPollTimes().length, healingAt);
+  await session.setVisible(true);
+  assert.equal(session.healingPollTimes().length, healingAt + 1, "exactly one reconcile on return");
+  assert.ok(session.stateGets() - hiddenAt <= 2, "plus at most one gauge sample");
+  session.w.unmount();
+});
+
+test("a state request that never answers is never doubled up by the next tick", async (t) => {
+  const session = await startPollSession(t, { visible: true });
+  const never = () => new Promise(() => {});
+  for (let i = 0; i < 10; i++) {
+    world.holds.push({ match: (method, url) => method === "GET" && url === `/api/agent/${session.sid}`, produce: never });
+  }
+  const before = session.stateGets();
+  await session.advance(25_000);
+  // One gauge sample and one reconcile can be outstanding; later ticks must wait for them.
+  assert.ok(session.stateGets() - before <= 2, `${session.stateGets() - before} requests while the first ones were still pending`);
+  session.w.unmount();
 });
 
 test("relocation adopts existing target text without prefilling over it", async (t) => {
@@ -4051,8 +4307,11 @@ test("the usage-limit badge appears mid-run and clears when the run ends without
   primeSession("s1", [userMsg("u0", "q")]);
   const { w, es } = await startStreamingRun("s1");
   world.agents.set("s1", { running: true, state: { isStreaming: true, model: SLOW_MODEL, usageLimit: SLOW_STATE } });
-  // The in-run sample ticks every 2s; wait for it rather than a fixed sleep.
-  for (let waited = 0; w.latest.usageLimit !== SLOW_STATE && waited < 5000; waited += 250) await settle(250);
+  // The in-run sample only runs in a visible tab (every 4s, and once when the
+  // tab shows): bring the tab to the foreground, then wait for it.
+  visibilityState = "visible";
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+  for (let waited = 0; w.latest.usageLimit !== SLOW_STATE && waited < 6000; waited += 250) await settle(250);
   assert.deepEqual(w.latest.usageLimit, SLOW_STATE);
 
   saveSession("s1", [userMsg("u0", "q"), assistantMsg("a1", "done")]);

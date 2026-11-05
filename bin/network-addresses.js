@@ -12,12 +12,35 @@ function isWildcardHost(hostname) {
   return WILDCARD_HOSTNAMES.has(hostname.trim());
 }
 
+/**
+ * True for a dotted-quad IPv4 address in 127.0.0.0/8. Octets are parsed as
+ * plain decimal numbers: `127.example.com`, `127.0.0.1.evil.com`, `127.0.0` and
+ * `127.0.0.256` are names or malformed text, not loopback addresses.
+ */
+function isLoopbackIPv4(hostname) {
+  if (typeof hostname !== "string") return false;
+  const octets = hostname.split(".");
+  if (octets.length !== 4) return false;
+  let first = -1;
+  for (const [index, octet] of octets.entries()) {
+    if (!/^(0|[1-9]\d{0,2})$/.test(octet)) return false;
+    const value = Number(octet);
+    if (value > 255) return false;
+    if (index === 0) first = value;
+  }
+  return first === 127;
+}
+
+/**
+ * The one definition of "loopback" shared by the launcher (refuse to listen
+ * without a password) and the request Host check (lib/request-security.ts).
+ */
 function isLoopbackHost(hostname) {
   if (typeof hostname !== "string") return false;
   const h = hostname.trim().toLowerCase();
-  if (h.startsWith("127.")) return true;
-  return LOOPBACK_HOSTNAMES.has(h);
+  return isLoopbackIPv4(h) || LOOPBACK_HOSTNAMES.has(h);
 }
+
 function getBrowserUrl(hostname, port) {
   if (isWildcardHost(hostname)) {
     return `http://localhost:${port}`;

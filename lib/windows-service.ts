@@ -172,24 +172,25 @@ export function getWindowsShortcutPaths(): { desktop: string; startMenu: string;
   };
 }
 
+// Hostname and port reach `cmd /d /s /c "node ... -H <hostname> -p <port>"` in the
+// Windows tray scripts, so anything outside a plain host/IP literal must never be stored.
+const HOSTNAME_PATTERN = /^[A-Za-z0-9.\-:[\]]+$/;
+
+export function isValidPort(val: unknown): val is number | string {
+  if (typeof val === "number") return Number.isInteger(val) && val >= 1 && val <= 65535;
+  return typeof val === "string" && /^\d{1,5}$/.test(val) && Number(val) >= 1 && Number(val) <= 65535;
+}
+
+export function isValidHostname(val: unknown): val is string {
+  return typeof val === "string" && HOSTNAME_PATTERN.test(val.trim());
+}
+
 export function sanitizePort(val: unknown, fallback = DEFAULT_WEB_SERVICE_CONFIG.port): number {
-  if (typeof val === "number" && Number.isInteger(val) && val >= 1 && val <= 65535) {
-    return val;
-  }
-  if (typeof val === "string") {
-    const parsed = parseInt(val, 10);
-    if (!isNaN(parsed) && parsed >= 1 && parsed <= 65535) {
-      return parsed;
-    }
-  }
-  return fallback;
+  return isValidPort(val) ? Number(val) : fallback;
 }
 
 export function sanitizeHostname(val: unknown, fallback = DEFAULT_WEB_SERVICE_CONFIG.hostname): string {
-  if (typeof val === "string" && val.trim().length > 0) {
-    return val.trim();
-  }
-  return fallback;
+  return isValidHostname(val) ? val.trim() : fallback;
 }
 
 export function sanitizeMode(val: unknown, fallback: "start" | "dev" = DEFAULT_WEB_SERVICE_CONFIG.mode): "start" | "dev" {
@@ -219,6 +220,17 @@ export async function loadWebServiceConfig(): Promise<WebServiceConfig> {
 
 export async function saveWebServiceConfig(updates: Partial<WebServiceConfig>): Promise<WebServiceConfig> {
   const current = await loadWebServiceConfig();
+  // Values a caller supplied are rejected instead of silently replaced, so an API
+  // client learns that its hostname or port was not applied.
+  if (updates.port !== undefined && !isValidPort(updates.port)) {
+    throw new Error("Invalid port: expected an integer between 1 and 65535.");
+  }
+  if (updates.hostname !== undefined && !isValidHostname(updates.hostname)) {
+    throw new Error("Invalid hostname: only letters, digits, '.', '-', ':', '[' and ']' are allowed.");
+  }
+  if (updates.mode !== undefined && updates.mode !== "start" && updates.mode !== "dev") {
+    throw new Error("Invalid mode: expected 'start' or 'dev'.");
+  }
   const merged: WebServiceConfig = {
     port: updates.port !== undefined ? sanitizePort(updates.port, current.port) : current.port,
     hostname: updates.hostname !== undefined ? sanitizeHostname(updates.hostname, current.hostname) : current.hostname,
@@ -343,7 +355,12 @@ export async function installTrayShortcuts(
     return { success: false, message: "Windows service installation is only supported on Windows platforms." };
   }
 
-  const savedConfig = await saveWebServiceConfig(options);
+  let savedConfig: WebServiceConfig;
+  try {
+    savedConfig = await saveWebServiceConfig(options);
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : String(error) };
+  }
   const repoRoot = getRepoRoot();
   const installScript = path.join(repoRoot, "scripts", "windows", "install-tray.ps1");
 

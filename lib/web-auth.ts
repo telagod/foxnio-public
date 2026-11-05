@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { deriveSessionSigningKey } from "./web-auth-secret";
-import { isPasswordHash, verifyPassword } from "./web-password-hash";
+import { isPasswordHash, verifyPasswordAsync } from "./web-password-hash";
 
 export const OMP_WEB_SESSION_COOKIE = "omp_web_session";
 export const OMP_WEB_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
@@ -44,10 +44,14 @@ export function isTrustedProxyRequest(
   return timingSafeEqual(createHash("sha256").update(value, "utf8").digest(), Buffer.from(digest, "hex"));
 }
 
-/** Check a sign-in attempt against the configured hash. */
-export function isValidWebPassword(candidate: string, env: NodeJS.ProcessEnv = process.env): boolean {
+/**
+ * Check a sign-in attempt against the configured hash. Asynchronous on purpose:
+ * scrypt takes tens of milliseconds, and the synchronous form would stall every
+ * other request for that long on each attempt.
+ */
+export async function verifyWebPassword(candidate: string, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
   const stored = configuredHash(env);
-  return isPasswordHash(stored) && verifyPassword(candidate, stored);
+  return isPasswordHash(stored) && await verifyPasswordAsync(candidate, stored);
 }
 
 /**

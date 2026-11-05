@@ -1,5 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { isApiRequestOriginAllowed, shouldCheckApiRequestOrigin } from "@/lib/request-security";
+import {
+  ALLOWED_HOSTS_VAR,
+  getRequestHost,
+  isApiRequestOriginAllowed,
+  isRequestHostAllowed,
+  shouldCheckApiRequestOrigin,
+} from "@/lib/request-security";
 import {
   isTrustedProxyRequest,
   isValidWebSession,
@@ -9,7 +15,29 @@ import {
   OMP_WEB_TRUSTED_HEADER,
 } from "@/lib/web-auth";
 
+// The Origin check below compares against the request's own Host header, so a
+// DNS-rebinding page (Host and Origin both naming the attacker's domain) passes
+// it. Without a password nothing else authenticates the caller, so such a
+// server only answers requests addressed to this machine. With a password (or
+// a trusted proxy header, which is only honoured next to one) requests are
+// authenticated and the Host is the operator's business.
+function hostNotAllowedResponse(request: NextRequest): NextResponse {
+  // The Host value is attacker-controlled: show a bounded, printable form.
+  const shown = JSON.stringify(getRequestHost(request).replace(/[^\x20-\x7e]/g, "").slice(0, 100));
+  const fix = `Add the hostname to ${ALLOWED_HOSTS_VAR} (comma-separated, e.g. ${ALLOWED_HOSTS_VAR}=foxnio.example.com), or protect the server with a password: foxnio hash-password, then set OMP_WEB_PASSWORD_HASH.`;
+  const message = `Host ${shown} is not allowed: without a password foxnio only answers requests for localhost and loopback addresses.`;
+  if (request.nextUrl.pathname.startsWith("/api/")) {
+    return NextResponse.json({ error: `${message} ${fix}`, code: "host_not_allowed" }, { status: 403 });
+  }
+  return new NextResponse(`foxnio refused this request\n\n${message}\n\n${fix}\n`, {
+    status: 403,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 export function proxy(request: NextRequest) {
+  const passwordEnabled = isWebPasswordEnabled();
+  if (!passwordEnabled && !isRequestHostAllowed(request)) return hostNotAllowedResponse(request);
   if (request.nextUrl.pathname.startsWith("/api/") && shouldCheckApiRequestOrigin(request) && !isApiRequestOriginAllowed(request)) {
     return NextResponse.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
@@ -24,7 +52,7 @@ export function proxy(request: NextRequest) {
       headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
     });
   }
-  if (!isWebPasswordEnabled()) {
+  if (!passwordEnabled) {
     return request.nextUrl.pathname === "/login"
       ? NextResponse.redirect(new URL("/", request.url))
       : NextResponse.next();
@@ -53,4 +81,9 @@ export function proxy(request: NextRequest) {
 // credentials and its embedded installation icons need no separate request.
 // The service worker script holds no data either, and the browser re-fetches
 // it for update checks even after the sign-in cookie expired.
-export const config = { matcher: "/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|icon\\.png|icon-192\\.png|badge-96\\.png|sw\\.js).*)" };
+// Every exclusion is anchored (a directory prefix ending in "/", or a whole
+// file name ending in "$"), so a longer path such as /sw.js.map or /icon.png/x
+// stays behind the proxy. /_next/image is deliberately not excluded: the app
+// never uses next/image (next.config.ts disables the optimizer), so the route
+// has no business being public.
+export const config = { matcher: "/((?!_next/static/|favicon\\.ico$|icon\\.svg$|icon\\.png$|icon-192\\.png$|badge-96\\.png$|sw\\.js$).*)" };

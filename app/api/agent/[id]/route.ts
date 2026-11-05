@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError, webRpcErrorStatus } from "@/lib/rpc-manager";
+import { isRecord } from "@/lib/type-guards";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -36,7 +37,7 @@ function commandErrorResponse(error: unknown) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   if (error instanceof WebRpcError) {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    return NextResponse.json({ error: error.message, code: error.code }, { status: webRpcErrorStatus(error) });
   }
   if (error instanceof RpcCommandError) {
     return NextResponse.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
@@ -52,7 +53,10 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const body = await parseJsonWithinLimit<{ type?: unknown; [key: string]: unknown }>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
+    const body = await parseJsonWithinLimit<unknown>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
+    if (!isRecord(body)) {
+      return NextResponse.json({ error: "Request body must be a JSON object", code: "invalid_request" }, { status: 400 });
+    }
     if (typeof body.type !== "string" || !body.type.trim()) {
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }

@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname } from "path";
-import { isMap, parseDocument, stringify } from "yaml";
+import { existsSync, readFileSync } from "fs";
+import { isMap, parseDocument } from "yaml";
+import { writeFileAtomic } from "../fs-atomic";
 import { getProfileSettingsPath, getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
 import { effectiveCompactionMethodOrder, isCompactionMethodOrder, type CompactionMethod } from "../compaction-methods";
@@ -199,7 +199,34 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   };
 }
 
-/** Validates and applies a reviewed subset of OMP's global config schema. */
+/** Keys outside these lists never reach config.yml: omp has settings that
+ * redirect traffic or files (compaction.remoteEndpoint, mnemopi.dbPath,
+ * mnemopi.llmBaseUrl, ...), and this API is not allowed to set them. */
+const TOP_LEVEL_KEYS = [
+  "defaultThinkingLevel", "hideThinkingBlock", "externalThinking", "textVerbosity", "personality",
+  "enabledModels", "disabledProviders", "modelProviderOrder",
+] as const;
+const SECTION_KEYS = {
+  providers: ["autoThinkingSource"],
+  advisor: ["enabled", "subagents", "syncBacklog", "immuneTurns"],
+  skills: ["showStartupDiagnostics"],
+  retry: ["enabled", "maxRetries", "modelFallback", "fallbackRevertPolicy", "fallbackChains"],
+  compaction: ["enabled", "midTurnEnabled", "methodOrder", "autoContinue", "keepRecentTokens"],
+  memory: ["backend"],
+  autolearn: ["enabled", "autoContinue", "minToolCalls"],
+  mnemopi: ["scoping", "autoRecall", "autoRetain", "noEmbeddings"],
+  mcp: ["enableProjectConfig", "renderMarkdownResults", "notifications", "notificationDebounceMs"],
+} as const satisfies Record<string, readonly string[]>;
+
+function assertKnownKeys(value: unknown, name: string, allowed: readonly string[]): void {
+  if (!isRecord(value)) return;
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown !== undefined) throw new Error(`Unsupported setting: ${name === "settings" ? unknown : `${name}.${unknown}`}`);
+}
+
+/** Validates and applies a reviewed subset of OMP's global config schema.
+ * Unknown keys are rejected; the read-only `registryHasScopedEntries` that GET
+ * reports is accepted and ignored so a client may echo a GET response. */
 export function writeNativeSettings(settings: NativeSettings): void {
   if (!isRecord(settings)) throw new Error("Settings must be an object");
   assertOptionalRecord(settings.providers, "providers");
@@ -217,9 +244,12 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.autolearn, "autolearn");
   assertOptionalRecord(settings.mnemopi, "mnemopi");
   assertOptionalRecord(settings.mcp, "mcp");
-  if (settings.skills && Object.keys(settings.skills).some((key) => key !== "showStartupDiagnostics")) {
-    throw new Error("Unsupported skills setting");
+  assertKnownKeys(settings, "settings", [...TOP_LEVEL_KEYS, "providers", "tools", "registryHasScopedEntries", ...Object.keys(SECTION_KEYS)]);
+  for (const [section, keys] of Object.entries(SECTION_KEYS)) {
+    assertKnownKeys(settings[section as keyof NativeSettings], section, keys);
   }
+  assertKnownKeys(settings.tools, "tools", ["approvalMode", "approval"]);
+  assertKnownKeys(settings.tools?.approval, "tools.approval", ["bash", "extension"]);
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
     externalThinking: settings.externalThinking,
@@ -251,6 +281,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.retry?.maxRetries !== undefined && (!Number.isInteger(settings.retry.maxRetries) || settings.retry.maxRetries < 0 || settings.retry.maxRetries > 20)) throw new Error("Retry attempts must be an integer between 0 and 20");
   if (settings.retry?.fallbackRevertPolicy !== undefined && !FALLBACK_REVERT_POLICIES.has(settings.retry.fallbackRevertPolicy)) throw new Error("Invalid fallback revert policy");
   if (settings.retry?.fallbackChains !== undefined) {
+    if (!isRecord(settings.retry.fallbackChains)) throw new Error("retry.fallbackChains must be an object");
     for (const [role, chain] of Object.entries(settings.retry.fallbackChains)) {
       if (!role.trim() || !Array.isArray(chain) || chain.some((selector) => typeof selector !== "string" || !selector.trim())) throw new Error("Fallback chains require non-empty role and model selectors");
     }
@@ -265,38 +296,22 @@ export function writeNativeSettings(settings: NativeSettings): void {
     if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== "string" || !value.trim()))) throw new Error(`${key} must contain non-empty strings`);
   }
 
+  // Only validated, known fields are written; each is set individually so a
+  // payload with fewer keys leaves every other key (and YAML comments) alone.
+  const updates: Array<[string[], unknown]> = [];
+  for (const key of TOP_LEVEL_KEYS) updates.push([[key], settings[key]]);
+  for (const [section, keys] of Object.entries(SECTION_KEYS)) {
+    const values = settings[section as keyof NativeSettings] as Record<string, unknown> | undefined;
+    for (const key of keys) updates.push([[section, key], values?.[key]]);
+  }
+  updates.push([["tools", "approvalMode"], settings.tools?.approvalMode]);
+  updates.push([["tools", "approval", "bash"], settings.tools?.approval?.bash]);
+  updates.push([["tools", "approval", "extension"], settings.tools?.approval?.extension]);
+
   const { path, doc } = readDocument();
-  mkdirSync(dirname(path), { recursive: true });
-  if (doc.contents === null) {
-    const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, stringify(settings), "utf8");
-    renameSync(temp, path);
-    return;
+  if (doc.contents !== null && !isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
+  for (const [location, value] of updates) {
+    if (value !== undefined) doc.setIn(location, value);
   }
-  if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
-  if (settings.defaultThinkingLevel !== undefined) doc.set("defaultThinkingLevel", settings.defaultThinkingLevel);
-  if (autoThinkingSource !== undefined) doc.setIn(["providers", "autoThinkingSource"], autoThinkingSource);
-  if (settings.hideThinkingBlock !== undefined) doc.set("hideThinkingBlock", settings.hideThinkingBlock);
-  if (settings.externalThinking !== undefined) doc.set("externalThinking", settings.externalThinking);
-  if (settings.textVerbosity !== undefined) doc.set("textVerbosity", settings.textVerbosity);
-  if (settings.personality !== undefined) doc.set("personality", settings.personality);
-  for (const [key, value] of Object.entries(settings.advisor ?? {})) doc.setIn(["advisor", key], value);
-  if (settings.tools?.approvalMode !== undefined) doc.setIn(["tools", "approvalMode"], settings.tools.approvalMode);
-  if (settings.tools?.approval?.bash !== undefined) doc.setIn(["tools", "approval", "bash"], settings.tools.approval.bash);
-  if (settings.tools?.approval?.extension !== undefined) doc.setIn(["tools", "approval", "extension"], settings.tools.approval.extension);
-  if (settings.skills?.showStartupDiagnostics !== undefined) {
-    doc.setIn(["skills", "showStartupDiagnostics"], settings.skills.showStartupDiagnostics);
-  }
-  if (settings.enabledModels !== undefined) doc.set("enabledModels", settings.enabledModels);
-  if (settings.disabledProviders !== undefined) doc.set("disabledProviders", settings.disabledProviders);
-  if (settings.modelProviderOrder !== undefined) doc.set("modelProviderOrder", settings.modelProviderOrder);
-  for (const [key, value] of Object.entries(settings.retry ?? {})) doc.setIn(["retry", key], value);
-  for (const [key, value] of Object.entries(settings.compaction ?? {})) doc.setIn(["compaction", key], value);
-  for (const [key, value] of Object.entries(settings.memory ?? {})) doc.setIn(["memory", key], value);
-  for (const [key, value] of Object.entries(settings.autolearn ?? {})) doc.setIn(["autolearn", key], value);
-  for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
-  for (const [key, value] of Object.entries(settings.mcp ?? {})) doc.setIn(["mcp", key], value);
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, doc.toString(), "utf8");
-  renameSync(temp, path);
+  writeFileAtomic(path, doc.toString());
 }

@@ -15,7 +15,7 @@ import {
 import { execFile, spawn } from "child_process";
 import { createChildProcessEnvironment } from "./project-command-env";
 import { randomUUID } from "crypto";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { dirname, join, posix, resolve, win32 } from "path";
 import { promisify } from "util";
 import { checkNpmUpdate, detectInstallMethod } from "./npm-update";
@@ -452,11 +452,63 @@ export function markSelfUpdateStopping(attemptId: string, kind: Kind = "app"): v
   atomicWrite(statusPath(kind), JSON.stringify(next));
 }
 
+// The launcher only restarts a server that asked it to (see handleUpdateArm in bin/omp-web.js).
+const UPDATE_CONTROL_MESSAGE = "ompweb:update-control";
+const UPDATE_CONTROL_ACK = "ompweb:update-control-ack";
+const UPDATE_CONTROL_PROTOCOL = 1;
+const ARM_TIMEOUT_MS = 5000;
+
+// Mirrors the update worker's launchd and tray checks: a server under one of those
+// services is restarted through the service, so the launcher must not be armed.
+function isManagedByLaunchdOrTray(): boolean {
+  if (existsSync(join(homedir(), "Library", "LaunchAgents", "com.telagod.foxnio.plist"))) return true;
+  try {
+    const service = JSON.parse(readFileSync(join(homedir(), ".omp", "agent", "web-service.json"), "utf8")) as { pid?: unknown } | null;
+    return Boolean(service?.pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Asks the launcher that started this server to stay alive while the update worker
+ * stops the server, and to start it again on request. Under systemd, launchd or the
+ * tray the service manager restarts the server instead, so nothing is armed.
+ */
 export async function armSelfUpdateLauncher(attemptId: string, kind: Kind = "app"): Promise<void> {
-  const armed = markerPath(attemptId, "armed.json", kind);
-  atomicWrite(armed, JSON.stringify({ attemptId, armedAt: new Date().toISOString(), protocol: 1 }));
-  // settle
-  await new Promise<void>((r) => setTimeout(r, 500));
+  const launcherPid = Number(process.env.OMP_WEB_LAUNCHER_PID ?? process.pid);
+  if (await detectSystemdService(launcherPid) || isManagedByLaunchdOrTray()) return;
+  const refuse = (reason: string) => new SelfUpdateError("launcher_unavailable", `The foxnio launcher cannot restart the server after an update: ${reason}`, 409);
+  if (typeof process.send !== "function" || !process.connected) {
+    throw refuse("the server was not started by the foxnio launcher");
+  }
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const finish = (reason?: string) => {
+    clearTimeout(timer);
+    process.off("message", onMessage);
+    if (reason === undefined) resolve();
+    else reject(refuse(reason));
+  };
+  const timer = setTimeout(() => finish("it did not answer"), ARM_TIMEOUT_MS);
+  const onMessage = (message: unknown) => {
+    const reply = message as { type?: unknown; attemptId?: unknown; ok?: unknown; error?: unknown } | null;
+    if (reply?.type !== UPDATE_CONTROL_ACK || reply.attemptId !== attemptId) return;
+    finish(reply.ok === true ? undefined : typeof reply.error === "string" ? reply.error : "it refused");
+  };
+  process.on("message", onMessage);
+  process.send({ type: UPDATE_CONTROL_MESSAGE, protocol: UPDATE_CONTROL_PROTOCOL, attemptId, root: rootDir(kind) }, (error: Error | null) => {
+    if (error) finish(error.message);
+  });
+  await promise;
+}
+
+/** Tells an armed launcher this attempt is over, so it stops waiting for a restart request. */
+function releaseLauncher(attemptId: string, kind: Kind): void {
+  try {
+    atomicWrite(markerPath(attemptId, "complete.json", kind), JSON.stringify({ protocol: UPDATE_CONTROL_PROTOCOL, attemptId }));
+  } catch {
+    // The launcher keeps waiting; the attempt is already marked failed.
+  }
 }
 
 export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): Promise<{ accepted: true; attemptId: string }> {
@@ -479,13 +531,7 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
   const fromVersion = status.fromVersion;
   const targetVersion = status.targetVersion;
   const launcherPid = Number(process.env.OMP_WEB_LAUNCHER_PID ?? process.pid);
-  const descriptor = {
-    launcherPath: join(resolve(packageDir), "bin", "omp-web.js"),
-    hostname: process.env.OMP_WEB_HOSTNAME ?? process.env.HOSTNAME ?? "127.0.0.1",
-    port: Number(process.env.OMP_WEB_PORT ?? process.env.PORT ?? 30178),
-  };
   const args = [
-    workerPath ?? "",
     "--attempt",
     attemptId,
     "--root",
@@ -504,16 +550,16 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     String(launcherPid),
     "--server-pid",
     String(process.pid),
-    JSON.stringify(descriptor),
     "--manager-prefix",
     JSON.stringify(prefix),
     "--kind",
     kind,
   ];
   try {
+    if (!workerPath || !existsSync(workerPath)) throw new Error("The update worker was not prepared");
     const systemd = kind === "app" ? await detectSystemdService(launcherPid) : null;
     if (systemd) args.push("--systemd-unit", systemd.unit, "--systemd-user", systemd.user ? "1" : "0");
-    const workerArgs = workerPath ? [workerPath, ...args] : args;
+    const workerArgs = [workerPath, ...args];
     let command = process.execPath;
     let commandArgs = workerArgs;
     if (systemd) {
@@ -545,6 +591,7 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
       try {
         atomicWrite(statusPath(kind), JSON.stringify({ ...current, state: "failed", error: error.message.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }));
       } catch {}
+      releaseLauncher(attemptId, kind);
     });
     child.unref();
     // record worker pid
@@ -557,6 +604,7 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     try {
       atomicWrite(statusPath(kind), JSON.stringify(failed));
     } catch {}
+    releaseLauncher(attemptId, kind);
     throw new SelfUpdateError("spawn_failed", "Failed to spawn update worker", 500);
   }
   return { accepted: true, attemptId };

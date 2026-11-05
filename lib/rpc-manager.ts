@@ -24,6 +24,7 @@ import {
   AGENT_TOOL_NAMES,
   AgentToolGuard,
   executeAgentTool,
+  type AgentToolDeliverInput,
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
@@ -129,6 +130,30 @@ export class WebRpcError extends Error {
     this.name = "WebRpcError";
     this.code = code;
   }
+}
+
+/** HTTP status for a WebRpcError: transient states the client may retry get 409 / 504, everything else is a bad request. */
+const WEB_RPC_ERROR_STATUS: Record<string, number> = {
+  session_busy: 409,
+  session_restarting: 409,
+  session_changed: 409,
+  mcp_list_loading: 409,
+  session_unresponsive: 504,
+  session_state_timeout: 504,
+  mcp_list_timeout: 504,
+};
+
+export function webRpcErrorStatus(error: WebRpcError): number {
+  return WEB_RPC_ERROR_STATUS[error.code] ?? 400;
+}
+
+/** Entries of a set_host_tools / set_host_uri_schemes payload. A missing list is an empty registration; anything else must be a list of objects. */
+function hostRegistrationEntries(value: unknown, field: string): Array<Record<string, unknown>> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every(isRecord)) {
+    throw new WebRpcError(`${field} must be an array of objects`, "invalid_request");
+  }
+  return value;
 }
 
 /** Shape check for an ask-dialog `answers` payload; omp validates the content. */
@@ -384,12 +409,18 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
+  /** The last set_host_tools registration (UI tools + server agent tools), re-sent after a restart. */
+  private hostToolDefinitions: object[] = [];
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, UnsequencedAgentEvent> = new Map();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
+  /** The last set_host_uri_schemes registration, re-sent after a restart. */
+  private hostUriDefinitions: Array<Record<string, unknown>> = [];
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
+  /** Settle functions of outstanding waitForTurnEnd calls; destroy rejects them. */
+  private turnWaiters: Set<(error: Error | null) => void> = new Set();
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   destroyPromise: Promise<void> | null = null;
@@ -1369,10 +1400,13 @@ export class AgentSessionWrapper {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        this.turnWaiters.delete(finish);
         detach();
         if (error) reject(error);
         else resolve();
       };
+      // destroyAndWait rejects through this so callers never sit out the timeout.
+      this.turnWaiters.add(finish);
     });
   }
 
@@ -1778,9 +1812,6 @@ export class AgentSessionWrapper {
    * on boot, matching a fresh CLI launch. */
   private async restart(): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
-    if (this._toolPreset === null) {
-      throw new WebRpcError("Cannot reload because this session's tool preset is unknown. Start a new session with an explicit preset to avoid changing tool access.", "tool_preset_unknown");
-    }
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
@@ -1804,6 +1835,10 @@ export class AgentSessionWrapper {
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
       this.clearPendingUiRequests();
+      // Calls the old child made can never be answered: its pipes are gone. Left
+      // in place they would keep isRunning() true for the new child.
+      this.pendingHostTools.clear();
+      this.pendingHostUris.clear();
       this.promptRunning = false;
       this.promptDispatchPendingCount = 0;
       this.awaitingAgentStart = false;
@@ -1814,7 +1849,9 @@ export class AgentSessionWrapper {
       this.compacting = false;
       const launchConfig = launchConfigForCwd(this.cwd);
       const toolNames = this._toolNames ?? undefined;
-      const toolPreset = getToolPresetStatus(toolNames, launchConfig?.extraArgs);
+      // A resumed session's preset is unknown (no --tools was passed at the
+      // original resume); respawning with identical arguments keeps it unknown.
+      const toolPreset = getToolPresetStatus(toolNames, launchConfig?.extraArgs, this._toolNames === null ? null : "full");
       const proc = new RpcProcess({
         cwd: this.cwd,
         // Re-read per spawn so a restart picks up environment values the user
@@ -1845,6 +1882,15 @@ export class AgentSessionWrapper {
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
         await this.applyAdvisorChoiceAfterSpawn();
+        // The replacement child starts with no host registrations. Re-send the
+        // recorded ones so agent tools and UI host tools survive a reload. Like
+        // the initial registration, an omp without host tools may reject this.
+        if (this.hostToolDefinitions.length > 0) {
+          await proc.sendCommand({ type: "set_host_tools", tools: this.hostToolDefinitions }).catch(() => {});
+        }
+        if (this.hostUriDefinitions.length > 0) {
+          await proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriDefinitions }).catch(() => {});
+        }
         this._toolPreset = toolPreset;
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
@@ -2124,8 +2170,9 @@ export class AgentSessionWrapper {
         return null;
 
       case "set_session_name": {
-        const name = (command.name as string | undefined)?.trim();
-        if (!name) throw new Error("Session name cannot be empty");
+        if (typeof command.name !== "string") throw new WebRpcError("Session name must be a string", "invalid_request");
+        const name = command.name.trim();
+        if (!name) throw new WebRpcError("Session name cannot be empty", "invalid_request");
         await this.proc.sendCommand({ type: "set_session_name", name });
         this._sessionName = name;
         this.invalidateSessionLists();
@@ -2194,7 +2241,7 @@ export class AgentSessionWrapper {
       }
 
       case "set_host_tools": {
-        const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
+        const tools = hostRegistrationEntries(command.tools, "tools") as Array<{ name?: unknown; [key: string]: unknown }>;
         const valid = tools.filter((t) => typeof t.name === "string" && t.name);
         // Merge the server agent tools (#275) into every registration when
         // the gate is on, so a later UI registration cannot drop them and
@@ -2205,6 +2252,7 @@ export class AgentSessionWrapper {
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
         this.hostToolNames = new Set(merged.map((t) => t.name as string));
+        this.hostToolDefinitions = merged;
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
         return null;
       }
@@ -2216,13 +2264,14 @@ export class AgentSessionWrapper {
       }
 
       case "set_host_uri_schemes": {
-        const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
+        const schemes = hostRegistrationEntries(command.schemes, "schemes") as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }>;
         this.hostUriSchemes = new Map();
         for (const entry of schemes) {
           if (typeof entry.scheme === "string" && entry.scheme) {
             this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
           }
         }
+        this.hostUriDefinitions = schemes;
         await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
         return null;
       }
@@ -2313,12 +2362,15 @@ export class AgentSessionWrapper {
       this.mcpListWaiter.reject(new Error("Session was closed while loading MCP servers"));
       this.mcpListWaiter = null;
     }
+    for (const rejectWaiter of [...this.turnWaiters]) rejectWaiter(new Error("Session was closed while waiting for the response"));
     const disposed = this.proc.dispose().catch(() => {});
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
     this.hostToolNames.clear();
+    this.hostToolDefinitions = [];
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
+    this.hostUriDefinitions = [];
     notifyRunningChange();
     await disposed;
     this.onDestroyCallback?.();
@@ -2544,6 +2596,53 @@ function getAgentToolGuard(): AgentToolGuard {
   return globalThis.__ompAgentToolGuard;
 }
 
+/** The slice of AgentSessionWrapper a delivery needs; tests pass a fake. */
+export interface AgentToolDeliveryTarget {
+  isRunning(): boolean;
+  waitForTurnEnd(timeoutMs: number, terminalEndsNeeded?: number): Promise<void>;
+  send(command: Record<string, unknown>): Promise<unknown>;
+}
+
+/** RPC command behind each tool-facing delivery name (dispatchCommand only knows `follow_up`). */
+const DELIVERY_COMMAND_TYPES = { prompt: "prompt", steer: "steer", followUp: "follow_up" } as const;
+
+/**
+ * Deliver one agent-tool message to a live session wrapper. The waiter is
+ * registered BEFORE the send so a fast turn cannot end first. When the send
+ * throws, nothing awaits the waiter any more; its later timeout or
+ * prompt_error rejection would surface as an unhandledRejection (the server
+ * exits on those), so it is marked handled up front. The success path still
+ * awaits it and sees its rejection normally.
+ */
+export async function deliverToSession(
+  wrapper: AgentToolDeliveryTarget,
+  input: AgentToolDeliverInput,
+): Promise<AgentToolDeliverResult> {
+  const wasRunning = wrapper.isRunning();
+  if (input.delivery === "prompt" && wasRunning) {
+    throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
+  }
+  if (input.delivery === "steer" && !wasRunning) {
+    throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
+  }
+  const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+  const waiter = input.wait ? wrapper.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
+  void waiter?.catch(() => {});
+  await wrapper.send({ type: DELIVERY_COMMAND_TYPES[input.delivery], message: input.message });
+  if (!waiter) {
+    return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
+  }
+  await waiter;
+  const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
+  return {
+    accepted: true,
+    targetSessionId: input.sessionId,
+    delivery: input.delivery,
+    waited: true,
+    responseText: typeof last?.text === "string" ? last.text : null,
+  };
+}
+
 /**
  * Real session operations behind lib/agent-tools executeAgentTool.
  * Reuses the existing spawn/resume and message-send paths (startRpcSession,
@@ -2594,28 +2693,7 @@ function createAgentToolOps(): AgentToolSessionOps {
         const started = await startRpcSession(input.sessionId, filePath, cwd, undefined, undefined, header?.cwd);
         wrapper = started.session;
       }
-      const wasRunning = wrapper.isRunning();
-      if (input.delivery === "prompt" && wasRunning) {
-        throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
-      }
-      if (input.delivery === "steer" && !wasRunning) {
-        throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
-      }
-      const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
-      const waiter = input.wait ? wrapper.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-      await wrapper.send({ type: input.delivery, message: input.message });
-      if (!input.wait || !waiter) {
-        return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
-      }
-      await waiter;
-      const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
-      return {
-        accepted: true,
-        targetSessionId: input.sessionId,
-        delivery: input.delivery,
-        waited: true,
-        responseText: typeof last?.text === "string" ? last.text : null,
-      };
+      return deliverToSession(wrapper, input);
     },
   };
 }

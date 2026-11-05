@@ -132,6 +132,10 @@ buildNpmPackage (finalAttrs: {
 
   npmDepsHash = "sha256-HxT+m6bI0I3t9sqsSgHun6oXve3WtIEmkFpCoBplrC4=";
 
+  # electron is a dev dependency of the desktop build only; its postinstall must not
+  # download a binary inside the sandbox.
+  env.ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
+
   # npmPackFlags = [ "--ignore-scripts" ];
 
   meta = {

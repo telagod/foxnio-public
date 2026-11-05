@@ -1,8 +1,4 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { createChildProcessEnvironment } from "./project-command-env";
-
-const execFileAsync = promisify(execFile);
+import { execGit } from "./git-command";
 
 const GITHUB_REMOTE_URL_RE = /^(?:(?:https?|ssh|git):\/\/(?:[^@/]+@)?|[^@/:]+@)github\.com[/:]([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/i;
 const REPO_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/;
@@ -67,10 +63,10 @@ export function pickGithubRepo(gitConfig: string): string | null {
 /** `owner/repo` for the checkout at `cwd`, or null (not a repo, no GitHub remote). */
 export async function resolveGithubRepo(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["-C", cwd, "config", "--get-regexp", "^(remote\\..*\\.(url|gh-resolved)|url\\..*\\.insteadof)$"],
-      { timeout: 5_000, env: createChildProcessEnvironment({ LC_ALL: "C" }) },
+    const { stdout } = await execGit(
+      cwd,
+      ["config", "--get-regexp", "^(remote\\..*\\.(url|gh-resolved)|url\\..*\\.insteadof)$"],
+      { timeout: 5_000, maxBuffer: 1024 * 1024 },
     );
     return pickGithubRepo(stdout);
   } catch {

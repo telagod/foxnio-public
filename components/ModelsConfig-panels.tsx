@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef, type CSSProperties } from "react";
+import { useState, useEffect, useCallback, useRef, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
+import { useNativeSettingsPatches } from "@/hooks/useNativeSettingsPatches";
+import { isRecord } from "@/lib/type-guards";
+import { diffSettingsSections } from "@/lib/settings-patch";
 import {
   Dialog,
   DialogContent,
@@ -83,49 +86,21 @@ export function TreeNavButton({ icon: Icon, label, selected, onClick }: { icon: 
 }
 export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
   const { t } = useI18n();
-  const [settings, setSettings] = useState<RetrySettings | null>(null);
+  const { settings, error, setError, setLoaded, patch } = useNativeSettingsPatches<RetrySettings>();
   const [role, setRole] = useState("default");
   const [candidate, setCandidate] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/omp-settings")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: RetrySettings }) => setSettings(data.settings ?? {}))
+      .then((data: { settings?: RetrySettings }) => setLoaded(data.settings ?? {}))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
+  }, [setLoaded, setError]);
 
-  // Serialize full-snapshot saves: each call writes the whole settings object,
-  // so overlapping PUTs can land out of order and clobber newer changes. Keep
-  // the latest snapshot and drain a single serialized save always writing the
-  // most recent state (fixes rapid fallback-chain edits scheduling stale writes).
-  const latestRef = useRef<RetrySettings | null>(null);
-  const drainingRef = useRef(false);
+  // Only the retry keys that changed are sent (see lib/settings-patch.ts), so
+  // other settings edited elsewhere are not rewritten from this stale copy.
   const save = (next: RetrySettings) => {
-    setSettings(next);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: RetrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-      }
-    })();
+    if (settings) patch(diffSettingsSections(settings, next));
   };
 
   if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.retryLoading")}</div>;
@@ -166,51 +141,20 @@ export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] })
 }
 export function NativeRegistryDetail({ models, connectedProviders, onChanged }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void> }) {
   const { t } = useI18n();
-  const [settings, setSettings] = useState<NativeRegistrySettings | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const { settings, error, setError, saving, setLoaded, patch } = useNativeSettingsPatches<NativeRegistrySettings>({ onSaved: () => onChanged() });
 
   useEffect(() => {
     fetch("/api/omp-settings")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: NativeRegistrySettings }) => setSettings(data.settings ?? {}))
+      .then((data: { settings?: NativeRegistrySettings }) => setLoaded(data.settings ?? {}))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
+  }, [setLoaded, setError]);
 
-  // Serialize full-snapshot saves: each call PUTs the whole settings object and
-  // a rapid sequence of provider/model toggles must not let an older snapshot
-  // land after a newer one. Keep the latest snapshot and drain a single
-  // serialized save loop so the most recent state wins on the server.
-  const latestRef = useRef<NativeRegistrySettings | null>(null);
-  const drainingRef = useRef(false);
+  // The controls below build a full next-state object; only the keys that
+  // differ from the current state are sent, so enabledModels, disabledProviders
+  // and modelProviderOrder edits never rewrite each other or unrelated settings.
   const save = (next: NativeRegistrySettings) => {
-    setSettings(next);
-    setSaving(true);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: NativeRegistrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-            await onChanged();
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-        setSaving(false);
-      }
-    })();
+    if (settings) patch(diffSettingsSections(settings, next));
   };
 
   if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.registryLoading")}</div>;
@@ -253,25 +197,52 @@ export function NativeRegistryDetail({ models, connectedProviders, onChanged }: 
 export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
   const { t } = useI18n();
   const [roles, setRoles] = useState<Record<string, string>>({});
+  // Roles edited since the last load or save. Only these are sent, so a role
+  // changed elsewhere (another tab, the omp CLI) is never rewritten from here.
+  const [dirty, setDirty] = useState<Record<string, string>>({});
+  const dirtyRef = useRef<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  // True only after a successful, well-formed load; editing and saving need it.
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoaded(false);
+    setError(null);
     fetch("/api/model-roles")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { roles?: Record<string, string> }) => setRoles(data.roles ?? {}))
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data: unknown = await response.json();
+        if (!isRecord(data) || !isRecord(data.roles)) throw new Error("Unexpected response from /api/model-roles");
+        setRoles(Object.fromEntries(Object.entries(data.roles).filter((entry): entry is [string, string] => typeof entry[1] === "string")));
+        dirtyRef.current = {};
+        setDirty({});
+        setLoaded(true);
+      })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    load();
+  }, [load]);
+
   const save = async () => {
+    const sent = dirtyRef.current;
+    if (!loaded || Object.keys(sent).length === 0) return;
     setSaving(true);
     setError(null);
     try {
-      const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      const data = await response.json() as { error?: string };
+      const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changes: sent }) });
+      const data = await response.json() as { roles?: Record<string, string>; error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+      // Show what the server now holds, keeping edits made while this save ran.
+      const remaining = Object.fromEntries(Object.entries(dirtyRef.current).filter(([role, selector]) => sent[role] !== selector));
+      dirtyRef.current = remaining;
+      setDirty(remaining);
+      setRoles({ ...(data.roles ?? {}), ...remaining });
       toast.success(t("modelsConfig.rolesSaved"));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -280,16 +251,22 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
     }
   };
 
+  const setRole = (role: string, selector: string) => {
+    dirtyRef.current = { ...dirtyRef.current, [role]: selector };
+    setDirty(dirtyRef.current);
+    setRoles((values) => ({ ...values, [role]: selector }));
+  };
+
   const updateRoleModel = (role: string, modelValue: string) => {
     const current = roles[role] ?? "";
     const effort = current.match(/:([^,:]+)$/)?.[1] ?? "";
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
+    setRole(role, modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "");
   };
 
   const updateRoleThinking = (role: string, effort: string) => {
     const current = roles[role] ?? "";
     const modelValue = current.replace(/:([^,:]+)$/, "");
-    setRoles((values) => ({ ...values, [role]: modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "" }));
+    setRole(role, modelValue ? `${modelValue}${effort ? `:${effort}` : ""}` : "");
   };
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -297,7 +274,7 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
       <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("modelsConfig.modelRolesDesc")}</p>
     </div>
-    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRoles")}</div> : NATIVE_MODEL_ROLES.map((role) => (
+    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRoles")}</div> : !loaded ? null : NATIVE_MODEL_ROLES.map((role) => (
       <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "82px minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
         <code style={{ color: "var(--text-muted)" }}>{role}</code>
         {(() => {
@@ -321,7 +298,8 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       </div>
     ))}
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? t("modelsConfig.saving") : t("modelsConfig.saveRoles")}</button>
+    {!loading && !loaded && <button type="button" onClick={load} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.retry")}</button>}
+    <button type="button" onClick={() => void save()} disabled={loading || saving || !loaded || Object.keys(dirty).length === 0} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600, opacity: loaded && Object.keys(dirty).length > 0 ? 1 : 0.6 }}>{saving ? t("modelsConfig.saving") : t("modelsConfig.saveRoles")}</button>
   </div>;
 }
 // ── API Key detail ────────────────────────────────────────────────────────────

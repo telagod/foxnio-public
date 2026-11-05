@@ -698,7 +698,6 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                               "background var(--dur-fast), border-color var(--dur-fast)",
                             outline: "none",
                           }}
-                          className="sidebar-session-row"
                         >
                           <div
                             style={{

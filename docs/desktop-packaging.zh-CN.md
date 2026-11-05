@@ -19,7 +19,7 @@ npm run desktop:dist
 
 产物位于 `dist-desktop/`：
 
-- Windows：NSIS installer 和 portable executable；
+- Windows：NSIS installer（`foxnio-Setup-<version>-win-x64.exe`）和 portable executable（`foxnio-<version>-win-x64-portable.exe`）。两者使用不同的 `artifactName` 模式，因为 electron-builder 会让所有 target 回退到全局模式，导致二者互相覆盖，`latest.yml` 也只描述最后写入的那个；
 - macOS：DMG 和 ZIP；
 - Linux：AppImage 和 Debian package。
 
@@ -27,11 +27,21 @@ npm run desktop:dist
 
 第一版桌面包故意不内置 `omp`。这样可以将 provider credentials、Agent 原生发行、平台二进制和版本策略与 foxnio 分开。若图形界面启动时找不到 PATH 中的 `omp`，请在启动桌面应用前设置 `OMP_WEB_OMP_BIN`。
 
+安装包不包含测试文件（`*.test.*`）。
+
+## 运行时行为
+
+- 应用会在 `127.0.0.1:30177` 启动自己的本地服务。固定端口可以让浏览器存储（界面偏好）保持在同一个 origin。该端口被占用（例如被 CLI 或服务实例占用）时，应用改用下一个空闲端口（最多到 30196）并写入日志。通过 `OMP_WEB_DESKTOP_PORT`（或 `PORT`）指定的端口按原样使用，被占用时应用拒绝启动。如果服务进程在响应之前退出，应用会报错退出，而不会连接到该端口上的其他服务。
+- 应用内更新器已禁用（服务环境中设置 `OMP_WEB_DISABLE_AUTOUPDATE=1`），因为它会停止桌面应用持有的服务进程。请安装新的安装包来更新。
+- 离开应用的链接只有 `http:`、`https:` 和 `mailto:` 会交给默认浏览器或邮件客户端，其他 scheme（例如 `file:`）会被忽略。
+
 ## 目标平台与 CI
 
 当前 CI 配置的首发目标为 Windows x64、macOS x64/arm64 和 Linux x64。只有配置对应的原生 runner 后才增加 Windows/Linux arm64；本打包流程要求 bundled Node.js runtime 与安装包在相同主机和架构上构建。
 
-每个目标都应在匹配的 GitHub Actions runner 上构建。不能把 Linux Node binary 复制进 Windows 或 macOS installer，也不能跨系统复用 `node_modules`：`sharp` 是 native dependency，必须在目标构建 runner 上安装。仓库暂未配置代码签名和 notarization；正式公开发布前，需要在 CI 中注入各平台签名凭据。
+每个目标都应在匹配的 GitHub Actions runner 上构建。不能把 Linux Node binary 复制进 Windows 或 macOS installer，也不能跨系统复用 `node_modules`：`sharp` 是 native dependency，必须在目标构建 runner 上安装。仓库暂未配置代码签名和 notarization，因此安装包是未签名的（Windows SmartScreen 会警告；macOS 请右键点击 **打开**，或执行 `xattr -dr com.apple.quarantine /Applications/foxnio.app`）。面向更多用户发布前，需要在 CI 中注入各平台签名凭据。
+
+桌面 workflow 只把安装包、blockmap 和更新元数据（不含 `*-unpacked` 构建目录）作为 workflow artifact 上传，保留 7 天。在 `v*` tag 上，由独立的 `release` job（唯一拥有 `contents: write` 的 job）把它们附加到 GitHub Release。macOS 不上传 `latest-mac.yml`：arm64 和 x64 构建会写出同名文件，而且应用没有使用它的自动更新组件。与 package workflow 的配合见 [`release.md`](./release.md)。
 
 ## 移动端边界
 

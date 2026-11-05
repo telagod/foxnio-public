@@ -1,11 +1,13 @@
 "use strict";
 
 const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } = require("electron");
-const http = require("node:http");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { existsSync } = require("node:fs");
+const { isPortAvailable } = require("../bin/port-availability.js");
+const { classifyNavigation } = require("./external-url.cjs");
 const { resolveNodeBinary } = require("./node-runtime.cjs");
+const { DEFAULT_PORT, choosePort, waitForServer } = require("./startup.cjs");
 
 const gotSingleInstance = app.requestSingleInstanceLock();
 if (!gotSingleInstance) {
@@ -13,54 +15,12 @@ if (!gotSingleInstance) {
 }
 
 const HOSTNAME = "127.0.0.1";
-const DEFAULT_PORT = 30177;
-const STARTUP_TIMEOUT_MS = 45_000;
-const POLL_INTERVAL_MS = 250;
 
 let mainWindow = null;
 let tray = null;
 let serverProcess = null;
 let serverUrl = null;
 let isQuitting = false;
-
-function desktopPort(env = process.env) {
-  const raw = env.OMP_WEB_DESKTOP_PORT ?? env.PORT ?? String(DEFAULT_PORT);
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid desktop port: ${raw}`);
-  }
-  return port;
-}
-
-function requestServer(url, timeoutMs = 1000) {
-  return new Promise((resolve, reject) => {
-    const request = http.get(url, (response) => {
-      response.resume();
-      response.once("end", () => resolve(response.statusCode ?? 0));
-    });
-    request.setTimeout(timeoutMs, () => request.destroy(new Error("request timed out")));
-    request.once("error", reject);
-  });
-}
-
-async function waitForServer(url, child, timeoutMs = STARTUP_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = "not ready";
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`foxnio server exited before becoming ready (code ${child.exitCode ?? "unknown"})`);
-    }
-    try {
-      const status = await requestServer(url);
-      if (status >= 200 && status < 500) return;
-      lastError = `HTTP ${status}`;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-  }
-  throw new Error(`Timed out waiting for foxnio at ${url}: ${lastError}`);
-}
 
 function terminateServer() {
   const child = serverProcess;
@@ -114,14 +74,16 @@ function createWindow() {
 
   const allowedOrigin = new URL(serverUrl).origin;
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (new URL(url).origin === allowedOrigin) return { action: "allow" };
-    void shell.openExternal(url);
+    const target = classifyNavigation(url, allowedOrigin);
+    if (target === "internal") return { action: "allow" };
+    if (target === "external") void shell.openExternal(url);
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (new URL(url).origin === allowedOrigin) return;
+    const target = classifyNavigation(url, allowedOrigin);
+    if (target === "internal") return;
     event.preventDefault();
-    void shell.openExternal(url);
+    if (target === "external") void shell.openExternal(url);
   });
   mainWindow.on("close", (event) => {
     if (!isQuitting) {
@@ -155,7 +117,10 @@ function resolveAppRoot() {
 
 async function start() {
   const appRoot = resolveAppRoot();
-  const port = desktopPort();
+  const { port, fellBack } = await choosePort({
+    isPortAvailable: (candidate) => isPortAvailable(candidate, HOSTNAME),
+  });
+  if (fellBack) console.warn(`[foxnio] Port ${DEFAULT_PORT} is in use; using ${port}. UI preferences are stored per port.`);
   const node = resolveNodeBinary({
     appRoot,
     resourcesPath: process.resourcesPath,
@@ -171,6 +136,9 @@ async function start() {
       OMP_WEB_NO_OPEN: "1",
       OMP_WEB_HOSTNAME: HOSTNAME,
       OMP_WEB_PORT: String(port),
+      // The launcher belongs to this app; the in-app updater would stop it and
+      // leave the window without a server. Updates arrive as new installers.
+      OMP_WEB_DISABLE_AUTOUPDATE: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -216,4 +184,3 @@ if (gotSingleInstance) {
   });
 }
 
-module.exports = { desktopPort, requestServer, waitForServer };

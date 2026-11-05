@@ -1,4 +1,5 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync } from "fs";
+import { isIP } from "net";
 import { join } from "path";
 import { DatabaseSync } from "node:sqlite";
 import type { PushSubscription } from "web-push";
@@ -38,19 +39,62 @@ interface VapidKeys {
 const P256DH_PATTERN = /^[A-Za-z0-9_-]{86,88}={0,2}$/;
 const AUTH_PATTERN = /^[A-Za-z0-9_-]{21,24}={0,2}$/;
 
-/** Validate an untrusted PushSubscription JSON; only HTTPS push endpoints are accepted. */
+/**
+ * Hosts of the real browser push services. The server POSTs to whatever
+ * endpoint a client registers, so an unrestricted endpoint is a server-side
+ * request forgery primitive (and an internal port scanner through the error
+ * text). `*.` matches any number of subdomain labels, never the bare domain.
+ */
+const PUSH_SERVICE_HOSTS: readonly string[] = [
+  "fcm.googleapis.com",
+  "*.push.services.mozilla.com",
+  "web.push.apple.com",
+  "*.push.apple.com",
+  "*.notify.windows.com",
+];
+
+/** Operator-added push hosts (same wildcard form), comma-separated, for push services not built in. */
+const PUSH_ALLOWED_HOSTS_ENV = "OMP_WEB_PUSH_ALLOWED_HOSTS";
+
+function allowedPushHosts(): string[] {
+  const extra = (process.env[PUSH_ALLOWED_HOSTS_ENV] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter(Boolean);
+  return [...PUSH_SERVICE_HOSTS, ...extra];
+}
+
+function matchesHostPattern(hostname: string, pattern: string): boolean {
+  if (!pattern.startsWith("*.")) return hostname === pattern;
+  const suffix = pattern.slice(1);
+  return hostname.length > suffix.length && hostname.endsWith(suffix);
+}
+
+/**
+ * The normalized endpoint URL when it may receive pushes, else null: https on
+ * the default port, no credentials, a DNS name (never an IP literal) on the
+ * allow-list.
+ */
+function normalizePushEndpoint(endpoint: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  // URL drops an explicit :443, so any remaining port is a different one.
+  if (url.protocol !== "https:" || url.port !== "" || url.username !== "" || url.password !== "") return null;
+  const hostname = url.hostname.toLowerCase();
+  if (isIP(hostname.replace(/^\[|\]$/g, "")) !== 0) return null;
+  return allowedPushHosts().some((pattern) => matchesHostPattern(hostname, pattern)) ? url.href : null;
+}
+
+/** Validate an untrusted PushSubscription JSON; only endpoints of known push services are accepted. */
 export function parsePushSubscription(value: unknown): PushSubscription | null {
   if (!isRecord(value) || !isRecord(value.keys)) return null;
   const { endpoint } = value;
   const { p256dh, auth } = value.keys;
   if (typeof endpoint !== "string" || endpoint.length > 2048) return null;
   if (typeof p256dh !== "string" || !P256DH_PATTERN.test(p256dh) || typeof auth !== "string" || !AUTH_PATTERN.test(auth)) return null;
-  try {
-    if (new URL(endpoint).protocol !== "https:") return null;
-  } catch {
-    return null;
-  }
-  return { endpoint, keys: { p256dh, auth } };
+  const normalized = normalizePushEndpoint(endpoint);
+  return normalized ? { endpoint: normalized, keys: { p256dh, auth } } : null;
 }
 
 declare global {

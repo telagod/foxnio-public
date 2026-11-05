@@ -145,6 +145,10 @@ export function setDraft(key: string, draft: ChatDraft): void {
     const oldestKey = drafts.keys().next().value;
     if (oldestKey !== undefined) clearDraft(oldestKey);
   }
+  // Re-insert so the entry being edited moves to the newest position: Map.set
+  // on an existing key keeps its old slot, and eviction would then drop a
+  // draft the user is still typing into.
+  drafts.delete(key);
   drafts.set(key, cloneDraft(draft));
   try {
     // Persist only text: attachment payloads can exhaust the tab's storage quota.

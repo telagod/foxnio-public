@@ -110,11 +110,28 @@ export function useProviderUsage(query: string | null, refreshMs?: number): Prov
     };
     refreshRef.current = () => load(true);
     void load();
-    const interval = refreshMs ? window.setInterval(() => void load(), refreshMs) : undefined;
+    // A hidden tab skips its tick (the server would spawn `omp usage` for nobody)
+    // and catches up once when it becomes visible again.
+    let missedWhileHidden = false;
+    const interval = refreshMs
+      ? window.setInterval(() => {
+        if (document.visibilityState === "hidden") missedWhileHidden = true;
+        else void load();
+      }, refreshMs)
+      : undefined;
+    const onVisibilityChange = () => {
+      if (!missedWhileHidden || document.visibilityState !== "visible") return;
+      missedWhileHidden = false;
+      void load();
+    };
+    if (interval !== undefined) document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       refreshRef.current = async () => false;
       controller.abort();
-      if (interval !== undefined) window.clearInterval(interval);
+      if (interval !== undefined) {
+        window.clearInterval(interval);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
   }, [query, refreshMs]);
   return { ...state, refresh };

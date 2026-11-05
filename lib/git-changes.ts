@@ -1,9 +1,7 @@
-import { execFile } from "child_process";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
+import { execGit } from "./git-command";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { createChildProcessEnvironment } from "./project-command-env";
 import type {
   GitCollapseReason,
   GitFileDiffResponse,
@@ -18,16 +16,11 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 
-const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER, input?: string): Promise<string> {
-  const pending = execFileAsync("git", ["-C", cwd, ...args], {
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer,
-    env: createChildProcessEnvironment({ LC_ALL: "C" }),
-  });
+  const pending = execGit(cwd, args, { timeout: GIT_TIMEOUT_MS, maxBuffer });
   if (input !== undefined) {
     // git may exit before reading stdin (EPIPE); that failure surfaces through `pending`.
     pending.child.stdin?.on("error", () => {});
@@ -152,6 +145,7 @@ async function createTrackedFilePatch(
       "diff",
       "--no-color",
       "--no-ext-diff",
+      "--no-textconv",
       "--unified=3",
       "HEAD",
       "--",

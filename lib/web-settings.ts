@@ -1,5 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, readFileSync, statSync } from "fs";
 import { resolve } from "path";
+import { writeFileAtomic } from "./fs-atomic";
 import { getAgentDir } from "./omp/paths";
 import { isRecord } from "./type-guards";
 
@@ -41,13 +43,24 @@ function settingsPath(): string {
 
 declare global {
   // Shared across module instances (instrumentation and route bundles).
-  var __ompWebSettingsCache: { path: string; settings: WebServerSettings } | undefined;
+  var __ompWebSettingsCache: { path: string; stamp: string; settings: WebServerSettings } | undefined;
+}
+
+/** Changes whenever the file is replaced or edited (manual edit, other process), so the cache never outlives the content it was read from. */
+function fileStamp(path: string): string {
+  try {
+    const stat = statSync(path);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "missing";
+  }
 }
 
 export function loadWebServerSettings(): WebServerSettings {
   const path = settingsPath();
+  const stamp = fileStamp(path);
   const cached = globalThis.__ompWebSettingsCache;
-  if (cached?.path === path) return cached.settings;
+  if (cached?.path === path && cached.stamp === stamp) return cached.settings;
   let settings = DEFAULTS;
   try {
     if (existsSync(path)) {
@@ -63,26 +76,24 @@ export function loadWebServerSettings(): WebServerSettings {
   } catch {
     // Unreadable settings fall back to the defaults.
   }
-  globalThis.__ompWebSettingsCache = { path, settings };
+  globalThis.__ompWebSettingsCache = { path, stamp, settings };
   return settings;
 }
 
-/** Atomic write (temp file + rename), like the project registry. */
+/** Atomic write (temp file + rename). The file holds agentEnv values (API keys),
+ * so it is created owner-only and keeps whatever mode the user gave it. */
 export function saveWebServerSettings(patch: Partial<WebServerSettings>): WebServerSettings {
   const path = settingsPath();
   const settings = { ...loadWebServerSettings(), ...patch };
-  mkdirSync(resolve(path, ".."), { recursive: true });
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(temp, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-    renameSync(temp, path);
-  } finally {
-    try {
-      if (existsSync(temp)) rmSync(temp);
-    } catch {
-      // ignore cleanup failures
-    }
-  }
-  globalThis.__ompWebSettingsCache = { path, settings };
+  writeFileAtomic(path, `${JSON.stringify(settings, null, 2)}\n`);
+  globalThis.__ompWebSettingsCache = { path, stamp: fileStamp(path), settings };
   return settings;
+}
+
+/** Identifies the stored agentEnv content. The editor sends it back with a save
+ * so an environment changed meanwhile (another tab, a manual edit) is not
+ * overwritten by a stale copy. */
+export function agentEnvRevision(agentEnv: Record<string, string>): string {
+  const entries = Object.entries(agentEnv).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 }

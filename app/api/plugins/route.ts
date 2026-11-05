@@ -307,19 +307,25 @@ export async function POST(req: Request) {
     }
 
     const source = body.source?.trim();
+    // `source` is a positional argument of `omp plugin <action>`; a leading `-`
+    // would be parsed as an option (`--force`, `--set=...`). It is refused here
+    // and `--` below separates it from the flags, as a second layer.
+    if (source?.startsWith("-")) {
+      return NextResponse.json({ error: "Invalid plugin source", code: "source_invalid" }, { status: 400 });
+    }
     const scopeArgs = readScope(body.scope) === "project" ? ["--scope", "project"] : [];
 
     if (body.action === "install") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "install", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 300_000 });
+      await runOmp(["plugin", "install", "--json", ...scopeArgs, "--", source], { cwd: body.cwd, timeout: 300_000 });
     } else if (body.action === "remove") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", "uninstall", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 120_000 });
+      await runOmp(["plugin", "uninstall", "--json", ...scopeArgs, "--", source], { cwd: body.cwd, timeout: 120_000 });
     } else if (body.action === "update") {
-      await runOmp(["plugin", "upgrade", ...(source ? [source, ...scopeArgs] : [])], { cwd: body.cwd, timeout: 300_000 });
+      await runOmp(["plugin", "upgrade", ...(source ? [...scopeArgs, "--", source] : [])], { cwd: body.cwd, timeout: 300_000 });
     } else if (body.action === "disable" || body.action === "enable") {
       if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
-      await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 60_000 });
+      await runOmp(["plugin", body.action, "--json", ...scopeArgs, "--", source], { cwd: body.cwd, timeout: 60_000 });
     } else {
       return NextResponse.json({ error: `Unsupported action: ${body.action}`, code: "plugin_unsupported_action" }, { status: 400 });
     }

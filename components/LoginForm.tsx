@@ -21,7 +21,7 @@ export function LoginForm() {
         body: JSON.stringify({ password }),
       });
       if (!response.ok) {
-        setError(t("login.incorrectPassword"));
+        setError(t(response.status === 429 ? "login.tooManyAttempts" : "login.incorrectPassword"));
         return;
       }
       // Full reload so the new auth cookie is picked up by middleware

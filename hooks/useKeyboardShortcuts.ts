@@ -17,6 +17,15 @@ export function registerAbortHandler(handler: (() => void) | null): void {
   globalAbortHandler = handler;
 }
 
+/** Cmd+B on macOS, Ctrl+B elsewhere; any extra modifier or an IME composition is not the shortcut. */
+export function isToggleSidebarShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "isComposing" | "defaultPrevented">,
+  mac: boolean,
+): boolean {
+  if (e.defaultPrevented || e.isComposing || e.altKey || e.shiftKey) return false;
+  return e.key.toLowerCase() === "b" && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey);
+}
+
 // ---------------------------------------------------------------------------
 // Hook: global keyboard shortcuts
 // ---------------------------------------------------------------------------
@@ -32,6 +41,8 @@ interface UseGlobalKeyboardShortcutsOptions {
    */
   onNavigateBack?: () => void;
   onNavigateForward?: () => void;
+  /** Called on Cmd+B (macOS) or Ctrl+B (elsewhere): show or hide the sidebar. */
+  onToggleSidebar?: () => void;
   /** The currently selected project directory (sidebar cwd). */
   activeCwd?: string | null;
   /** Best-effort native-menu selection scoping; keyboard scoping is independent. */
@@ -44,6 +55,7 @@ interface UseGlobalKeyboardShortcutsOptions {
  * Shortcuts handled here:
  *   Esc          – stop the running agent (via module-level abort handler)
  *   Ctrl+Alt+N   – create a new session in the active project directory
+ *   Cmd/Ctrl+B   – show or hide the sidebar
  *   Ctrl/Cmd+A   – select the active message, transcript, or file contents
  *   ⌘[/⌘] (Alt+←/→ on Windows/Linux, plus the mouse back/forward buttons)
  *                – in-app navigate back/forward (see lib/navigation-history.ts)
@@ -56,7 +68,7 @@ interface UseGlobalKeyboardShortcutsOptions {
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
 ): void {
-  const { onNewSession, onNavigateBack, onNavigateForward, activeCwd, scopeNativeSelectAll = false } = options;
+  const { onNewSession, onNavigateBack, onNavigateForward, onToggleSidebar, activeCwd, scopeNativeSelectAll = false } = options;
 
   useEffect(() => {
     let interactionTarget: Element | null = null;
@@ -224,6 +236,17 @@ export function useGlobalKeyboardShortcuts(
         return;
       }
 
+      // ---- Mod+B: toggle the sidebar ----
+      if (onToggleSidebar && isToggleSidebarShortcut(e, isMacPlatform())) {
+        // A dialog owns the keyboard, except the phone drawer, which is itself one.
+        const inOtherDialog = e.target instanceof Element && !!e.target.closest("[role='dialog']:not(#workspace-sidebar)");
+        if (!inOtherDialog) {
+          e.preventDefault();
+          onToggleSidebar();
+          return;
+        }
+      }
+
       // ---- ⌘[/⌘] or Alt+←/→: in-app navigate back/forward ----
       if (onNavigateBack || onNavigateForward) {
         // Not while a modal is open: the palette/config dialogs own the
@@ -251,5 +274,5 @@ export function useGlobalKeyboardShortcuts(
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeCwd, onNewSession, onNavigateBack, onNavigateForward]);
+  }, [activeCwd, onNewSession, onNavigateBack, onNavigateForward, onToggleSidebar]);
 }

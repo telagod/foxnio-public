@@ -77,3 +77,40 @@ test("manual refresh gets fresh limits on older browsers while automatic polling
     if (sizeDescriptor) Object.defineProperty(URLSearchParams.prototype, "size", sizeDescriptor);
   }
 });
+
+test("a hidden tab skips the usage poll and catches up once when it becomes visible", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalInterval = window.setInterval;
+  const originalClear = window.clearInterval;
+  const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  let state = "visible";
+  let poll;
+  let fetches = 0;
+  try {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+    window.setInterval = (callback) => { poll = callback; return 1; };
+    window.clearInterval = () => {};
+    globalThis.fetch = async () => { fetches += 1; return { ok: true, json: async () => snapshot(fetches) }; };
+    const { unmount } = renderHook(() => useProviderUsage("", 300_000));
+    await act(async () => {});
+    assert.equal(fetches, 1, "the initial load always runs");
+    state = "hidden";
+    await act(async () => { poll(); poll(); poll(); });
+    assert.equal(fetches, 1, "hidden ticks must not reach the server");
+    state = "visible";
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    assert.equal(fetches, 2, "returning to the tab refreshes once");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    assert.equal(fetches, 2, "no refresh when no tick was missed");
+    await act(async () => { poll(); });
+    assert.equal(fetches, 3, "visible ticks poll normally");
+    unmount();
+  } finally {
+    cleanup();
+    globalThis.fetch = originalFetch;
+    window.setInterval = originalInterval;
+    window.clearInterval = originalClear;
+    if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+    else delete document.visibilityState;
+  }
+});

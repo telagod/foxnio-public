@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   canGoNavigationBack,
   canGoNavigationForward,
@@ -49,31 +49,38 @@ export interface NavigationHistoryController {
 export function useNavigationHistory(): NavigationHistoryController {
   const [history, setHistory] = useState<NavigationHistory>(createNavigationHistory);
 
-  // Synced in an effect (render-phase ref writes violate compiler rules) so
-  // peek()/dropPeeked() stay dependency-stable for AppShell callbacks.
+  // The ref is the source of truth; `history` state only mirrors it for
+  // rendering. AppShell's skip loop peeks again right after dropping a dead
+  // entry, in the same tick and before React re-renders, so every transition
+  // must be visible to peek() immediately. Updating through a queued
+  // `setHistory(prev => ...)` made the loop re-peek the entry it had just
+  // dropped and then drop its (live) neighbor instead.
   const historyRef = useRef(history);
-  useEffect(() => {
-    historyRef.current = history;
-  }, [history]);
+  const apply = useCallback((transition: (prev: NavigationHistory) => NavigationHistory) => {
+    const next = transition(historyRef.current);
+    if (next === historyRef.current) return;
+    historyRef.current = next;
+    setHistory(next);
+  }, []);
 
   const record = useCallback((entry: NavigationEntry) => {
-    setHistory((prev) => pushNavigationEntry(prev, entry));
-  }, []);
+    apply((prev) => pushNavigationEntry(prev, entry));
+  }, [apply]);
 
   const peekBack = useCallback(() => peekNavigationEntry(historyRef.current, -1), []);
   const peekForward = useCallback(() => peekNavigationEntry(historyRef.current, 1), []);
   const commitBack = useCallback(() => {
-    setHistory((prev) => stepNavigationHistory(prev, -1));
-  }, []);
+    apply((prev) => stepNavigationHistory(prev, -1));
+  }, [apply]);
   const commitForward = useCallback(() => {
-    setHistory((prev) => stepNavigationHistory(prev, 1));
-  }, []);
+    apply((prev) => stepNavigationHistory(prev, 1));
+  }, [apply]);
   const dropPeekedBack = useCallback(() => {
-    setHistory((prev) => removeNavigationEntryAt(prev, prev.index - 1));
-  }, []);
+    apply((prev) => removeNavigationEntryAt(prev, prev.index - 1));
+  }, [apply]);
   const dropPeekedForward = useCallback(() => {
-    setHistory((prev) => removeNavigationEntryAt(prev, prev.index + 1));
-  }, []);
+    apply((prev) => removeNavigationEntryAt(prev, prev.index + 1));
+  }, [apply]);
 
   return useMemo(() => ({
     canBack: canGoNavigationBack(history),

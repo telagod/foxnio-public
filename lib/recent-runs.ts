@@ -75,11 +75,3 @@ export function removeActiveFromCompleted(
 ): RecentRunEntry[] {
   return current.filter((entry) => !activeRunningIds.has(entry.sessionId));
 }
-
-export function extractRecentCompletedSet(entries: RecentRunEntry[]): Set<string> {
-  return new Set(entries.map((entry) => entry.sessionId));
-}
-
-export function isRecentlyCompleted(entries: RecentRunEntry[], sessionId: string): boolean {
-  return entries.some((entry) => entry.sessionId === sessionId);
-}

@@ -166,9 +166,9 @@ export class AgentToolGuard {
 
   /**
    * Depth a delivery from `source` to `target` would give `target`.
-   * Throws when that depth would exceed the cap. The depth is only
-   * recorded (setDepth) after a successful delivery, so a rejected or
-   * failed call never advances the chain.
+   * Throws when that depth would exceed the cap. The caller records it with
+   * setDepth before awaiting the delivery and restores the previous value
+   * when the delivery fails, so a failed call never advances the chain.
    */
   checkChainDepth(sourceSessionId: string): number {
     const depth = this.depthFor(sourceSessionId) + 1;
@@ -328,13 +328,24 @@ export async function executeAgentTool(
   const delivery = parseDelivery(record);
   const { wait, waitTimeoutMs } = parseWait(record);
   const depth = ctx.guard.checkChainDepth(ctx.sourceSessionId);
-  const result = await ops.deliver({
-    sessionId,
-    message: formatAttributedMessage(ctx.sourceSessionId, message),
-    delivery,
-    wait,
-    waitTimeoutMs,
-  });
+  // Recorded before the (possibly long) awaited delivery: the target can
+  // call send_to_session itself while this call waits, and it must already
+  // see its own depth or nested waited deliveries would bypass the cap.
+  const previousDepth = ctx.guard.depthFor(sessionId);
   ctx.guard.setDepth(sessionId, depth);
+  let result: AgentToolDeliverResult;
+  try {
+    result = await ops.deliver({
+      sessionId,
+      message: formatAttributedMessage(ctx.sourceSessionId, message),
+      delivery,
+      wait,
+      waitTimeoutMs,
+    });
+  } catch (error) {
+    // A failed delivery never advances the chain.
+    if (ctx.guard.depthFor(sessionId) === depth) ctx.guard.setDepth(sessionId, previousDepth);
+    throw error;
+  }
   return result;
 }

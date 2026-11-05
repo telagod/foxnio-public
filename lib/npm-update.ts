@@ -17,7 +17,8 @@ export interface NpmUpdateStatus {
 let cached: { checkedAt: number; status: NpmUpdateStatus } | null = null;
 
 function parseVersion(version: string): { parts: number[]; prerelease: boolean } | null {
-  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(-.+)?$/);
+  // The suffix charset keeps the version safe to hand to a package manager command line.
+  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$/);
   if (!match) return null;
   return { parts: match.slice(1, 4).map(Number), prerelease: Boolean(match[4]) };
 }
@@ -58,7 +59,9 @@ export async function checkNpmUpdate(force = false): Promise<NpmUpdateStatus> {
     });
     const data = response.ok ? await response.json() as { tag_name?: unknown } : null;
     const tagName = typeof data?.tag_name === "string" ? data.tag_name : null;
-    const availableVersion = tagName?.replace(/^v/, "") ?? null;
+    const tagVersion = tagName?.replace(/^v/, "") ?? null;
+    // The worker installs this string, so only well-formed versions are offered.
+    const availableVersion = tagVersion !== null && parseVersion(tagVersion) ? tagVersion : null;
     const status: NpmUpdateStatus = {
       currentVersion,
       availableVersion,

@@ -315,27 +315,66 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   handle.send({ type: "connected", filePath });
   let lastMtimeMs = access.stat.mtimeMs;
   let lastSize = access.stat.size;
-  let watcher: fs.FSWatcher;
-  try {
-    watcher = fs.watch(filePath, () => {
-      try {
-        const stat = fs.statSync(filePath);
-        // Some platforms emit watch events for file reads/attribute access.
-        // Ignore those or the client's refresh read loops.
-        if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
-        lastMtimeMs = stat.mtimeMs;
-        lastSize = stat.size;
-        handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
-      } catch {
-        handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
-      }
-    });
-  } catch {
+  let watcher: fs.FSWatcher | null = null;
+  let rearmTimer: NodeJS.Timeout | undefined;
+  let closed = false;
+  const publishIfChanged = () => {
+    try {
+      const stat = fs.statSync(filePath);
+      // Some platforms emit watch events for file reads/attribute access.
+      // Ignore those or the client's refresh read loops.
+      if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
+      lastMtimeMs = stat.mtimeMs;
+      lastSize = stat.size;
+      handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
+    } catch {
+      handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
+    }
+  };
+  // fs.watch on a file path follows the inode, not the path. An atomic save
+  // (write a temp file, rename it over the target) leaves the watcher on the
+  // replaced inode, silent forever, so a `rename` event re-arms it on the path.
+  const arm = (): boolean => {
+    try {
+      const armed = fs.watch(filePath, (eventType) => {
+        publishIfChanged();
+        if (eventType === "rename" && watcher === armed) rearm();
+      });
+      armed.on("error", () => handle.end());
+      watcher = armed;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // The replacement may not exist yet for a moment (delete-then-write saves).
+  const REARM_RETRY_MS = 200;
+  const REARM_MAX_ATTEMPTS = 25;
+  const rearm = (attempt = 0) => {
+    rearmTimer = undefined;
+    if (closed) return;
+    watcher?.close();
+    watcher = null;
+    if (arm()) {
+      publishIfChanged();
+      return;
+    }
+    if (attempt >= REARM_MAX_ATTEMPTS) {
+      handle.end();
+      return;
+    }
+    rearmTimer = setTimeout(() => rearm(attempt + 1), REARM_RETRY_MS);
+    rearmTimer.unref?.();
+  };
+  if (!arm()) {
     handle.send({ type: "error", message: "Failed to watch file" });
     handle.end();
     return SUBSCRIBED;
   }
-  watcher.on("error", () => handle.end());
-  handle.setDetach(() => watcher.close());
+  handle.setDetach(() => {
+    closed = true;
+    clearTimeout(rearmTimer);
+    watcher?.close();
+  });
   return SUBSCRIBED;
 }

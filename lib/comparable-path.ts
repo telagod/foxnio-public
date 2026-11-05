@@ -2,7 +2,7 @@
  * Client-safe comparable form for project/session paths.
  *
  * Pure string normalization — no node:path, no process.platform — so it can
- * be imported from browser components (SessionSidebar) as well as server
+ * be imported from browser components (the sidebar) as well as server
  * modules (project-registry). Windows-ness is decided by the path's own form
  * (drive letter / UNC prefix), which is deterministic on every platform.
  * Callers always pass absolute paths, so no cwd resolution is needed.

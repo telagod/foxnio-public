@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
-import { isMap, parseDocument, stringify } from "yaml";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
+import { isMap, parseDocument } from "yaml";
+import { writeFileAtomic } from "../fs-atomic";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -24,22 +25,26 @@ export function readModelRoles(): { path: string; roles: ModelRoles } {
   };
 }
 
-/** Updates only modelRoles, preserving the user's remaining native OMP config. */
-export function writeModelRoles(roles: ModelRoles): void {
+/**
+ * Applies role changes to modelRoles inside one read-modify-write of config.yml:
+ * a non-empty selector sets a role, an empty one removes it, and every role not
+ * named in `changes` keeps whatever is on disk now (another tab, the omp CLI).
+ * Returns the resulting roles. The user's remaining native OMP config and
+ * comments are preserved.
+ */
+export function updateModelRoles(changes: ModelRoles): ModelRoles {
   const path = configPath();
   const source = existsSync(path) ? readFileSync(path, "utf8") : "";
   const doc = parseDocument(source);
   if (doc.errors.length > 0) throw new Error(`${path} is not valid YAML: ${doc.errors[0].message}`);
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  if (doc.contents === null) {
-    writeFileSync(temp, stringify({ modelRoles: roles }), "utf8");
-  } else {
-    if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
-    doc.set("modelRoles", roles);
-    writeFileSync(temp, doc.toString(), "utf8");
+  if (doc.contents !== null && !isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
+  if (!isMap(doc.get("modelRoles", true))) doc.set("modelRoles", doc.createNode({}));
+  for (const [role, selector] of Object.entries(changes)) {
+    if (selector.trim()) doc.setIn(["modelRoles", role], selector.trim());
+    else doc.deleteIn(["modelRoles", role]);
   }
-  renameSync(temp, path);
+  writeFileAtomic(path, doc.toString());
+  return readModelRoles().roles;
 }
 
 export function readDisabledProviders(): Set<string> {
@@ -66,7 +71,5 @@ export function enableProvider(provider: string): void {
   const next = disabled.filter((value) => value !== provider);
   if (next.length === disabled.length) return;
   doc.set("disabledProviders", next);
-  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temp, doc.toString(), "utf8");
-  renameSync(temp, path);
+  writeFileAtomic(path, doc.toString());
 }

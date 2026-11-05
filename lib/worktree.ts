@@ -1,13 +1,9 @@
-import { execFile } from "child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { promisify } from "util";
 import { allowFileRoot } from "./file-access";
+import { execGit, type GitCommandMode } from "./git-command";
 import { normalizeForComparison, samePath, toNativePath } from "./paths";
-import { createChildProcessEnvironment } from "./project-command-env";
 import { loadProjectRegistry } from "./project-registry";
-
-const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // Project resolution: cwd → { projectRoot, branch }
@@ -61,15 +57,21 @@ export function invalidateProjectCache(): void {
   globalThis.__piProjectCache?.clear();
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    timeout: 10_000,
-    maxBuffer: 1024 * 1024,
-    // Pin the message locale so error-text matching (e.g. the dirty-worktree
-    // detection in the DELETE route) works regardless of system language.
-    env: createChildProcessEnvironment({ LC_ALL: "C" }),
-  });
+// Message locale is pinned (LC_ALL=C) so error-text matching, e.g. the
+// dirty-worktree detection in the DELETE route, works regardless of system language.
+async function runGit(cwd: string, args: string[], mode: GitCommandMode): Promise<string> {
+  const { stdout } = await execGit(cwd, args, { timeout: 10_000, maxBuffer: 1024 * 1024, mode });
   return stdout.trim();
+}
+
+/** Queries only (rev-parse, worktree list). */
+function git(cwd: string, args: string[]): Promise<string> {
+  return runGit(cwd, args, "read-only");
+}
+
+/** `worktree add/remove/prune`: these write to the repository by design. */
+function gitMutation(cwd: string, args: string[]): Promise<string> {
+  return runGit(cwd, args, "mutating");
 }
 
 /**
@@ -313,9 +315,9 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
   const posixWorktreePath = worktreePath.replace(/\\/g, "/");
   try {
     if (branchExists) {
-      await git(repoRoot, ["worktree", "add", "--", posixWorktreePath, trimmed]);
+      await gitMutation(repoRoot, ["worktree", "add", "--", posixWorktreePath, trimmed]);
     } else {
-      await git(repoRoot, ["worktree", "add", "-b", trimmed, "--", posixWorktreePath]);
+      await gitMutation(repoRoot, ["worktree", "add", "-b", trimmed, "--", posixWorktreePath]);
     }
   } catch (error) {
     throw new Error(extractGitError(error));
@@ -341,7 +343,7 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
 
   const posixPath = target.path.replace(/\\/g, "/");
   try {
-    await git(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), posixPath]);
+    await gitMutation(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), posixPath]);
   } catch (error) {
     throw new Error(extractGitError(error));
   }
@@ -355,7 +357,7 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
   }
 
   try {
-    await git(repoRoot, ["worktree", "prune"]);
+    await gitMutation(repoRoot, ["worktree", "prune"]);
   } catch {
     // Ignore prune errors
   }

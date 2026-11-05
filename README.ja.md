@@ -38,21 +38,27 @@ foxnio は [kahme247/ompweb](https://github.com/kahme247/ompweb) のフォーク
 
 ## クイックスタート
 
-初回インストール前に `@telagod` registry scope を設定してください。
+> **未リリースです。** `@telagod/foxnio` はまだ GitHub Packages に公開されておらず、GitHub Release も存在しません。以下のコマンドは最初のリリースが出た後に使えます。
 
-非公開パッケージでは `read:packages` 権限を持つ classic personal access token でログインします:
+foxnio は公開 npm registry ではなく GitHub Packages で配布されます。GitHub では、Public パッケージを含め、どのパッケージのインストールにも access token が必要です。初回インストールの前に:
+
+1. `read:packages` 権限を持つ classic personal access token を作成します（GitHub → Settings → Developer settings → Personal access tokens (classic)）。
+2. `@telagod` scope を GitHub Packages に割り当て、token をユーザー単位の npm 設定に保存します。`npm login` は GitHub のユーザー名を尋ね、パスワードとして token を使います:
 
 ```bash
 npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
 ```
 
-Public パッケージは token 不要ですが、ユーザー単位の npm 設定で scope を指定してください:
+`~/.npmrc` に次の 2 行を直接書くこともできます:
 
-```bash
-npm config set @telagod:registry https://npm.pkg.github.com
+```ini
+@telagod:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<token>
 ```
 
-どちらもグローバルインストールと foxnio の自己更新で使う scope を設定します。新しいパッケージはデフォルトで非公開です。初回リリース後、匿名インストールを許可するには GitHub の package 設定で **Public** に変更してください。
+GitHub Packages を使うのは `@telagod` scope だけで、scope のない依存関係は引き続き npmjs から解決されます。Bun では、同じ token を使って `bunfig.toml` の `[install.scopes]` で scope を割り当ててください。
+
+アプリ内アップデーターも同じインストールコマンドを実行するため、同じ設定が必要です。何かを停止する前に、新しいバージョンを registry から読み取れるか確認し、読み取れない場合は設定不足を報告します。
 
 **インストールせずに直接実行:**
 
@@ -68,6 +74,42 @@ foxnio
 ```
 
 ブラウザで [http://127.0.0.1:30177](http://127.0.0.1:30177) を開きます。
+
+### デスクトップインストーラー
+
+Windows（NSIS インストーラーとポータブル `.exe`）、macOS（DMG と ZIP）、Linux（AppImage と `.deb`）のインストーラーは、GitHub Release が作成された後に各リリースへ添付されます。**コード署名も公証もされていません**:
+
+- **Windows:** SmartScreen に「Windows によって PC が保護されました」と表示されます。**詳細情報 → 実行** を選びます。
+- **macOS:** Gatekeeper が初回起動をブロックします。アプリを右クリックして **開く** を選び確認するか、`xattr -dr com.apple.quarantine /Applications/foxnio.app` を実行します。
+
+デスクトップ版でも `omp` は別途インストールが必要です。ポート 30177 で独自のローカルサーバーを起動し、使用中の場合は次の空きポートを使います。アプリ内アップデーターは使わないため、更新するには新しいインストーラーを入れてください。
+
+### ompweb / omp-web からの移行
+
+foxnio への名称変更に伴い、バックグラウンドサービスの名前も変わりました。古いサービスは新しいものと並んで残る（または起動に失敗する）ため、手動で削除してください。`~/.omp` 配下の設定、セッション、通知履歴は共通で、移行は不要です。
+
+```bash
+# npm パッケージ
+npm uninstall -g @kahme247/ompweb
+
+# Linux: systemd ユーザーユニットとトレイの自動起動
+systemctl --user disable --now ompweb.service
+rm ~/.config/systemd/user/ompweb.service ~/.config/autostart/ompweb-tray.desktop
+systemctl --user daemon-reload
+
+# macOS: launchd エージェント（ログは ~/Library/Logs/ompweb）
+launchctl bootout "gui/$(id -u)/com.kahme247.ompweb"
+rm ~/Library/LaunchAgents/com.kahme247.ompweb.plist
+```
+
+```powershell
+# Windows: omp-web が作成したスケジュールタスクとショートカット（先にトレイアイコンを終了）
+schtasks /delete /tn "omp-web" /f
+$programs = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+Remove-Item "$programs\Startup\omp-web-tray.lnk", "$programs\omp-web.lnk", "$([Environment]::GetFolderPath('Desktop'))\omp-web.lnk" -ErrorAction SilentlyContinue
+```
+
+その後、foxnio のサービスをインストールし直してください（`foxnio systemd install`、`foxnio-launchd install`、`foxnio --install-tray`）。
 
 ### CLI オプション
 
@@ -112,6 +154,10 @@ OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' foxnio
 セッションは無効になりますが、保存されたハッシュだけではセッションを
 偽造できません。
 
+**パスワードを設定していない場合**、foxnio は `Host` ヘッダーがループバック名（`localhost`、`127.0.0.0/8`、`[::1]`）のリクエストにだけ応答し、それ以外には `403` を返します。閲覧中の Web ページが DNS rebinding でローカルのエージェントに到達するのを防ぐためです。パスワードなしのサーバーへリバースプロキシ、トンネル、Tailscale の名前でアクセスする場合は、その名前を `OMP_WEB_ALLOWED_HOSTS` に指定してください（パスワードの設定を推奨します）。サインイン失敗は制限されます。5 回連続で間違えると 15 秒ロックされ、以降は倍々で最長 5 分です（HTTP `429`）。
+
+「全履歴を表示」で開くエクスポート済みセッションのページはサンドボックス内で動作し、セッション Cookie や API にはアクセスできません。エクスポートした会話にはモデルや Web ページが書いた HTML が含まれる可能性があるためです。
+
 サービスインストーラー（`foxnio systemd install`、`foxnio-launchd install`、
 Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PASSWORD` を
 受け付け、設定ファイルへ書き込む前にハッシュ化します。保存されるのは
@@ -139,6 +185,8 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 | `OMP_WEB_HOSTNAME` | バインドホスト | `127.0.0.1` |
 | `OMP_WEB_PASSWORD_HASH` | Web ログイン用パスワードの scrypt ハッシュ（`foxnio hash-password` で生成）。非ループバックバインドには必須 | _なし（認証無効）_ |
 | `OMP_WEB_TRUSTED_HEADER_SHA256` | 信頼できるリバースプロキシが `X-Omp-Web-Auth` ヘッダーで送るシークレットの SHA-256 ダイジェスト（16 進）。ヘッダーのハッシュが一致したリクエストはパスワードなしで通ります。foxnio はシークレット自体を保持しません。生成方法と nginx の設定例は英語版 README の「Skipping the password on trusted networks」を参照してください | _なし（無効）_ |
+| `OMP_WEB_ALLOWED_HOSTS` | パスワード未設定時に、ループバック名に加えて受け付ける `Host` 名（`name` または `*.example.com`、カンマ区切り） | _なし_ |
+| `OMP_WEB_PUSH_ALLOWED_HOSTS` | Google（FCM）、Mozilla、Apple、Windows に加えて受け付ける Web Push サービスのホスト名（`name` または `*.example.com`、カンマ区切り） | _なし_ |
 | `OMP_WEB_NO_OPEN` | `1` でブラウザ自動起動を無効化 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | `1` で更新チェックとアプリ内更新を無効化（変更後は再起動） | `0` |
 | `OMP_WEB_NAME` | ブラウザのタブとインストールしたアプリに表示する名前。`url`・`host`・`domain`（大文字小文字を区別しない）を指定すると、ブラウザが接続したホスト名（ポートなし）を使用します（localhost と IP アドレスは `foxnio` のまま）。それ以外の値はそのまま使用します（変更後は再起動） | `foxnio` |

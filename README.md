@@ -92,21 +92,28 @@ Completion notifications use omp's `prompt_result` and `session_settled` RPC
 frames (omp 18.3.1 or later).
 
 ## Quick Start
-Configure the `@telagod` registry scope before installing.
 
-For a private package, use a classic personal access token with `read:packages`:
+> **Not released yet.** `@telagod/foxnio` has not been published to GitHub Packages and the GitHub Release does not exist yet. The commands below work once the first release is out.
+
+foxnio is distributed through GitHub Packages, not the public npm registry. GitHub requires an access token to install any package from it, including public ones. Before the first install:
+
+1. Create a classic personal access token with the `read:packages` scope (GitHub → Settings → Developer settings → Personal access tokens (classic)).
+2. Map the `@telagod` scope to GitHub Packages and store the token in your user-level npm config. `npm login` asks for your GitHub username and the token as the password:
 
 ```bash
 npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
 ```
 
-For a public package, no token is needed, but configure the scope in your user-level npm settings:
+Or write the two lines to `~/.npmrc` yourself:
 
-```bash
-npm config set @telagod:registry https://npm.pkg.github.com
+```ini
+@telagod:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<token>
 ```
 
-Both commands configure global installs and the in-app self-updater. New packages are private by default; after the first release, change visibility to **Public** in GitHub settings for anonymous installs.
+Only the `@telagod` scope uses GitHub Packages; unscoped dependencies keep resolving from npmjs. With Bun, map the scope with the same token in `bunfig.toml` (`[install.scopes]`).
+
+The in-app updater runs the same install command and needs the same configuration. It checks that the new version can be read from the registry before it stops anything, and reports the missing configuration if it cannot.
 
 **Run directly without installing:**
 
@@ -127,6 +134,42 @@ foxnio
 ```
 
 Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
+
+### Desktop installers
+
+Windows (NSIS installer and portable `.exe`), macOS (DMG and ZIP) and Linux (AppImage and `.deb`) installers are attached to each GitHub Release once one exists. They are **not code-signed or notarized**:
+
+- **Windows:** SmartScreen shows "Windows protected your PC". Choose **More info → Run anyway**.
+- **macOS:** Gatekeeper blocks the first launch. Right-click the app, choose **Open**, and confirm, or run `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
+
+The desktop app still needs `omp` installed separately. It starts its own local server on port 30177, or on the next free port when that one is taken, and does not use the in-app updater: install a newer installer to update.
+
+### Moving from ompweb / omp-web
+
+The rename to foxnio changed the names of the background services. Old ones keep running (or fail to start) next to the new ones until you remove them by hand. Settings, sessions and notification history under `~/.omp` are shared and need no migration.
+
+```bash
+# npm package
+npm uninstall -g @kahme247/ompweb
+
+# Linux: systemd user unit and tray autostart
+systemctl --user disable --now ompweb.service
+rm ~/.config/systemd/user/ompweb.service ~/.config/autostart/ompweb-tray.desktop
+systemctl --user daemon-reload
+
+# macOS: launchd agent (logs were in ~/Library/Logs/ompweb)
+launchctl bootout "gui/$(id -u)/com.kahme247.ompweb"
+rm ~/Library/LaunchAgents/com.kahme247.ompweb.plist
+```
+
+```powershell
+# Windows: scheduled task and shortcuts created by omp-web (stop its tray icon first)
+schtasks /delete /tn "omp-web" /f
+$programs = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+Remove-Item "$programs\Startup\omp-web-tray.lnk", "$programs\omp-web.lnk", "$([Environment]::GetFolderPath('Desktop'))\omp-web.lnk" -ErrorAction SilentlyContinue
+```
+
+Then install the foxnio services again (`foxnio systemd install`, `foxnio-launchd install`, `foxnio --install-tray`).
 
 ### CLI Options
 
@@ -175,6 +218,10 @@ Sessions are not signed with the password hash. A random signing key is created
 on first start in `~/.omp/agent/omp-web/web-auth-secret.json` (mode `0600`) and
 mixed with the hash, so changing the password still signs everyone out while the
 stored hash alone is never enough to forge a session.
+
+**Without a password**, foxnio only answers requests whose `Host` header is a loopback name (`localhost`, `127.0.0.0/8`, `[::1]`) and returns `403` for anything else. That stops a web page you happen to visit from reaching your local agent through DNS rebinding. To reach a password-less server through a reverse proxy, tunnel or Tailscale name, list that name in `OMP_WEB_ALLOWED_HOSTS` (better: set a password). Failed sign-ins are throttled: five wrong passwords lock the client out for 15 seconds, doubling up to five minutes (HTTP `429`).
+
+The exported-session page ("View full history") opens in a sandbox with no access to your session cookie or the API, because an exported conversation can contain HTML written by a model or a web page.
 
 The service installers (`foxnio systemd install`, `foxnio-launchd install`, the
 Linux tray, and the Windows service) still accept `OMP_WEB_PASSWORD` at install
@@ -347,6 +394,8 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_HOSTNAME` | Server bind host | `127.0.0.1` |
 | `OMP_WEB_PASSWORD_HASH` | Optional scrypt hash of the web login password, from `foxnio hash-password`. Required for a non-loopback bind | _None (auth disabled)_ |
 | `OMP_WEB_TRUSTED_HEADER_SHA256` | SHA-256 hex digest of the secret a trusted reverse proxy sends in `X-Omp-Web-Auth` to skip the password for that request; see [Skipping the password on trusted networks](#skipping-the-password-on-trusted-networks) | _None (disabled)_ |
+| `OMP_WEB_ALLOWED_HOSTS` | Comma-separated `Host` names (`name` or `*.example.com`) accepted when no password is configured, in addition to loopback names | _None_ |
+| `OMP_WEB_PUSH_ALLOWED_HOSTS` | Extra Web Push service hostnames (`name` or `*.example.com`) accepted for push subscriptions, in addition to Google (FCM), Mozilla, Apple and Windows | _None_ |
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `foxnio`. Any other value is used as-is. Restart after changing | `foxnio` |

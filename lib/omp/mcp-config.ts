@@ -1,8 +1,10 @@
 import { execFileSync } from "child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { stripAnsi } from "../ansi";
+import { writeFileAtomic } from "../fs-atomic";
+import { createChildProcessEnvironment } from "../project-command-env";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -183,7 +185,7 @@ function projectRoot(cwd: string): string {
   if (cached && cached.expiresAt > Date.now()) return cached.root;
   let root: string;
   try {
-    root = resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim());
+    root = resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, env: createChildProcessEnvironment() }).trim());
   } catch {
     // Transient git failure (hang, timeout, sick mount): fall back to the cwd
     // but do NOT cache it — a cached fallback would aim MCP reads/writes at
@@ -331,10 +333,9 @@ export function writeMcpServer(cwd: string, name: string, server: McpServer, pre
       ...(previous?.headers !== undefined && server.headers === undefined ? { headers: previous.headers } : {}),
     };
     const config: McpFile = { ...locked.config, mcpServers: servers };
-    mkdirSync(dirname(locked.path), { recursive: true });
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
+    // Server entries carry env/headers credentials: new files are owner-only
+    // and an existing file keeps its mode (and symlink).
+    writeFileAtomic(locked.path, `${JSON.stringify(config, null, 2)}\n`);
     return { path: locked.path };
   });
 }
@@ -348,9 +349,7 @@ export function deleteMcpServer(cwd: string, name: string): { path: string } {
     if (!(name in servers)) throw new Error("MCP server was not found");
     delete servers[name];
     const config: McpFile = { ...locked.config, mcpServers: servers };
-    const temp = `${locked.path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    renameSync(temp, locked.path);
+    writeFileAtomic(locked.path, `${JSON.stringify(config, null, 2)}\n`);
     return { path: locked.path };
   });
 }

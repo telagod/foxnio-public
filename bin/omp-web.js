@@ -246,11 +246,6 @@ const passwordEnabled = passwordHash !== undefined;
 
 
 const nextArgs = ["start", "-p", port, "-H", hostname];
-const restartDescriptor = JSON.stringify({
-  launcherPath: path.join(pkgDir, "bin", "omp-web.js"),
-  hostname: String(hostname),
-  port: String(port),
-});
 const browserUrl = getBrowserUrl(hostname, port);
 let browserOpened = false;
 let currentChild = null;
@@ -342,23 +337,12 @@ function acknowledgeArm(child, message, error) {
   });
 }
 
-function isProcessAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code !== "ESRCH";
-  }
-}
-
 function hasLivePreparedOwnership(control) {
   const status = readControlJson(path.join(control.root, "status.json"));
   const lease = readControlJson(path.join(control.root, "lease.json"));
   return status?.attemptId === control.attemptId
     && (status.state === "prepared" || status.state === "running")
     && status.stage === "stopping"
-    && isProcessAlive(status.workerPid)
     && lease?.attemptId === control.attemptId
     && Number.isFinite(lease.expiresAt)
     && lease.expiresAt > Date.now()
@@ -477,7 +461,6 @@ function serverEnvironment() {
     OMP_WEB_LAUNCHER_PID: String(process.pid),
     OMP_WEB_PORT: port,
     OMP_WEB_HOSTNAME: hostname,
-    OMP_WEB_RESTART_DESCRIPTOR: restartDescriptor,
   };
 }
 

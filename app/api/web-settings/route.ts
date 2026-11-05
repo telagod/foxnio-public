@@ -1,20 +1,27 @@
 import { NextResponse } from "next/server";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
-import { loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
+import { agentEnvRevision, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
+import { isSensitiveEnvName, maskStringRecord, restoreStringRecord, UnresolvedSecretError } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
 
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
 export async function GET() {
-  return NextResponse.json(readSettings());
+  return NextResponse.json(publicSettings(loadWebServerSettings()));
 }
 
-/** Never surface a variable lib/omp/agent-env.ts would refuse to spawn with. */
-function readSettings(): WebServerSettings {
-  const settings = loadWebServerSettings();
-  return { ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values };
+/** Never surface a variable lib/omp/agent-env.ts would refuse to spawn with, and
+ * never send a credential-looking value (API keys) back to the browser.
+ * `agentEnvRevision` identifies the stored environment for PUT's conflict check. */
+function publicSettings(settings: WebServerSettings): WebServerSettings & { agentEnvRevision: string } {
+  const { values } = sanitizeAgentEnvValues(settings.agentEnv);
+  return {
+    ...settings,
+    agentEnv: maskStringRecord(values, isSensitiveEnvName) as Record<string, string>,
+    agentEnvRevision: agentEnvRevision(values),
+  };
 }
 
 export async function PUT(req: Request) {
@@ -27,7 +34,7 @@ export async function PUT(req: Request) {
   if (!isRecord(body)) {
     return NextResponse.json({ error: "Request body must be a settings object", code: "invalid_settings" }, { status: 400 });
   }
-  const payload = body as { autoResumeSessions?: unknown; agentToolsEnabled?: unknown; agentEnv?: unknown };
+  const payload = body as { autoResumeSessions?: unknown; agentToolsEnabled?: unknown; agentEnv?: unknown; agentEnvRevision?: unknown };
   const patch: Partial<WebServerSettings> = {};
 
   // Both keys are optional so a caller can update one without reading the other;
@@ -67,12 +74,28 @@ export async function PUT(req: Request) {
         { status: 400 },
       );
     }
-    patch.agentEnv = parsed.values;
+    // The editor sends the revision it loaded; a different stored environment
+    // means someone changed it since, and this copy must not overwrite it.
+    const sentRevision = payload.agentEnvRevision;
+    if (sentRevision !== undefined && sentRevision !== agentEnvRevision(sanitizeAgentEnvValues(loadWebServerSettings().agentEnv).values)) {
+      return NextResponse.json(
+        { error: "The agent environment changed after it was loaded. Reload it before saving.", code: "agent_env_conflict" },
+        { status: 409 },
+      );
+    }
+    // The browser only holds SECRET_MASK for stored secrets; keep the stored value
+    // for every entry that still carries it.
+    try {
+      patch.agentEnv = restoreStringRecord(parsed.values, loadWebServerSettings().agentEnv, "agentEnv") as Record<string, string>;
+    } catch (error) {
+      if (!(error instanceof UnresolvedSecretError)) throw error;
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    }
   }
 
   const settings = saveWebServerSettings(patch);
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
   if (resumeProvided) syncInterruptibleSessions();
-  return NextResponse.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
+  return NextResponse.json(publicSettings(settings));
 }

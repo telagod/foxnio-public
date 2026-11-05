@@ -5,6 +5,8 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { isSafeExternalUrl } from "@/lib/safe-url";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
+import { SECRET_MASK } from "@/lib/secret-mask";
+import { isRecord } from "@/lib/type-guards";
 import { formatApiError } from "@/lib/i18n/api-error";
 import {
   DialogTitle,
@@ -236,16 +238,33 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
           hint={<CodeText text={t("modelsConfig.apiKeyHint")} />}
           error={apiKeyV.error}
         >
-          <SecretInput
-            value={provider.apiKey ?? ""}
-            onChange={(v) => { set("apiKey", v || undefined); apiKeyV.onChange(); }}
-            placeholder={t("modelsConfig.apiKeyPlaceholder")}
-            invalid={Boolean(apiKeyV.error)}
-            error={apiKeyV.error}
-            onBlurValidate={apiKeyV.onBlur}
-            showLabel={t("modelsConfig.showApiKey")}
-            hideLabel={t("modelsConfig.hideApiKey")}
-          />
+          {provider.apiKey === SECRET_MASK ? (
+            // The stored key is never sent to the browser. Show it as set and
+            // let the user replace (or, by leaving the new field empty, remove) it.
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <TextInput value={t("modelsConfig.secretStored")} onChange={() => {}} disabled mono />
+              </div>
+              <button
+                type="button"
+                onClick={() => { set("apiKey", undefined); apiKeyV.onChange(); }}
+                style={{ padding: "6px 12px", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12, flexShrink: 0 }}
+              >
+                {t("modelsConfig.changeSecret")}
+              </button>
+            </div>
+          ) : (
+            <SecretInput
+              value={provider.apiKey ?? ""}
+              onChange={(v) => { set("apiKey", v || undefined); apiKeyV.onChange(); }}
+              placeholder={t("modelsConfig.apiKeyPlaceholder")}
+              invalid={Boolean(apiKeyV.error)}
+              error={apiKeyV.error}
+              onBlurValidate={apiKeyV.onBlur}
+              showLabel={t("modelsConfig.showApiKey")}
+              hideLabel={t("modelsConfig.hideApiKey")}
+            />
+          )}
         </FormField>
 
         <FormCheck
@@ -474,8 +493,11 @@ function ModelDetail({
   model,
   onChange,
   onDelete,
+  originalProviderName,
 }: {
   providerName: string;
+  /** Name the provider has in models.yml when it was renamed in the editor. */
+  originalProviderName?: string;
   provider: ProviderEntry;
   model: ModelEntry;
   onChange: (m: ModelEntry) => void;
@@ -516,7 +538,7 @@ function ModelDetail({
       const res = await fetch("/api/models-config/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerName, provider, model }),
+        body: JSON.stringify({ providerName, originalProviderName, provider, model }),
       });
       const d = await res.json() as {
         ok?: boolean;
@@ -544,7 +566,7 @@ function ModelDetail({
     } catch (e) {
       setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [model, provider, providerName, testState.phase]);
+  }, [model, provider, providerName, originalProviderName, testState.phase]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -1063,6 +1085,13 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   // instead of an empty form, and saving stays blocked so the hand-written file
   // is never overwritten with nothing.
   const [parseError, setParseError] = useState<{ message: string; path?: string } | null>(null);
+  // models.yml state the editor was loaded from. `revision` is sent back with
+  // Save; `loadError` and `conflict` keep Save disabled (see saveBlocked).
+  const [revision, setRevision] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  // Provider renamed in the editor -> its name on disk, for secret restoration.
+  const [renamedFrom, setRenamedFrom] = useState<Record<string, string>>({});
 
   const loadOAuthProviders = useCallback(() => {
     fetch("/api/auth/providers")
@@ -1099,22 +1128,37 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
 
   const loadConfig = useCallback(() => {
     setLoading(true);
-    fetch("/api/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsFileData & { parseError?: string; code?: string; path?: string }) => {
-        if (d.parseError) {
-          setParseError({ message: d.parseError, path: d.path });
+    setLoadError(null);
+    setConflict(false);
+    setSaveError(null);
+    fetch("/api/models-config", { cache: "no-store" })
+      .then(async (res) => {
+        // A failed or non-JSON response (proxy login page, 5xx) must not turn
+        // into an empty config: saving that would replace every provider and key.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d: unknown = await res.json();
+        if (!isRecord(d) || typeof d.revision !== "string" || (d.providers !== undefined && !isRecord(d.providers))) {
+          throw new Error("Unexpected response from /api/models-config");
+        }
+        const { revision: loadedRevision, parseError: loadedParseError, path, ...fileConfig } = d as unknown as ModelsFileData & { revision: string; parseError?: string; path?: string };
+        setRevision(loadedRevision);
+        setRenamedFrom({});
+        if (loadedParseError) {
+          setParseError({ message: loadedParseError, path });
           setConfig({ providers: {} });
           setSelection(null);
           return;
         }
         setParseError(null);
-        const normalized = d.providers ? d : { ...d, providers: {} };
+        const normalized: ModelsFileData = fileConfig.providers ? fileConfig : { ...fileConfig, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
         if (!embedded && keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
-      .catch(() => setConfig({ providers: {} }))
+      .catch((error) => {
+        setRevision(null);
+        setLoadError(error instanceof Error ? error.message : String(error));
+      })
       .finally(() => setLoading(false));
   }, [embedded]);
 
@@ -1199,6 +1243,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       if (prev.type === "model" && prev.providerName === oldName) return { ...prev, providerName: newName };
       return prev;
     });
+    // Remember which on-disk provider this one came from, so its hidden API key
+    // and headers (the browser only holds placeholders) survive the rename.
+    setRenamedFrom((prev) => {
+      const origin = Object.hasOwn(prev, oldName) ? prev[oldName] : oldName;
+      return Object.fromEntries([...Object.entries(prev).filter(([name]) => name !== oldName), [newName, origin]]);
+    });
   }, []);
 
   const deleteProvider = useCallback((name: string) => {
@@ -1262,8 +1312,10 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     setSelection({ type: "provider", name: providerName });
   }, []);
 
+  const saveBlocked = parseError !== null || loadError !== null || conflict || revision === null;
+
   const handleSave = useCallback(async () => {
-    if (parseError) return;
+    if (saveBlocked) return;
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
@@ -1272,7 +1324,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       const res = await fetch("/api/models-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(saveableConfig),
+        body: JSON.stringify({ revision, config: saveableConfig, renamedFrom }),
       });
       const d = await res.json() as { success?: boolean; error?: string; code?: string };
       if (!res.ok || d.error) {
@@ -1282,6 +1334,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         // The file became unparseable after it was loaded — the server refused
         // the write, so switch the editor into the same blocked state.
         if (d.code === "models_config_unparseable") setParseError({ message: d.error ?? formatApiError(d) });
+        // The file changed after it was loaded. Saving again would fail the same
+        // way, so block Save until the user reloads the current contents.
+        if (d.code === "models_config_conflict") setConflict(true);
       } else {
         // Drop a transient empty model row after its provider edit is persisted.
         loadConfig();
@@ -1299,7 +1354,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     } finally {
       setSaving(false);
     }
-  }, [config, loadApiKeyProviders, loadConfig, loadRuntimeModels, onSaved, parseError, t]);
+  }, [config, loadApiKeyProviders, loadConfig, loadRuntimeModels, onSaved, renamedFrom, revision, saveBlocked, t]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -1423,6 +1478,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         providerName={selection.providerName}
         provider={provider}
         model={model}
+        originalProviderName={Object.hasOwn(renamedFrom, selection.providerName) ? renamedFrom[selection.providerName] : undefined}
         onChange={(m) => updateModel(selection.providerName, selection.index, m)}
         onDelete={() => removeModel(selection.providerName, selection.index)}
       />
@@ -1444,7 +1500,21 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         {!embedded && onSelectTab && <SettingsTabs active="models" onSelect={onSelectTab} />}
 
         {/* Body */}
-        {parseError ? (
+        {loadError !== null ? (
+          <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--status-error)" }}>{t("modelsConfig.loadErrorTitle")}</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>{t("modelsConfig.loadErrorBody")}</div>
+            <pre style={{
+              margin: 0, padding: "10px 12px", background: "var(--bg-panel)", border: "1px solid var(--border)",
+              borderRadius: 6, color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)",
+              whiteSpace: "pre-wrap", wordBreak: "break-word", overflowX: "auto",
+            }}>{loadError}</pre>
+            <button onClick={() => loadConfig()} disabled={loading}
+              style={{ alignSelf: "flex-start", padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: loading ? "default" : "pointer", fontSize: 12 }}>
+              {loading ? t("modelsConfig.loading") : t("modelsConfig.retry")}
+            </button>
+          </div>
+        ) : parseError ? (
           <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--status-error)" }}>{t("modelsConfig.parseErrorTitle")}</div>
             <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>{t("modelsConfig.parseErrorBody")}</div>
@@ -1971,18 +2041,23 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 {saveError}
               </div>
             )}
+            {conflict && (
+              <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--status-error)", borderRadius: 6, color: "var(--status-error)", cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>
+                {t("modelsConfig.reload")}
+              </button>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
                 {t("modelsConfig.cancel")}
               </button>
-              <button onClick={handleSave} disabled={saving || savedOk || parseError !== null} style={{
+              <button onClick={handleSave} disabled={saving || savedOk || saveBlocked} style={{
                 position: "relative",
                 padding: "6px 18px",
                 minWidth: 92,
-                background: savedOk ? "var(--status-success)" : (saving || parseError) ? "var(--bg-panel)" : "var(--accent-strong)",
+                background: savedOk ? "var(--status-success)" : (saving || saveBlocked) ? "var(--bg-panel)" : "var(--accent-strong)",
                 border: "none", borderRadius: 6,
-                color: savedOk ? "var(--on-accent)" : (saving || parseError) ? "var(--text-muted)" : "var(--on-accent)",
-                cursor: (saving || savedOk || parseError) ? "default" : "pointer", fontSize: 12.5, fontWeight: 600,
+                color: savedOk ? "var(--on-accent)" : (saving || saveBlocked) ? "var(--text-muted)" : "var(--on-accent)",
+                cursor: (saving || savedOk || saveBlocked) ? "default" : "pointer", fontSize: 12.5, fontWeight: 600,
                 display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
                 transition: "background-color var(--dur-med) var(--ease-out-warm), color var(--dur-med) var(--ease-out-warm)",
                 animation: savedOk ? "saved-pop var(--dur-theme) var(--ease-out-warm)" : undefined,

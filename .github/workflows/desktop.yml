@@ -9,37 +9,54 @@ on:
     tags:
       - "v*"
 
+# Builds run with a read-only token; only the release job below can write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
+          # assets: space-separated globs of dist-desktop/ that are shipped. Build directories
+          # such as win-unpacked/ and linux-unpacked/ are never uploaded. macOS omits
+          # latest-mac.yml because the arm64 and x64 builds would overwrite each other.
           - os: windows-latest
             arch: x64
             electron_arch: x64
+            assets: "*.exe *.blockmap latest.yml"
           - os: macos-15
             arch: arm64
             electron_arch: arm64
+            assets: "*.dmg *.zip *.blockmap"
           - os: macos-15-intel
             arch: x64
             electron_arch: x64
+            assets: "*.dmg *.zip *.blockmap"
           - os: ubuntu-24.04
             arch: x64
             electron_arch: x64
+            assets: "*.AppImage *.deb latest-linux.yml"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          test "$GITHUB_REF_NAME" = "v$VERSION"
       - name: Install dependencies and native modules
         run: npm ci --foreground-scripts
       - name: Build the Next production server
@@ -57,27 +74,72 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           npm_config_arch: ${{ matrix.arch }}
         run: npx electron-builder --config desktop/electron-builder.yml --${{ matrix.electron_arch }} --publish never
+      - name: Collect installers and update metadata
+        env:
+          ASSET_PATTERNS: ${{ matrix.assets }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir release-assets
+          cd dist-desktop
+          installers=0
+          # Unquoted on purpose: the shell splits the list and expands each glob here.
+          for file in $ASSET_PATTERNS; do
+            [ -f "$file" ] || continue
+            mv "$file" ../release-assets/
+            case "$file" in
+              *.yml|*.blockmap) ;;
+              *) installers=$((installers + 1)) ;;
+            esac
+          done
+          cd ..
+          ls -l release-assets
+          if [ "$installers" -eq 0 ]; then
+            echo "::error::No installer matched: $ASSET_PATTERNS"
+            exit 1
+          fi
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: foxnio-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist-desktop/*
+          path: release-assets/*
+          retention-days: 7
           if-no-files-found: error
+
+  release:
+    name: Attach installers to the GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: foxnio-*
+          path: release-assets
+          merge-multiple: true
       - name: Ensure draft GitHub Release exists
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        shell: bash
         run: |
           node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
       - name: Upload desktop assets to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        shell: bash
-        run: gh release upload "$TAG" dist-desktop/* --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          ls -l release-assets
+          gh release upload "$TAG" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"

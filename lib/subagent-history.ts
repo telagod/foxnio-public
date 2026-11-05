@@ -395,38 +395,95 @@ export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0
   if (size > MAX_SUBAGENT_TRANSCRIPT_BYTES) {
     return { ...empty, fromByte: startByte, nextByte: startByte, reset, error: "Subagent transcript exceeds the readable size limit" };
   }
-  const endByte = Math.min(size, startByte + SUBAGENT_TRANSCRIPT_PAGE_BYTES);
-  let body: string;
+  let window: TranscriptWindow;
   try {
-    // Positional read of just this page's window — materializing the whole
+    // Positional reads of just this page's window — materializing the whole
     // file to slice one window made a pagination walk O(n²) in I/O.
-    // Slice the BYTE buffer, not the decoded string: `startByte` is a UTF-8
-    // offset, while string indices are UTF-16 code units — slicing the string
-    // misaligns every later page once non-ASCII text precedes the offset.
+    // Bytes, not decoded strings: `startByte` is a UTF-8 offset, while string
+    // indices are UTF-16 code units — slicing the string misaligns every later
+    // page once non-ASCII text precedes the offset.
     const fd = openSync(sessionFilePath, "r");
     try {
-      const windowBytes = endByte - startByte;
-      const buffer = Buffer.alloc(windowBytes);
-      const bytesRead = readSync(fd, buffer, 0, windowBytes, startByte);
-      body = buffer.subarray(0, bytesRead).toString("utf8");
+      window = readTranscriptWindow(fd, startByte, size);
     } finally {
       closeSync(fd);
     }
   } catch {
     return { ...empty, fromByte: startByte, nextByte: startByte, reset };
   }
-  const lastNewline = body.lastIndexOf("\n");
-  const completeText = lastNewline >= 0 ? body.slice(0, lastNewline + 1) : "";
+  const completeText = window.complete.toString("utf8");
   const entries = completeText.length > 0 ? parseJsonlLenient<SessionEntry>(completeText) : [];
   const messages = entries
     .map((entry) => entryToUiMessage(entry, {}))
     .filter((message): message is AgentMessage => message !== null);
-  let nextByte = startByte + Buffer.byteLength(completeText, "utf8");
-  // Guarantee forward progress: when the window ends mid-line and more
-  // content remains, the partial line has no newline to complete it — skip
-  // it instead of returning the same offset forever.
-  if (nextByte === startByte && endByte < size) nextByte = endByte;
-  return { sessionFile: sessionFilePath, fromByte: startByte, nextByte, reset, messages, totalBytes: size };
+  const page: SubagentTranscriptPage = {
+    sessionFile: sessionFilePath,
+    fromByte: startByte,
+    nextByte: window.skipTo ?? startByte + window.complete.length,
+    reset,
+    messages,
+    totalBytes: size,
+  };
+  if (window.skipTo !== null || window.oversizeTail) {
+    page.error = `A transcript entry larger than ${MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES / (1024 * 1024)} MiB was skipped`;
+  }
+  return page;
+}
+
+/** Longest single JSONL entry the pager materializes. A tool result bigger
+ * than this is skipped (with an explicit marker on the page) so one entry can
+ * neither stall paging nor be loaded whole into the response. */
+export const MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES = 8 * 1024 * 1024;
+
+interface TranscriptWindow {
+  /** Whole lines only (ends with a newline), or empty. */
+  complete: Buffer;
+  /** Byte offset after an oversize entry that was skipped, else null. */
+  skipTo: number | null;
+  /** The unfinished last line already exceeds the cap; it stays unread. */
+  oversizeTail: boolean;
+}
+
+function readAt(fd: number, position: number, length: number): Buffer {
+  const buffer = Buffer.alloc(length);
+  const bytesRead = readSync(fd, buffer, 0, length, position);
+  return bytesRead === length ? buffer : buffer.subarray(0, bytesRead);
+}
+
+/**
+ * Read the complete lines of one page starting at `startByte`. When the first
+ * page-sized window holds no newline (a single entry longer than a page, such
+ * as a large tool result), keep reading until that entry's newline so the next
+ * page starts on a line boundary instead of in the middle of the entry.
+ */
+function readTranscriptWindow(fd: number, startByte: number, size: number): TranscriptWindow {
+  const first = readAt(fd, startByte, Math.min(SUBAGENT_TRANSCRIPT_PAGE_BYTES, size - startByte));
+  const lastNewline = first.lastIndexOf(0x0a);
+  if (lastNewline >= 0) return { complete: first.subarray(0, lastNewline + 1), skipTo: null, oversizeTail: false };
+
+  const parts: Buffer[] = [first];
+  let lineBytes = first.length;
+  let position = startByte + first.length;
+  while (position < size) {
+    const chunk = readAt(fd, position, Math.min(SUBAGENT_TRANSCRIPT_PAGE_BYTES, size - position));
+    if (chunk.length === 0) break;
+    const newline = chunk.indexOf(0x0a);
+    if (newline >= 0) {
+      lineBytes += newline + 1;
+      if (lineBytes > MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES) {
+        return { complete: Buffer.alloc(0), skipTo: position + newline + 1, oversizeTail: false };
+      }
+      parts.push(chunk.subarray(0, newline + 1));
+      return { complete: Buffer.concat(parts), skipTo: null, oversizeTail: false };
+    }
+    lineBytes += chunk.length;
+    // Past the cap the entry is only scanned for its end, no longer retained.
+    if (lineBytes <= MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES) parts.push(chunk);
+    position += chunk.length;
+  }
+  // End of file inside an entry: it is still being written. Leave it unread
+  // (nextByte stays put) until its newline arrives.
+  return { complete: Buffer.alloc(0), skipTo: null, oversizeTail: lineBytes > MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES };
 }
 
 /** Cap on completion bytes materialized for the dialog (final outputs are small). */

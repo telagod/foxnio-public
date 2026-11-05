@@ -38,21 +38,27 @@ foxnio 是 [kahme247/ompweb](https://github.com/kahme247/ompweb) 的 fork，专�
 
 ## 快速开始
 
-首次安装前需要配置 `@telagod` registry scope。
+> **尚未发布。** `@telagod/foxnio` 还没有发布到 GitHub Packages，GitHub Release 也还不存在。下面的命令要等首个版本发布后才可用。
 
-私有包请使用具有 `read:packages` 权限的 classic personal access token 登录：
+foxnio 通过 GitHub Packages 分发，而不是公共 npm registry。GitHub 要求使用 access token 才能安装其中的任何包，Public 包也不例外。首次安装前：
+
+1. 创建具有 `read:packages` 权限的 classic personal access token（GitHub → Settings → Developer settings → Personal access tokens (classic)）。
+2. 将 `@telagod` scope 映射到 GitHub Packages，并把 token 写入用户级 npm 配置。`npm login` 会要求输入 GitHub 用户名，并把 token 当作密码：
 
 ```bash
 npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
 ```
 
-Public 包无需 token，但仍需在用户级 npm 配置中设置 scope：
+也可以手动在 `~/.npmrc` 中写入两行：
 
-```bash
-npm config set @telagod:registry https://npm.pkg.github.com
+```ini
+@telagod:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<token>
 ```
 
-这两种方式都会配置全局安装和 foxnio 自更新使用的 scope。新包默认是私有的；首次发布后，可在 GitHub package 设置中将可见性改为 **Public**，以允许匿名安装。
+只有 `@telagod` scope 使用 GitHub Packages，无 scope 的依赖仍从 npmjs 解析。使用 Bun 时，请用同一个 token 在 `bunfig.toml` 的 `[install.scopes]` 中映射该 scope。
+
+应用内更新器执行同样的安装命令，需要同样的配置。它会在停止任何进程之前先确认新版本能从 registry 读取，读取不到时会提示缺少配置。
 
 **免安装直接运行：**
 
@@ -68,6 +74,42 @@ foxnio
 ```
 
 在浏览器中打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。
+
+### 桌面安装包
+
+每个 GitHub Release（发布后）都会附带 Windows（NSIS 安装包和便携版 `.exe`）、macOS（DMG 和 ZIP）、Linux（AppImage 和 `.deb`）安装包。它们**没有代码签名或公证**：
+
+- **Windows：** SmartScreen 会显示“Windows 已保护你的电脑”。选择 **更多信息 → 仍要运行**。
+- **macOS：** Gatekeeper 会拦截首次启动。右键点击应用并选择 **打开** 后确认，或执行 `xattr -dr com.apple.quarantine /Applications/foxnio.app`。
+
+桌面版仍需要另外安装 `omp`。它会在 30177 端口启动自己的本地服务，该端口被占用时改用下一个空闲端口，并且不使用应用内更新器：请安装新版安装包来更新。
+
+### 从 ompweb / omp-web 迁移
+
+改名为 foxnio 后，后台服务的名称也变了。旧服务会继续与新服务并存（或启动失败），需要手动删除。`~/.omp` 下的设置、会话和通知历史是共用的，无需迁移。
+
+```bash
+# npm 包
+npm uninstall -g @kahme247/ompweb
+
+# Linux：systemd 用户单元和托盘自启动
+systemctl --user disable --now ompweb.service
+rm ~/.config/systemd/user/ompweb.service ~/.config/autostart/ompweb-tray.desktop
+systemctl --user daemon-reload
+
+# macOS：launchd agent（日志在 ~/Library/Logs/ompweb）
+launchctl bootout "gui/$(id -u)/com.kahme247.ompweb"
+rm ~/Library/LaunchAgents/com.kahme247.ompweb.plist
+```
+
+```powershell
+# Windows：omp-web 创建的计划任务和快捷方式（先退出其托盘图标）
+schtasks /delete /tn "omp-web" /f
+$programs = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+Remove-Item "$programs\Startup\omp-web-tray.lnk", "$programs\omp-web.lnk", "$([Environment]::GetFolderPath('Desktop'))\omp-web.lnk" -ErrorAction SilentlyContinue
+```
+
+之后重新安装 foxnio 的服务（`foxnio systemd install`、`foxnio-launchd install`、`foxnio --install-tray`）。
 
 ### CLI 选项
 
@@ -106,6 +148,10 @@ OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' foxnio
 `~/.omp/agent/omp-web/web-auth-secret.json`（权限 `0600`），再与哈希混合得到
 签名密钥：修改密码会让已有会话失效，而仅凭保存的哈希无法伪造会话。
 
+**未设置密码时**，foxnio 只响应 `Host` 头为回环名称（`localhost`、`127.0.0.0/8`、`[::1]`）的请求，其余一律返回 `403`，以防你访问的网页通过 DNS rebinding 访问本地智能体。如需通过反向代理、隧道或 Tailscale 域名访问未设密码的服务，请把该域名写入 `OMP_WEB_ALLOWED_HOSTS`（更推荐直接设置密码）。登录失败会被限速：连续输错 5 次，该客户端锁定 15 秒，之后逐次翻倍，最长 5 分钟（HTTP `429`）。
+
+“查看完整历史”打开的导出会话页运行在沙箱中，无法读取你的会话 Cookie，也无法调用 API，因为导出的对话可能包含模型或网页写入的 HTML。
+
 服务安装脚本（`foxnio systemd install`、`foxnio-launchd install`、Linux 托盘、
 Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置前会先做哈希，
 最终只保存哈希。
@@ -132,6 +178,8 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 | `OMP_WEB_HOSTNAME` | 绑定主机名 | `127.0.0.1` |
 | `OMP_WEB_PASSWORD_HASH` | Web 登录密码的 scrypt 哈希（由 `foxnio hash-password` 生成）。绑定非回环地址时必须设置 | _无（未启用验证）_ |
 | `OMP_WEB_TRUSTED_HEADER_SHA256` | 受信任的反向代理在 `X-Omp-Web-Auth` 请求头中发送的密钥的 SHA-256 摘要（十六进制）；请求头哈希匹配的请求无需密码。foxnio 不保存密钥本身。生成方法和 nginx 配置示例见英文 README 的 “Skipping the password on trusted networks” 一节 | _无（未启用）_ |
+| `OMP_WEB_ALLOWED_HOSTS` | 未设置密码时，除回环名称外额外接受的 `Host` 名称，逗号分隔（`name` 或 `*.example.com`） | _无_ |
+| `OMP_WEB_PUSH_ALLOWED_HOSTS` | 除 Google（FCM）、Mozilla、Apple 和 Windows 外额外接受的 Web Push 服务主机名，逗号分隔（`name` 或 `*.example.com`） | _无_ |
 | `OMP_WEB_NO_OPEN` | 设为 `1` 时禁止自动打开浏览器 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 设为 `1` 时禁用更新检查和应用内更新；修改后需重启 | `0` |
 | `OMP_WEB_NAME` | 浏览器标签页和已安装应用中显示的名称。设为 `url`、`host` 或 `domain`（不区分大小写）时使用浏览器所连接的主机名（不含端口），localhost 和 IP 地址仍显示 `foxnio`；其他值按原样使用。修改后需重启 | `foxnio` |

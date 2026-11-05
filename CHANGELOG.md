@@ -4,6 +4,42 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.1` ar
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- **Exported session pages run in a sandbox.** "View full history" served the HTML that `omp --export` generates on the app origin, and that template does not escape raw HTML in messages, so a poisoned reply could script the API with your cookie (code execution as the server user). The export now carries `Content-Security-Policy: sandbox allow-scripts` (an opaque origin), its temp files are per request, and `omp --export` runs with the sanitized child environment.
+- **Password-less installs reject foreign `Host` headers (DNS rebinding).** Without `OMP_WEB_PASSWORD_HASH` only loopback host names are served and anything else gets `403`; the new `OMP_WEB_ALLOWED_HOSTS` adds names for proxy, tunnel or Tailscale setups. The launcher no longer treats `127.example.com` as loopback.
+- **Sign-in is throttled and no longer blocks the server.** Passwords are checked with asynchronous scrypt, at most two checks run at once, and five consecutive failures lock the client out (15 s, doubling up to 5 min, HTTP `429`). A non-object JSON body returns `400` instead of `500`.
+- **`start:lan` now goes through the launcher**, which refuses a non-loopback bind without a password hash; `dev:lan` is removed.
+- **Dependencies updated for 11 advisories** (`next` 16.4.5, `undici` 8.12.4, `sharp` 0.35.5, `dompurify`, `@xmldom/xmldom`, `source-map-js`; only low-severity KaTeX advisories remain). The unused Next image optimizer is disabled, so `/_next/image` no longer answers unauthenticated requests.
+- **Config files keep owner-only permissions and cannot be overwritten with stale data.** `models.yml`, `config.yml`, `omp-web-settings.json`, model roles and `mcp.json` are written atomically with their existing mode (0600 for new files, symlinks preserved). `GET` responses hide stored API keys, secret headers and secret environment values behind a mask that saving restores. `models.yml` saves carry a revision (`409` on conflict, previous file kept as `models.yml.bak`); the settings dialogs send only the keys you changed, refuse to save after a failed load, and roll back when a save fails. `PUT /api/omp-settings` accepts known keys only (it used to pass whole sections through, including `compaction.remoteEndpoint` and `mnemopi.llmApiKey`). The agent-environment policy also blocks loader and interpreter hooks (`LD_*`, `DYLD_*`, `BASH_ENV`, `BUN_OPTIONS`, ...).
+- **Reading git state no longer runs repository-controlled commands.** Read-only git calls disable `core.fsmonitor`, textconv and external diff, skip optional locks (no more `index.lock` clashes with the agent) and treat paths literally (a file named `*.txt` no longer shows other files' diffs).
+- **The `/api/files` credential deny-list covers more**: SQLite sidecars such as `agent.db-wal`, `omp-web-settings.json`, the notification database, `web-auth-secret.json`, broker tokens and `mcp.json`. It checks the real path too, so a symlink cannot expose them.
+- **Web Push registration only accepts real push services** (Google FCM, Mozilla, Apple, Windows; `OMP_WEB_PUSH_ALLOWED_HOSTS` extends the list), so a registered endpoint can no longer make the server call internal addresses, and push errors in API responses are generic.
+- Child processes no longer inherit `OMP_WEB_STT_KEY` or any `OMP_WEB_*_KEY|TOKEN|SECRET|PASSWORD|HASH` variable; plugin and skill CLI arguments starting with `-` are rejected; the Windows service rejects hostnames and ports that could inject shell syntax; the update target must be a plain version string; the desktop app opens only `http`, `https` and `mailto` links outside the app.
+
+### Added
+
+- **The sidebar was rebuilt.** One flat, virtualized list with an **Active** section (sessions that are waiting for you, running, exited or unread, across all workspaces), a **Pinned** section and the workspaces. An open workspace shows its first five sessions and automatically keeps every running, waiting, unread or selected session visible; "Show 20 more" reveals the rest. Search is a flat ranked list (instant title/first-message/workspace matches, then transcript matches), rows have a context menu (right click, long press, `Shift+F10`), full keyboard navigation (arrows, `F2` rename, `Delete`, `p` pin) and `Ctrl/Cmd+B` toggles the sidebar. The resize handle supports pointer capture and the keyboard.
+- **Pinned sessions**, stored on the server so every device sees them (`/api/session-ui`).
+- **A real mobile drawer.** A `min(88vw, 360px)` sheet with a backdrop that you pull out from the left edge and that follows your finger; the file panel uses the same gesture. Every sidebar target is at least 44 px, menus become bottom sheets, and the layout follows the on-screen keyboard (`visualViewport`).
+- New environment variables `OMP_WEB_ALLOWED_HOSTS` and `OMP_WEB_PUSH_ALLOWED_HOSTS`.
+
+### Fixes & Improvements
+
+- **Resource use.** The session store replaces four separate `/api/sessions` fetchers and a second `running` subscription. Session file changes now update the list with small `?ids=` requests (at least 1.5 s apart) instead of reloading everything: with 3000 sessions, a 20 s append storm on one session went from 46 full 2.2 MB responses to 15 delta requests. The sidebar DOM no longer grows with the number of sessions (1472 nodes, and 9062 after expanding the largest workspace, down to about 430-620). Transcript search scans files without materializing lines (peak RSS 340 MiB down to 110 MiB on a heavy data set) and its cache has a size budget. The idle composer no longer polls `/api/stt` every 4 s, hidden tabs no longer poll agent state or provider usage, and a running session issues about half as many state requests while its stream is healthy.
+- **Resumed sessions can reload again** (`/reload`, MCP enable/disable, plugin install). The tool-preset check refused every session opened from the sidebar.
+- **A failed `send_to_session` no longer crashes the server**, `delivery: "followUp"` works, and nested waited deliveries respect the chain-depth cap.
+- **The streaming reply shows tokens/s and hides its copy/fork actions while it streams**, and tool-call and markdown rendering no longer redo everything on every token.
+- A prompt sent right before switching tabs is delivered instead of silently returning to the draft; host-tool, notification and running-indicator streams reconnect after a server error; Back/Forward no longer deletes a live entry; a failed fork, stop or settings change shows an error; a 200 login page from a proxy no longer counts as a successful send.
+- **Dictation** no longer leaves the microphone on when the composer unmounts during the permission prompt, recovers when the microphone is unplugged, and reports denied/missing devices in your language.
+- **In-app updates work again for a plain `foxnio` launcher install.** The worker killed the launcher it needed, the launcher was never told to restart, and the restart request had the wrong shape, so the server stayed down while the update showed success. The update now pre-flights the registry before stopping anything, restarts the previous release when the install fails, and uses a plain `node npm-cli.js` call on Windows.
+- **Desktop installers**: the Windows installer and portable build no longer share one file name, the workflow uploads installers instead of whole build directories (about 3 GB per run before) with 7 day retention and a write-permission job only for tags, test files are not packaged, the port falls back when 30177 is busy, and in-app self-update is disabled in the desktop app.
+- Smaller fixes: a corrupt usage database is quarantined and rebuilt; restoring an archived session into a removed folder works; a subagent transcript line larger than 256 KiB is no longer dropped; the file viewer keeps updating after a file is replaced by rename; a timed-out utility `omp` process is replaced; the draft store evicts the least recently used draft; the agent routes answer `409`/`504` for transient session errors and `400` for malformed bodies.
+
+---
+
 ## [v0.6.1] - 2026-11-01
 
 ### Added

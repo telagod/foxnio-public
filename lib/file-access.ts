@@ -69,27 +69,71 @@ export function getConfigAgentRoots(): string[] {
  * Files inside the omp config/agent roots that must stay unreadable through the
  * generic file API even though their directory is an allowed root (#135).
  *
- * `~/.omp/agent/agent.db` is omp's credential store (API keys) and `models.yml`
- * can carry an `apiKey` for custom models, so making the config root readable
- * to view a rule file would also hand out secrets over `?type=download`. Both
- * are already reachable through their purpose-built routes
- * (`app/api/auth/api-key/*`, `app/api/models-config/route.ts`) which redact or
- * scope what they return, so nothing legitimate needs the generic path.
+ * Making the config root readable to view a rule file would otherwise hand out
+ * every secret stored beside it, including over `?type=download`:
+ *  - `agent.db`: omp's credential store (API keys).
+ *  - `models.yml`: can carry an `apiKey` for custom models.
+ *  - `omp-web-settings.json`: omp-web's settings, including `agentEnv` API keys.
+ *  - `notifications.db`: omp-web's push store, holding the VAPID private key.
+ *  - `web-auth-secret.json`: the key that signs web session cookies.
+ *  - `broker.token`: bearer token of an omp daemon (`run/daemons/<id>/`).
+ *  - `mcp.json`: MCP server definitions with `env`/`headers` credentials.
+ * The ones with a purpose-built route (`app/api/auth/api-key/*`,
+ * `app/api/models-config/route.ts`, `app/api/mcp/route.ts`) are redacted or
+ * scoped there, so nothing legitimate needs the generic path.
+ *
+ * Matching is by file-name prefix, so SQLite sidecars (`agent.db-wal`,
+ * `agent.db-shm`, `agent.db-journal`) and editor/atomic-write leftovers
+ * (`mcp.json.bak`, `omp-web-settings.json.tmp`) are denied with their main file.
  */
-const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml"]);
+const CONFIG_ROOT_DENIED_PREFIXES: readonly string[] = [
+  "agent.db",
+  "models.yml",
+  "omp-web-settings.json",
+  "notifications.db",
+  "web-auth-secret.json",
+  "broker.token",
+  "mcp.json",
+];
 
+/** Name-based test on the path as given; callers decide whether the path is under a config root. */
 export function isConfigRootDeniedFile(filePath: string): boolean {
   const base = normalizeSlashes(filePath);
   const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
-  // SQLite sidecars carry the same credentials as the db itself.
-  if (CONFIG_ROOT_DENIED_FILES.has(name)) return true;
-  return CONFIG_ROOT_DENIED_FILES.has(name.split(".").slice(0, -1).join(".")) && name.includes(".db");
+  return CONFIG_ROOT_DENIED_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
 /** True when `filePath` lives under one of the omp config/agent roots. */
-export function isUnderConfigRoot(filePath: string, configRoots: readonly string[]): boolean {
+function isUnderConfigRoot(filePath: string, configRoots: readonly string[]): boolean {
   const target = normalizeSlashes(filePath);
   return configRoots.some((root) => isPathWithinRoots(target, new Set([normalizeSlashes(root)])));
+}
+
+function realPathOrNull(filePath: string): string | null {
+  try {
+    return normalizeSlashes(realpathSync.native(filePath));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `filePath` is, or resolves through symlinks to, a protected file
+ * under a config root. The requested path alone is not enough: a symlink inside
+ * an allowed project pointing at `~/.omp/agent/agent.db` has an innocent name
+ * and location. Config roots are compared in both lexical and resolved form
+ * because `~/.omp` itself may be a symlink (dotfile managers).
+ */
+export function isConfigRootCredentialPath(filePath: string): boolean {
+  const configRoots = getConfigAgentRoots();
+  const roots = [...configRoots];
+  for (const root of configRoots) {
+    const resolved = realPathOrNull(root);
+    if (resolved) roots.push(resolved);
+  }
+  const resolvedTarget = realPathOrNull(filePath);
+  return [filePath, ...(resolvedTarget ? [resolvedTarget] : [])]
+    .some((candidate) => isUnderConfigRoot(candidate, roots) && isConfigRootDeniedFile(candidate));
 }
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {

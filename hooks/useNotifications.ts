@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { toast } from "@/components/ui/toast";
 import { translate } from "@/lib/i18n";
-import { openEventStream } from "@/lib/event-stream";
+import { openResilientEventStream } from "@/lib/event-stream";
 import { DEFAULT_NOTIFICATION_PREFS, renderNotification, type NotificationEvent, type RenderedNotification } from "@/lib/notification-events";
 import { notificationHistory } from "@/lib/notification-history";
 import { isRecord } from "@/lib/type-guards";
@@ -155,8 +155,7 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     };
     // This tab's own channel: the server delivers here while it is open, on any
     // view (the chat, Settings, ...), and counts the tab as reachable.
-    const stream = openEventStream({ kind: "notifications", clientId: notificationClientId });
-    stream.onmessage = ({ data }) => {
+    const stopStream = openResilientEventStream({ kind: "notifications", clientId: notificationClientId }, (data) => {
       try {
         const frame: unknown = JSON.parse(data);
         if (!isRecord(frame) || frame.type !== "notification" || (frame.kind !== "toast" && frame.kind !== "os") || !isRecord(frame.event)) return;
@@ -166,11 +165,11 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
       } catch {
         // ignore malformed frames
       }
-    };
+    });
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);
     navigator.serviceWorker?.addEventListener("message", onWorkerMessage);
     return () => {
-      stream.close();
+      stopStream();
       window.removeEventListener(OPEN_SESSION_EVENT, onOpen);
       navigator.serviceWorker?.removeEventListener("message", onWorkerMessage);
     };

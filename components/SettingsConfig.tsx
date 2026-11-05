@@ -1,6 +1,7 @@
 "use client";
 
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
+import { useNativeSettingsPatches } from "@/hooks/useNativeSettingsPatches";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
@@ -9,6 +10,7 @@ import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw,
 import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
 import { isRecord } from "@/lib/type-guards";
+import { SECRET_MASK } from "@/lib/secret-mask";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
@@ -364,6 +366,9 @@ function AgentEnvSetting() {
   const [text, setText] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [revision, setRevision] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
 
   const errorLabels = useMemo<AgentEnvErrorLabels>(
     () => ({
@@ -371,36 +376,56 @@ function AgentEnvSetting() {
       emptyName: (line) => t("settingsConfig.agentEnvErrEmptyName", { line }),
       invalidName: (line, name) => t("settingsConfig.agentEnvErrInvalidName", { line, name }),
       deniedName: (line, name) => t("settingsConfig.agentEnvErrDenied", { line, name }),
+      invalidValue: (line, name) => t("settingsConfig.agentEnvErrInvalidValue", { line, name }),
     }),
     [t],
   );
 
-  useEffect(() => {
-    let alive = true;
+  const load = useCallback(() => {
+    setLoaded(false);
+    setLoadError(null);
+    setConflict(false);
     fetch("/api/web-settings")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { agentEnv?: Record<string, string> } | null) => {
-        if (!alive) return;
-        setText(formatAgentEnvText(isRecord(data?.agentEnv) ? data.agentEnv : {}));
+      .then(async (res) => {
+        // A failed or non-JSON response must not become an empty textarea: saving it
+        // would erase the stored variables.
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data: unknown = await res.json();
+        if (!isRecord(data) || !isRecord(data.agentEnv) || typeof data.agentEnvRevision !== "string") {
+          throw new Error("Unexpected response from /api/web-settings");
+        }
+        setText(formatAgentEnvText(Object.fromEntries(Object.entries(data.agentEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"))));
+        setRevision(data.agentEnvRevision);
         setLoaded(true);
       })
-      .catch(() => { if (alive) setLoaded(true); });
-    return () => { alive = false; };
+      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const { errors } = useMemo(() => parseAgentEnvText(text, errorLabels), [text, errorLabels]);
 
+  // Saving needs a good load (the revision proves what the text was based on) and
+  // no conflict; otherwise an empty or stale textarea would replace the stored env.
+  const blocked = !loaded || conflict || revision === null;
+
   const save = async () => {
-    if (errors.length > 0) return;
+    if (errors.length > 0 || blocked) return;
     setSaving(true);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agentEnv: text }),
+        body: JSON.stringify({ agentEnv: text, agentEnvRevision: revision }),
       });
-      const data = (await res.json().catch(() => null)) as { agentEnv?: Record<string, string>; errors?: string[] } | null;
+      const data = (await res.json().catch(() => null)) as { agentEnv?: Record<string, string>; agentEnvRevision?: string; errors?: string[]; code?: string } | null;
       if (!res.ok) {
+        if (data?.code === "agent_env_conflict") {
+          setConflict(true);
+          throw new Error(t("errors.agent_env_conflict"));
+        }
         throw new Error(
           data?.errors?.length
             ? data.errors.join("\n")
@@ -411,6 +436,8 @@ function AgentEnvSetting() {
       }
       // Re-render from the server's canonical form so the textarea matches what is stored.
       setText(formatAgentEnvText(isRecord(data?.agentEnv) ? data.agentEnv : {}));
+      if (typeof data?.agentEnvRevision === "string") setRevision(data.agentEnvRevision);
+      else load();
       toast.success(t("settingsConfig.agentEnvSaved"));
     } catch (error) {
       toast.error(t("settingsConfig.agentEnvSaveFailed"), error instanceof Error ? error.message : String(error));
@@ -449,6 +476,18 @@ function AgentEnvSetting() {
             outline: "none",
           }}
         />
+        {loadError !== null && (
+          <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
+            <span style={{ fontSize: 11, color: "var(--status-error)", lineHeight: 1.4, overflowWrap: "anywhere" }}>{t("settingsConfig.agentEnvLoadFailed")} ({loadError})</span>
+            <button type="button" onClick={load} style={{ padding: "4px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("chatWindow.retry")}</button>
+          </div>
+        )}
+        {conflict && (
+          <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}>
+            <span style={{ fontSize: 11, color: "var(--status-error)", lineHeight: 1.4 }}>{t("errors.agent_env_conflict")}</span>
+            <button type="button" onClick={load} style={{ padding: "4px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("settingsConfig.agentEnvReload")}</button>
+          </div>
+        )}
         {errors.length > 0 && (
           <ul role="alert" aria-label={t("settingsConfig.agentEnvErrors")} style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
             {errors.map((error) => (
@@ -457,11 +496,12 @@ function AgentEnvSetting() {
           </ul>
         )}
         <p id="agent-env-note" style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("settingsConfig.agentEnvNote")}</p>
+        <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("settingsConfig.agentEnvMaskedNote", { mask: SECRET_MASK })}</p>
         <div>
           <button
             type="button"
             onClick={() => void save()}
-            disabled={saving || !loaded || errors.length > 0}
+            disabled={saving || blocked || errors.length > 0}
             style={{
               padding: "6px 14px",
               border: "1px solid var(--accent-strong)",
@@ -471,7 +511,7 @@ function AgentEnvSetting() {
               cursor: saving || errors.length > 0 ? "not-allowed" : "pointer",
               fontSize: 12,
               fontWeight: 600,
-              opacity: saving || !loaded || errors.length > 0 ? 0.6 : 1,
+              opacity: saving || blocked || errors.length > 0 ? 0.6 : 1,
             }}
           >
             {saving ? t("settingsConfig.agentEnvSaving") : t("settingsConfig.agentEnvSave")}
@@ -877,86 +917,57 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [t]);
 
 
-  const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
-  const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
+  const {
+    settings: nativeSettings,
+    error: nativeSettingsError,
+    setError: setNativeSettingsError,
+    saving: nativeSaving,
+    beginLoad: beginNativeSettingsLoad,
+    setLoaded: setLoadedNativeSettings,
+    patch: patchNativeSettings,
+  } = useNativeSettingsPatches<NativeSettings>({
+    onSaved: () => { window.dispatchEvent(new Event(ADVISOR_DEFAULT_CHANGED_EVENT)); },
+  });
   const [nativeSettingsLoading, setNativeSettingsLoading] = useState(true);
-  const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [isPending, startTransition] = useTransition();
-  const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
-  const nativeSaveDrainingRef = useRef(false);
-  const nativeSettingsMutatedRef = useRef(false);
+  // A toggle stays disabled while a save is in flight: a second flip would be
+  // rolled back relative to a state the first save has not settled yet.
+  const nativeToggleDisabled = nativeSettingsLoading || nativeSaving;
 
   const loadNativeSettings = useCallback(() => {
-    nativeSettingsMutatedRef.current = false;
+    beginNativeSettingsLoad();
     setNativeSettingsLoading(true);
     setNativeSettingsError(null);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12000);
     fetch("/api/omp-settings", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
-      .then((data: { settings?: NativeSettings }) => {
-        if (!nativeSettingsMutatedRef.current) setNativeSettings(data.settings ?? {});
-      })
+      .then((data: { settings?: NativeSettings }) => setLoadedNativeSettings(data.settings ?? {}))
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)))
       .finally(() => {
         clearTimeout(timeout);
         setNativeSettingsLoading(false);
       });
-  }, []);
+  }, [beginNativeSettingsLoad, setLoadedNativeSettings, setNativeSettingsError]);
 
   useEffect(() => {
     void loadNativeSettings();
   }, [loadNativeSettings]);
 
-  const saveNativeSettings = useCallback((next: NativeSettings) => {
-    nativeSettingsMutatedRef.current = true;
-    setNativeSettings(next);
-    setNativeSettingsError(null);
-    latestNativeSettingsRef.current = next;
-    if (nativeSaveDrainingRef.current) return;
-    nativeSaveDrainingRef.current = true;
-    setNativeSavesInFlight((count) => count + 1);
-
-    void (async () => {
-      try {
-        while (latestNativeSettingsRef.current !== null) {
-          const snapshot = latestNativeSettingsRef.current;
-          latestNativeSettingsRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = (await response.json()) as { settings?: NativeSettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            window.dispatchEvent(new Event(ADVISOR_DEFAULT_CHANGED_EVENT));
-            if (latestNativeSettingsRef.current === null) setNativeSettings(data.settings ?? snapshot);
-          } catch (error) {
-            setNativeSettingsError(error instanceof Error ? error.message : String(error));
-            break;
-          }
-        }
-      } finally {
-        nativeSaveDrainingRef.current = false;
-        setNativeSavesInFlight((count) => Math.max(0, count - 1));
-      }
-    })();
-  }, []);
-
-  const currentSettings = useCallback((): NativeSettings => latestNativeSettingsRef.current ?? nativeSettings ?? {}, [nativeSettings]);
-
+  // Every edit sends only the keys it changes (see lib/settings-patch.ts), so
+  // retry, enabledModels and the other keys edited in the Providers tab are
+  // never written back from this dialog's stale copy.
   const patchSettings = useCallback((patch: Partial<NativeSettings>) => {
-    void saveNativeSettings({ ...currentSettings(), ...patch });
-  }, [currentSettings, saveNativeSettings]);
+    patchNativeSettings(patch);
+  }, [patchNativeSettings]);
 
   const patchSection = useCallback(<K extends keyof NativeSettings,>(key: K, patch: Partial<NonNullable<NativeSettings[K]>>) => {
-    const base = latestNativeSettingsRef.current;
-    const section = ((base ?? nativeSettings)?.[key] ?? {}) as object;
-    void saveNativeSettings({ ...currentSettings(), [key]: { ...section, ...patch } });
-  }, [currentSettings, nativeSettings, saveNativeSettings]);
+    patchNativeSettings({ [key]: patch } as Partial<NativeSettings>);
+  }, [patchNativeSettings]);
 
   const patchApproval = useCallback((patch: Partial<NonNullable<NonNullable<NativeSettings["tools"]>["approval"]>>) => {
-    const base = latestNativeSettingsRef.current ?? nativeSettings ?? {};
-    const tools = base.tools ?? {};
-    void saveNativeSettings({ ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } });
-  }, [nativeSettings, saveNativeSettings]);
+    patchNativeSettings({ tools: { approval: patch } });
+  }, [patchNativeSettings]);
 
   const checkForUpdate = useCallback(async (force = false) => {
     if (ompUpdateDisabled) return;
@@ -1135,7 +1146,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
           <h1 style={{ fontSize: "var(--text-lg)", margin: 0, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--text)" }}>
             {t("settingsConfig.title")}
           </h1>
-          {nativeSavesInFlight > 0 ? (
+          {nativeSaving ? (
             <span className="settings-save-status" style={{ fontSize: "var(--text-xs)", color: "var(--accent)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)", display: "inline-flex", alignItems: "center", gap: 4 }}>
               <RefreshCw size={11} className="spin" aria-hidden="true" /> {t("settingsConfig.saving")}
             </span>
@@ -1304,7 +1315,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     <ToggleSwitch checked={providerUsageVisible} onChange={onProviderUsageVisibleChange} />
                   </NativeSetting>
                   <NativeSetting searchId="skill-startup-notices" label={t("settingsConfig.skillStartupNotices")} description={t("settingsConfig.skillStartupNoticesDesc")} scope="Native OMP">
-                    <ToggleSwitch checked={nativeSettings?.skills?.showStartupDiagnostics !== false} disabled={nativeSettingsLoading} onChange={(enabled) => patchSection("skills", { showStartupDiagnostics: enabled })} />
+                    <ToggleSwitch checked={nativeSettings?.skills?.showStartupDiagnostics !== false} disabled={nativeToggleDisabled} onChange={(enabled) => patchSection("skills", { showStartupDiagnostics: enabled })} />
                   </NativeSetting>
                   <NativeSetting searchId="chat-font-size" label={t("settingsConfig.chatFontSize")} description={t("settingsConfig.chatFontSizeDesc")} scope="UI">
                     <select
@@ -1510,12 +1521,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </NativeSetting>
                   <NativeSetting searchId="thinking-blocks" label={t("settingsConfig.thinkingBlocks")} description={t("settingsConfig.thinkingBlocksDesc")} scope="Native OMP">
                     <ToggleSwitch
+                      disabled={nativeToggleDisabled}
                       checked={nativeSettings?.hideThinkingBlock ?? false}
                       onChange={(checked) => { patchSettings({ hideThinkingBlock: checked }); onHideThinkingBlockChange?.(checked); }}
                     />
                   </NativeSetting>
                   <NativeSetting searchId="external-thinking" label={t("settingsConfig.externalThinking")} description={t("settingsConfig.externalThinkingDesc")} scope="Native OMP">
                     <ToggleSwitch
+                      disabled={nativeToggleDisabled}
                       checked={nativeSettings?.externalThinking ?? false}
                       onChange={(checked) => patchSettings({ externalThinking: checked })}
                     />
@@ -1569,6 +1582,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
                     <NativeSetting searchId="enable-advisor" label={t("settingsConfig.enableAdvisor")} description={t("settingsConfig.enableAdvisorDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.advisor?.enabled ?? false}
                         onChange={(checked) => patchSection("advisor", { enabled: checked })}
                       />
@@ -1589,6 +1603,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         </NativeSetting>
                         <NativeSetting searchId="review-subagents" label={t("settingsConfig.reviewSubagents")} description={t("settingsConfig.reviewSubagentsDesc")} scope="Native OMP">
                           <ToggleSwitch
+                            disabled={nativeToggleDisabled}
                             checked={nativeSettings?.advisor?.subagents ?? false}
                             onChange={(checked) => patchSection("advisor", { subagents: checked })}
                           />
@@ -1605,12 +1620,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
                     <NativeSetting searchId="automatic-compaction" label={t("settingsConfig.automaticCompaction")} description={t("settingsConfig.automaticCompactionDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.compaction?.enabled ?? true}
                         onChange={(checked) => patchSection("compaction", { enabled: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="continue-after-compaction" label={t("settingsConfig.continueAfterCompaction")} description={t("settingsConfig.continueAfterCompactionDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.compaction?.autoContinue ?? true}
                         onChange={(checked) => patchSection("compaction", { autoContinue: checked })}
                       />
@@ -1623,6 +1640,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                     <NativeSetting searchId="compact-mid-turn" label={t("settingsConfig.compactMidTurn")} description={t("settingsConfig.compactMidTurnDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.compaction?.midTurnEnabled ?? true}
                         onChange={(checked) => patchSection("compaction", { midTurnEnabled: checked })}
                       />
@@ -1649,12 +1667,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                     <NativeSetting searchId="enable-auto-learn" label={t("settingsConfig.enableAutoLearn")} description={t("settingsConfig.enableAutoLearnDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.autolearn?.enabled ?? true}
                         onChange={(checked) => patchSection("autolearn", { enabled: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="private-capture-turn" label={t("settingsConfig.privateCaptureTurn")} description={t("settingsConfig.privateCaptureTurnDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.autolearn?.autoContinue ?? true}
                         onChange={(checked) => patchSection("autolearn", { autoContinue: checked })}
                       />
@@ -1672,12 +1692,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                     <NativeSetting searchId="recall-on-session-start" label={t("settingsConfig.recallOnSessionStart")} description={t("settingsConfig.recallOnSessionStartDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.mnemopi?.autoRecall ?? true}
                         onChange={(checked) => patchSection("mnemopi", { autoRecall: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="retain-completed-turns" label={t("settingsConfig.retainCompletedTurns")} description={t("settingsConfig.retainCompletedTurnsDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.mnemopi?.autoRetain ?? true}
                         onChange={(checked) => patchSection("mnemopi", { autoRetain: checked })}
                       />
@@ -1692,6 +1714,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
                     <NativeSetting searchId="automatic-retry" label={t("settingsConfig.retryToggle")} description={t("settingsConfig.retryToggleDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.retry?.enabled ?? true}
                         onChange={(checked) => patchSection("retry", { enabled: checked })}
                       />
@@ -1709,6 +1732,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                     <NativeSetting searchId="model-fallback" label={t("settingsConfig.modelFallback")} description={t("settingsConfig.modelFallbackDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.retry?.modelFallback ?? false}
                         onChange={(checked) => patchSection("retry", { modelFallback: checked })}
                       />
@@ -1730,18 +1754,21 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                     <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.mcp?.enableProjectConfig ?? true}
                         onChange={(checked) => patchSection("mcp", { enableProjectConfig: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="render-mcp-markdown" label={t("settingsConfig.renderMcpMarkdown")} description={t("settingsConfig.renderMcpMarkdownDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.mcp?.renderMarkdownResults ?? true}
                         onChange={(checked) => patchSection("mcp", { renderMarkdownResults: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="mcp-resource-updates" label={t("settingsConfig.mcpResourceUpdates")} description={t("settingsConfig.mcpResourceUpdatesDesc")} scope="Native OMP">
                       <ToggleSwitch
+                        disabled={nativeToggleDisabled}
                         checked={nativeSettings?.mcp?.notifications ?? false}
                         onChange={(checked) => patchSection("mcp", { notifications: checked })}
                       />

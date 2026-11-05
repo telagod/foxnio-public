@@ -67,6 +67,48 @@ test("commitBack lands on the target and suppresses the re-record", () => {
   assert.equal(result.current.canForward, true);
 });
 
+test("skipping consecutive dead entries drops each one and never a live neighbor", () => {
+  const { result } = renderNav();
+  for (const id of ["a", "dead-1", "dead-2", "d"]) act(() => result.current.record(session(id)));
+  // AppShell's loop: peek, find the session gone, drop, peek again. All in one
+  // tick, so the second peek must already see the first drop.
+  const visited = [];
+  act(() => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const entry = result.current.peekBack();
+      if (!entry) break;
+      visited.push(entry.sessionId);
+      if (entry.sessionId.startsWith("dead")) result.current.dropPeekedBack();
+      else break;
+    }
+  });
+  assert.deepEqual(visited, ["dead-2", "dead-1", "a"]);
+  act(() => result.current.commitBack());
+  assert.equal(result.current.canBack, false);
+  assert.equal(result.current.peekForward()?.sessionId, "d", "the live entry ahead of the dead ones survives");
+  assert.equal(result.current.canForward, true);
+});
+
+test("skipping consecutive dead forward entries keeps the live one behind them", () => {
+  const { result } = renderNav();
+  for (const id of ["a", "dead-1", "dead-2", "d"]) act(() => result.current.record(session(id)));
+  act(() => { result.current.commitBack(); result.current.commitBack(); result.current.commitBack(); });
+  const visited = [];
+  act(() => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const entry = result.current.peekForward();
+      if (!entry) break;
+      visited.push(entry.sessionId);
+      if (entry.sessionId.startsWith("dead")) result.current.dropPeekedForward();
+      else break;
+    }
+  });
+  assert.deepEqual(visited, ["dead-1", "dead-2", "d"]);
+  act(() => result.current.commitForward());
+  assert.equal(result.current.canForward, false);
+  assert.equal(result.current.peekBack()?.sessionId, "a");
+});
+
 test("recording a new view after going back truncates the forward branch", () => {
   const { result } = renderNav();
   act(() => result.current.record(session("a")));

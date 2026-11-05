@@ -65,7 +65,11 @@ import {
 } from "./useAgentSession-notices";
 import type { NoticeType } from "./useAgentSession-notices";
 import {
-  AGENT_STATE_RECONCILE_MS,
+  AGENT_GAUGE_SAMPLE_MS,
+  RECONCILE_BACKOFF_MIN_MS,
+  STREAM_FRESH_MS,
+  reconcileDelayMs,
+  startVisiblePoll,
   WITHDRAW_BEFORE_ABORT_MS,
   BASH_STATE_RECONCILE_MS,
   EVENT_STREAM_CONNECT_TIMEOUT_MS,
@@ -453,6 +457,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // response) must not block future calibration forever — the guard
   // auto-releases the lock and the next trigger re-issues.
   if (reconcileGuardRef.current === null) reconcileGuardRef.current = createReconcileGuard({ timeoutMs: 30_000 });
+  // When the event stream last delivered anything. Frames are authoritative;
+  // the healing polls only cover frames that never arrived.
+  const lastFrameAtRef = useRef(0);
   // Last quota-like error seen during the current run, and whether the run
   // produced any assistant content. Used to surface a persistent error when
   // the agent stops without a visible failure.
@@ -1125,6 +1132,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const realId = result.sessionId;
       sessionIdRef.current = realId;
       setActiveToolset({ running: true, preset: result.toolPreset ?? null });
+      // The toggle handler could not persist while the chat had no id; carry
       // the pre-prompt choice over so it survives a reload after this point.
       if (advisorChoice !== "inherit") {
         setSessionAdvisorSpawn(realId, advisorChoice);
@@ -1264,6 +1272,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // resets retry backoff and catches up the persisted transcript.
       es.onopen = () => {
         if (!hookAliveRef.current || eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
+        lastFrameAtRef.current = Date.now();
         eventStreamRetryMsRef.current = EVENT_STREAM_RETRY_MIN_MS;
         settle("connected");
         restore();
@@ -1278,8 +1287,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       es.onmessage = (e) => {
         if (!hookAliveRef.current || eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
+        lastFrameAtRef.current = Date.now();
+        let event: AgentEvent;
         try {
-          const event = JSON.parse(e.data) as AgentEvent;
+          event = JSON.parse(e.data) as AgentEvent;
+        } catch {
+          return; // malformed frame
+        }
+        // A throwing handler must not vanish: a silently dropped frame leaves
+        // a stuck running state or missing tool rows with nothing to debug.
+        // Log it and keep the stream alive for the frames that follow.
+        try {
           // Side-question frames never touch the transcript and useBtw batches
           // them itself; through the coalescer each would flush the pending
           // message_update and defeat display-rate coalescing of the main run.
@@ -1311,8 +1329,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // the coalescer buffers the latest one and dispatches at display
           // rate, flushing synchronously before any other event type.
           eventCoalescer.push(event);
-        } catch {
-          // ignore
+        } catch (error) {
+          console.error(`Failed to handle agent event "${String(event?.type)}":`, error);
         }
       };
       es.onerror = () => {
@@ -1775,6 +1793,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS
     ) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
+      // A hidden tab neither needs the answer nor should wake the server for
+      // it; the visibility reconcile settles whatever finished meanwhile.
+      if (document.hidden) {
+        await delay(PROMPT_SETTLE_POLL_MS);
+        continue;
+      }
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (res.ok) {
@@ -1802,6 +1826,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       && sessionIdRef.current === sid
     ) {
       await delay(BASH_STATE_RECONCILE_MS);
+      if (document.hidden) continue;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (!res.ok) continue;
@@ -1890,9 +1915,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
-  // Recovery net for missed SSE events: while the agent is running, verify
-  // against the server periodically and whenever the tab returns to the
-  // foreground or the network comes back.
+  // Recovery net for missed SSE events. While the agent runs, a local check
+  // every 2s decides whether a healing poll can find anything: never in a
+  // hidden tab, and not while the event stream is open and delivered a frame
+  // within STREAM_FRESH_MS (seeing one also resets the backoff). Once the
+  // stream goes quiet it is polled at once, then after 2s, 4s, 8s ... up to
+  // 15s. Returning to the foreground or coming back online reconciles once,
+  // immediately.
   useEffect(() => {
     const reconcile = () => {
       // Read the ref on every tick: for brand-new sessions the id is
@@ -1905,16 +1934,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         reconcileBtw(sid);
       }
     };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") reconcile();
+    let timer: NodeJS.Timeout | undefined;
+    let quietPolls = 0;
+    let nextPollAt = 0;
+    const pollNow = () => {
+      reconcile();
+      nextPollAt = Date.now() + reconcileDelayMs(quietPolls);
+      quietPolls += 1;
     };
-    const interval = agentRunning ? setInterval(reconcile, AGENT_STATE_RECONCILE_MS) : undefined;
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("online", reconcile);
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = undefined;
+      if (!agentRunning || document.hidden) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        const streamFresh = eventSourceRef.current?.readyState === EVENT_STREAM_OPEN
+          && Date.now() - lastFrameAtRef.current < STREAM_FRESH_MS;
+        if (streamFresh) {
+          quietPolls = 0;
+          nextPollAt = 0;
+        } else if (Date.now() >= nextPollAt) {
+          pollNow();
+        }
+        schedule();
+      }, RECONCILE_BACKOFF_MIN_MS);
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearTimeout(timer);
+        timer = undefined;
+        return;
+      }
+      quietPolls = 0;
+      pollNow();
+      schedule();
+    };
+    // One-shot recovery after a network drop, whatever the visibility.
+    const onOnline = () => {
+      quietPolls = 0;
+      pollNow();
+      schedule();
+    };
+    schedule();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", onOnline);
     return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("online", reconcile);
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
     };
   }, [agentRunning, catchUp, reconcileAgentState, reconcileBtw]);
 
@@ -1936,19 +2003,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [messages]);
   useEffect(() => {
     if (!externalRunActive) return;
-    const timer = setInterval(() => {
+    return startVisiblePoll(() => {
       const sid = sessionIdRef.current;
       if (!hookAliveRef.current || !sid) return;
       if (Date.now() - transcriptChangedAtRef.current >= EXTERNAL_RUN_STALE_MS) return;
       void catchUp.request();
     }, EXTERNAL_RUN_POLL_MS);
-    return () => clearInterval(timer);
   }, [externalRunActive, catchUp]);
 
-  // Sample omp's own tokensPerSecond (get_state) at a gauge-friendly cadence
-  // while a run is active; the 15s reconcile above is too slow for a gauge.
-  // On run end take one trailing sample: omp publishes its final throughput
-  // right around agent_end, possibly after the last in-run poll.
+  // Sample omp's own tokensPerSecond and usage limit (get_state; neither is in
+  // any frame) while a run is active, only in a visible tab and never with two
+  // requests in flight. On run end take one trailing sample: omp publishes
+  // its final throughput right around agent_end, possibly after the last
+  // in-run poll.
   useEffect(() => {
     if (!agentRunning) {
       if (!wasRunningForGaugeRef.current) return;
@@ -1969,9 +2036,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     wasRunningForGaugeRef.current = true;
     let cancelled = false;
-    const id = setInterval(() => {
+    let inFlight = false;
+    const stop = startVisiblePoll(() => {
       const sid = sessionIdRef.current;
-      if (!sid) return;
+      if (!sid || inFlight) return;
+      inFlight = true;
       void fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((res) => (res.ok ? res.json() : null))
         .then((data: { state?: AgentStateResponse } | null) => {
@@ -1982,9 +2051,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (data?.state) setUsageLimit(data.state.usageLimit);
           setTokensPerSecond(typeof tps === "number" && Number.isFinite(tps) && tps > 0 ? tps : null);
         })
-        .catch(() => {});
-    }, 2000);
-    return () => { cancelled = true; clearInterval(id); };
+        .catch(() => {})
+        .finally(() => { inFlight = false; });
+    }, AGENT_GAUGE_SAMPLE_MS);
+    return () => { cancelled = true; stop(); };
   }, [agentRunning]);
 
   // A different session starts from a clean slate — no stale gauge carry-over.
@@ -2397,10 +2467,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const targetSid = sessionIdRef.current;
           const targetRunId = promptRunIdRef.current;
           if (targetSid) {
+            // The 1s check guards against a lost agent_end. A hidden tab skips
+            // it: returning to the foreground reconciles once.
             terminalReconcileTimerRef.current = setTimeout(() => {
               terminalReconcileTimerRef.current = null;
               if (
                 hookAliveRef.current &&
+                !document.hidden &&
                 agentRunningRef.current &&
                 sessionIdRef.current === targetSid &&
                 promptRunIdRef.current === targetRunId
@@ -2891,13 +2964,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // The event route is observer-only. Start or resume the web-owned RPC
         // wrapper with a supported command before opening the SSE connection.
         await sendAgentCommand(sid, { type: "get_state" });
-        await ensureEventsConnected(sid);
-        void refreshSubagentRoster(sid);
-        void registerHostTools(sid);
-        void registerHostUriSchemes(sid);
-        const previousEntryIds = await snapshotRunEntries(sid);
-        if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
-          runPreviousEntryIdsRef.current = previousEntryIds;
+        // A cold start spawns omp, so the user may have switched tabs while
+        // that was in flight (this instance is unmounted). The server keeps
+        // running the prompt: deliver it without attaching a stream or reading
+        // snapshots, as the new-chat branch does. Attaching now would throw
+        // and drop a prompt the user already sent.
+        if (hookAliveRef.current) {
+          await ensureEventsConnected(sid);
+          void refreshSubagentRoster(sid);
+          void registerHostTools(sid);
+          void registerHostUriSchemes(sid);
+          const previousEntryIds = await snapshotRunEntries(sid);
+          if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
+            runPreviousEntryIdsRef.current = previousEntryIds;
+          }
         }
         queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {
           type: "prompt",
@@ -3168,6 +3248,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(sid, { type: "abort" });
       } catch (e) {
         console.error("Failed to abort:", e);
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       }
     }
     // From here only late recovery remains: a new run's Stop must not wait on it.
@@ -3192,6 +3273,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {
         console.error("Failed to abort bash:", e);
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       }
       return;
     }
@@ -3201,7 +3283,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const stop: Promise<void> = withdrawAndAbort(sid, release).finally(release);
     stopInFlightRef.current = stop;
     return stop;
-  }, [withdrawAndAbort]);
+  }, [addNotice, withdrawAndAbort]);
 
   const handleEdit = useCallback(async (entryId: string, content: string): Promise<boolean> => {
     const sid = sessionIdRef.current;
@@ -3320,11 +3402,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Fork failed:", e);
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       forkInFlightRef.current = false;
       setForkingEntryId(null);
     }
-  }, [advisorChoice, onSessionForked]);
+  }, [addNotice, advisorChoice, onSessionForked]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current || agentRunningRef.current || editInFlightRef.current) return;
@@ -3855,8 +3938,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "abort_compaction" });
     } catch (e) {
       console.error("Failed to abort compaction:", e);
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, []);
+  }, [addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     authoritativeModelSeqRef.current += 1;
@@ -3870,10 +3954,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await refreshLiveModelState(sid);
     } catch (e) {
       console.error("Failed to set thinking level:", e);
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       modelCommandPendingRef.current -= 1;
     }
-  }, [refreshLiveModelState]);
+  }, [addNotice, refreshLiveModelState]);
 
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
     setToolPresetState(preset);

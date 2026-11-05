@@ -67,3 +67,6 @@ export const isPasswordHash = passwordHash.isPasswordHash as (value: unknown) =>
  * hash never matches: configured-but-unusable must fail closed, not open.
  */
 export const verifyPassword = passwordHash.verifyPassword as (candidate: string, stored: string) => boolean;
+
+/** `verifyPassword` on the thread pool, so a sign-in does not block the event loop. */
+export const verifyPasswordAsync = passwordHash.verifyPasswordAsync as (candidate: string, stored: string) => Promise<boolean>;

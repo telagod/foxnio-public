@@ -14,8 +14,14 @@ const eslintConfig = [
     },
   },
   {
+    // React Compiler readiness rules (eslint-plugin-react-hooks 7.x; purity and
+    // preserve-manual-memoization only started reporting with 7.1). The app does
+    // not enable the compiler and relies on manual memoization, so these report
+    // patterns that are correct for the runtime we ship.
     rules: {
       "react-hooks/immutability": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/preserve-manual-memoization": "off",
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
     },

@@ -93,6 +93,9 @@ export async function POST(req: Request) {
   try {
     const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
     if (!query?.trim()) return NextResponse.json({ error: "query required", code: "query_required" }, { status: 400 });
+    // The fallback runs `npx skills find <query>`, where a leading `-` would be
+    // read as an option of the skills CLI (or of npx itself).
+    if (query.trim().startsWith("-")) return NextResponse.json({ error: "Invalid query", code: "query_invalid" }, { status: 400 });
     const limit = parseLimit(rawLimit);
 
     try {

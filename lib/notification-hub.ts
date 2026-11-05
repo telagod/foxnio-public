@@ -17,6 +17,8 @@ import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, recordHis
 
 /** A tab counts as present this long after its last presence report. */
 export const PRESENCE_TTL_MS = 60_000;
+/** Hard bound on tracked tabs, for reports that arrive faster than the TTL expires them. */
+export const MAX_PRESENCE_ENTRIES = 1000;
 const PUSH_TTL_SECONDS = 3600;
 const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
@@ -75,7 +77,16 @@ export function reportPresence(report: Omit<NotificationPresence, "lastSeen">): 
   const { presence } = hub();
   const current = presence.get(report.clientId);
   if (current && current.seq > report.seq) return;
-  presence.set(report.clientId, { ...report, lastSeen: Date.now() });
+  const now = Date.now();
+  // Re-insert so Map order stays oldest-report-first: pruning below then only
+  // looks at the front. Without it, unique clientIds would grow the map until
+  // the next publishNotification, which is the only other place that prunes.
+  presence.delete(report.clientId);
+  presence.set(report.clientId, { ...report, lastSeen: now });
+  for (const [id, entry] of presence) {
+    if (presence.size <= MAX_PRESENCE_ENTRIES && now - entry.lastSeen <= PRESENCE_TTL_MS) break;
+    presence.delete(id);
+  }
 }
 
 /** Attach a tab's SSE stream. Returns the detach callback. */
@@ -174,14 +185,18 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
       } catch {
         // A store write failure only delays the cleanup to the next push.
       }
-      const message = status ? `push service answered ${status}` : describePushError(error);
+      // The caller-visible text names only the status class: raw socket errors
+      // (`ECONNREFUSED ip:port`, TLS failures) would let whoever registered an
+      // endpoint probe the server's network. The cause stays in the log.
+      const detail = status ? `push service answered ${status}` : describePushError(error);
+      const message = status ? `push service answered ${Math.floor(status / 100)}xx` : "push delivery failed";
       // No answer (offline, DNS, timeout) or a busy push service: the next attempt may get through.
       const delay = status === undefined || status === 429 || status >= 500 ? retryDelaysMs[attempt] : undefined;
       if (delay === undefined) {
-        console.warn("[notifications] push failed:", message);
+        console.warn("[notifications] push failed:", detail);
         return { ok: false, error: message };
       }
-      console.warn(`[notifications] push failed, retrying in ${delay / 1000}s:`, message);
+      console.warn(`[notifications] push failed, retrying in ${delay / 1000}s:`, detail);
       await new Promise((resolve) => setTimeout(resolve, delay).unref?.());
       if (!stillSubscribed(device.deviceId, subscription.endpoint)) return { ok: false, error: message };
     }

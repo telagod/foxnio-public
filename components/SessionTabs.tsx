@@ -5,13 +5,16 @@ import { MessageCircleQuestion, Plus, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { useNotificationHistory } from "@/lib/notification-history";
 import { sessionIdsWaitingForInput, type SessionTab } from "@/lib/session-tabs";
-import { RunningSessionIndicator } from "./SessionSidebar-chrome";
+import { RunningSessionIndicator } from "./RunningSessionIndicator";
+import { useSessionStoreSelector } from "@/hooks/useSessionStore";
+import type { SessionStoreSnapshot } from "@/lib/session-store";
+
+const selectRunning = (snapshot: SessionStoreSnapshot) => snapshot.running;
 
 interface Props {
   tabs: SessionTab[];
   /** The session on screen; null on the new-chat view. */
   activeId: string | null;
-  runningIds: ReadonlySet<string>;
   onSelect: (tab: SessionTab) => void;
   onClose: (id: string) => void;
   onNew: () => void;
@@ -27,9 +30,10 @@ interface Props {
  * Delete closes, Ctrl+Shift+arrows reorders (activation is manual so arrowing
  * past tabs never reconnects each session on the way).
  */
-export function SessionTabs({ tabs, activeId, runningIds, onSelect, onClose, onNew, newDisabled = false, onMove, onShift }: Props) {
+export function SessionTabs({ tabs, activeId, onSelect, onClose, onNew, newDisabled = false, onMove, onShift }: Props) {
   const { t } = useI18n();
-  // Subscribed here, not in the shell, so a notification arriving re-renders only the strip.
+  // Subscribed here, not in the shell, so a notification or a run starting re-renders only the strip.
+  const runningIds = useSessionStoreSelector(selectRunning);
   const notifications = useNotificationHistory();
   const waitingIds = useMemo(() => sessionIdsWaitingForInput(notifications), [notifications]);
   const listRef = useRef<HTMLDivElement>(null);

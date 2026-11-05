@@ -11,25 +11,31 @@
  *    *secret* names are removed, not every `OMP_WEB_*`: the update and restart
  *    plumbing (OMP_WEB_PACKAGE_DIR, OMP_WEB_LAUNCHER_PID, ...) is read from the
  *    environment by this same server, and the launcher's non-secret settings
- *    must keep reaching it.
+ *    must keep reaching it. A name is a secret when it is on the explicit list
+ *    below or, so a future credential variable is not forgotten, when it is an
+ *    `OMP_WEB_*` name ending in `_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD` or `_HASH`.
  */
 
 /** Exact names that never reach a child process (compared case-insensitively on Windows). */
 const HOST_RUNTIME_NAMES: readonly string[] = ["PORT", "NODE_ENV"];
 
 /**
- * omp-web secrets. `OMP_WEB_PASSWORD` is the legacy plaintext (still listed so
- * a dev server started from an old .env cannot leak it), and
- * `OMP_WEB_TRUSTED_HEADER_SECRET` is the pre-digest name of the trusted-proxy
- * secret, which an old service env file may still carry; the others are the
- * values that grant access to this server.
+ * omp-web secrets by exact name. The suffix rule below already covers all of
+ * them except `OMP_WEB_TRUSTED_HEADER_SHA256`; the list documents what exists.
+ * `OMP_WEB_PASSWORD` is the legacy plaintext (still listed so a dev server
+ * started from an old .env cannot leak it), `OMP_WEB_TRUSTED_HEADER_SECRET` is
+ * the pre-digest name of the trusted-proxy secret, which an old service env
+ * file may still carry, and `OMP_WEB_STT_KEY` is the speech-to-text API key.
  */
 export const OMP_WEB_SECRET_ENV_VARS: readonly string[] = [
   "OMP_WEB_PASSWORD",
   "OMP_WEB_PASSWORD_HASH",
   "OMP_WEB_TRUSTED_HEADER_SECRET",
   "OMP_WEB_TRUSTED_HEADER_SHA256",
+  "OMP_WEB_STT_KEY",
 ];
+
+const OMP_WEB_SECRET_PATTERN = /^OMP_WEB_(?:.*_)?(?:KEY|TOKEN|SECRET|PASSWORD|HASH)$/;
 
 /** Prefixes that never reach a child process. */
 const HOST_RUNTIME_PREFIXES: readonly string[] = ["NEXT_"];
@@ -52,7 +58,7 @@ export function isHostRuntimeVariable(name: string, platform: NodeJS.Platform = 
 
 /** True when the variable is one of omp-web's secrets. */
 export function isOmpWebSecretVariable(name: string, platform: NodeJS.Platform = process.platform): boolean {
-  return matches(name, OMP_WEB_SECRET_ENV_VARS, platform);
+  return matches(name, OMP_WEB_SECRET_ENV_VARS, platform) || OMP_WEB_SECRET_PATTERN.test(comparableName(name, platform));
 }
 
 export function sanitizeProjectCommandEnvironment(
