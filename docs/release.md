@@ -6,7 +6,7 @@ Each release publishes three kinds of artifacts:
 - GitHub Release: [telagod/foxnio-public](https://github.com/telagod/foxnio-public)
 - Desktop installers (Windows, macOS, Linux), attached to that GitHub Release
 
-**Status:** neither the package nor a GitHub Release exists yet. Everything below that mentions installing or updating applies once the first release is out.
+**Status:** `v0.6.2` is the first published release. `v0.6.1` was prepared but never published.
 
 The package is published to `https://npm.pkg.github.com` with the repository's
 `GITHUB_TOKEN`. It is not published to the public npm registry.
@@ -51,15 +51,33 @@ enabled and `.github/workflows/publish.yml` retains `packages: write`. If a
 package was created under another owner or repository, grant this repository
 access in the package's GitHub settings.
 
-## Before the first release
+## Before each release
 
-- `bin/omp-web-tray.exe` is a hand-built binary. Its embedded strings (for
-  example `omp-web-tray.lnk`) predate the rename to foxnio. Rebuild it on
-  Windows from `native/tray` (`dotnet publish`) and commit the result before the
-  next release. The workflows do not build it.
+- `bin/omp-web-tray.exe` is a committed build of `native/tray`; the workflows
+  do not build it. After changing `native/tray`, rebuild it with the .NET 8 SDK
+  and commit the result. The project sets `EnableWindowsTargeting`, so a Linux
+  host works too:
+
+  ```bash
+  docker run --rm -v "$PWD/native/tray:/src" -w /src mcr.microsoft.com/dotnet/sdk:8.0 \
+    sh -c "dotnet publish -c Release -r win-x64 -o bin/publish; chown -R $(id -u):$(id -g) bin obj"
+  cp native/tray/bin/publish/omp-web-tray.exe bin/omp-web-tray.exe
+  ```
+
 - `nix/package.nix` has a pinned `npmDepsHash`. It is stale after any
   `package-lock.json` change and must be recomputed with Nix (set it to
-  `lib.fakeHash`, build once, and copy the hash from the error).
+  `lib.fakeHash`, build once, and copy the hash from the error). Without a local
+  Nix, build in a container; a stale hash fails with `hash mismatch` and prints
+  the right one after `got:`. The standalone `prefetch-npm-deps` prints a
+  different hash, so do not use it.
+
+  ```bash
+  docker run --rm -v "$PWD:/src:ro" nixos/nix nix --extra-experimental-features 'nix-command flakes' \
+    build --impure --no-link -L --expr 'let pkgs = (builtins.getFlake "nixpkgs").legacyPackages.x86_64-linux; in pkgs.callPackage /src/nix/package.nix {}'
+  ```
+
+  Its `localFontsPatch` rewrites the top of `app/layout.tsx`, so it also needs
+  updating whenever those imports change.
 - Desktop installers are unsigned. Say so in the release notes: Windows
   SmartScreen shows a warning, and macOS needs right-click **Open** or
   `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
@@ -69,20 +87,23 @@ access in the package's GitHub settings.
 
 ## Publish the first release
 
-The first release candidate is `@telagod/foxnio@0.6.1`, continuing the upstream
-`0.6.0` version line. From a clean checkout of the `foxnio` branch, ensure the
-changelog and version are ready, then run:
+The first published release is `@telagod/foxnio@0.6.2`, continuing the upstream
+`0.6.0` version line (`0.6.1` was prepared but never published). From a clean
+checkout of the `foxnio` branch, ensure the changelog and version are ready,
+then run:
 
 ```bash
 npm ci
 npm run release:check
 ```
 
-The tag triggers the package and desktop workflows:
+The tag triggers the package and desktop workflows. Push the branch and the tag
+by name (see "Release later versions" for why not `--follow-tags`):
 
 ```bash
-git tag v0.6.1
-git push foxnio v0.6.1
+git tag -a v0.6.2 -m v0.6.2
+git push foxnio foxnio
+git push foxnio v0.6.2
 ```
 
 Both workflows check that the tag equals `v<package.json version>` and fail
@@ -130,8 +151,14 @@ and `CHANGELOG.md` contains an entry for the new version:
 npm ci
 npm run release:check
 npm version patch
-git push foxnio foxnio --follow-tags
+git push foxnio foxnio
+git push foxnio "v$(node -p 'require("./package.json").version')"
 ```
+
+Push the tag by name, never with `--follow-tags`: this history carries the
+upstream ompweb tags (`v0.2.1` to `v0.5.2`), which `--follow-tags` would push
+too, and GitHub starts no workflows for a push that creates more than three
+tags.
 
 Use `npm version minor` or `npm version major` when appropriate. `npm version`
 updates `package.json` and `package-lock.json`, creates a commit, and creates a

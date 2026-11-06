@@ -34,7 +34,7 @@ let
     diff --git a/app/layout.tsx b/app/layout.tsx
     --- a/app/layout.tsx
     +++ b/app/layout.tsx
-    @@ -1,28 +1,30 @@
+    @@ -1,29 +1,31 @@
      import type { Metadata, Viewport } from "next";
      import { headers } from "next/headers";
      import Script from "next/script";
@@ -45,6 +45,7 @@ let
      import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
      import { getInstallName } from "@/lib/install-name";
      import "./globals.css";
+     import "./sidebar.css";
      
     -const geist = Geist({
     -  subsets: ["latin"],
@@ -73,7 +74,7 @@ let
        variable: "--font-noto-mono",
        display: "swap",
      });
-    @@ -31,8 +33,9 @@
+    @@ -32,8 +34,9 @@
      // latin; CJK uses a bundled Noto Serif SC subset declared in globals.css, not
      // next/font/google: Google Fonts sometimes serves it through extensionless
      // `/l/font?kit=` URLs that next/font cannot parse, which failed builds at random.
@@ -130,7 +131,7 @@ buildNpmPackage (finalAttrs: {
     cp ${geist} app/fonts/Geist.ttf
   '';
 
-  npmDepsHash = "sha256-HxT+m6bI0I3t9sqsSgHun6oXve3WtIEmkFpCoBplrC4=";
+  npmDepsHash = "sha256-/xbEloZ+yTCLYtfjDp/H8GYPqOPKN/V+Ea8WKlbtH0E=";
 
   # electron is a dev dependency of the desktop build only; its postinstall must not
   # download a binary inside the sandbox.

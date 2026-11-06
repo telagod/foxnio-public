@@ -1,10 +1,25 @@
 # Changelog
 
-This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.1` are retained from the `ompweb` upstream history.
+This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` are retained from the `ompweb` upstream history.
 
 ---
 
-## [Unreleased]
+## [v0.6.2] - 2026-11-06
+
+The first published foxnio release. v0.6.1 was prepared but never published, so its changes are listed here as well.
+
+### Upgrade
+
+foxnio is published to GitHub Packages, which needs a classic personal access token with `read:packages` for every install. Map the `@telagod` scope once (npm asks for your GitHub username and takes the token as the password), then install:
+
+```bash
+npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install -g @telagod/foxnio@0.6.2
+```
+
+The desktop installers attached to this release are not code-signed. Windows SmartScreen shows a warning; on macOS, open the app with right-click **Open** or run `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
+
+Coming from ompweb or omp-web: remove the old services, units and scheduled tasks by hand first. The README section "Moving from ompweb / omp-web" lists their names.
 
 ### Security
 
@@ -25,6 +40,12 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.1` ar
 - **Pinned sessions**, stored on the server so every device sees them (`/api/session-ui`).
 - **A real mobile drawer.** A `min(88vw, 360px)` sheet with a backdrop that you pull out from the left edge and that follows your finger; the file panel uses the same gesture. Every sidebar target is at least 44 px, menus become bottom sheets, and the layout follows the on-screen keyboard (`visualViewport`).
 - New environment variables `OMP_WEB_ALLOWED_HOSTS` and `OMP_WEB_PUSH_ALLOWED_HOSTS`.
+- **Desktop installers use the fork's executable name and include Linux package metadata.** Electron's Linux executable, desktop entry, AppImage, and Debian package are now named for foxnio, and the Debian package has its maintainer field.
+- Desktop installers exclude Next.js development output, build caches, build traces, generated type-check artifacts, and dependency source maps, while retaining runtime-traced `lib/` assets and `public/` static assets.
+- **Release distribution moved to GitHub Packages.** The `@telagod/foxnio` package is published to `npm.pkg.github.com`, and in-app version checks follow the repository's GitHub Releases instead of the public npm registry.
+- **Full-screen composer editor and short previews of long sent messages.** An expand button in the composer toolbar opens the same draft (text, attachments, slash and `@` menus, draft recovery) in a near-full-screen dialog; Enter inserts a newline there and Ctrl/Cmd+Enter sends, Esc closes menus first and then collapses, and sending returns to the compact composer. Long sent messages now show a three-line preview with a "Show N more lines" toggle instead of a 300px scrolling box, live and in history. ([upstream #351](https://github.com/kahme247/ompweb/issues/351))
+- **A finished turn collapses into one summary row above its final reply.** Thinking, tool calls, outputs and intermediate text fold into a single "Completed N steps · N tool calls · N thinking blocks · 2m 41s" row that expands to the full trajectory; the running turn stays as it was, and a turn with a provider error is left unfolded. Turn it off with the new **Fold completed turns** setting. ([upstream #354](https://github.com/kahme247/ompweb/issues/354))
+- **Session tabs on desktop.** Sessions you open stay as tabs above the chat, so you can flip between them and keep an eye on several runs. Each tab shows the session title, a spinner while the agent runs, and a marker when it is waiting for your input; close with × or middle-click, drag (or Ctrl+Shift+←/→) to reorder, and `+` starts a new chat. Tabs are remembered per browser, each tab restores where you were reading, and closing one never stops the session. Turn them off in Settings → General → Session tabs. Phones keep the single-session view. ([upstream #353](https://github.com/kahme247/ompweb/issues/353))
 
 ### Fixes & Improvements
 
@@ -36,26 +57,10 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.1` ar
 - **Dictation** no longer leaves the microphone on when the composer unmounts during the permission prompt, recovers when the microphone is unplugged, and reports denied/missing devices in your language.
 - **In-app updates work again for a plain `foxnio` launcher install.** The worker killed the launcher it needed, the launcher was never told to restart, and the restart request had the wrong shape, so the server stayed down while the update showed success. The update now pre-flights the registry before stopping anything, restarts the previous release when the install fails, and uses a plain `node npm-cli.js` call on Windows.
 - **Desktop installers**: the Windows installer and portable build no longer share one file name, the workflow uploads installers instead of whole build directories (about 3 GB per run before) with 7 day retention and a write-permission job only for tags, test files are not packaged, the port falls back when 30177 is busy, and in-app self-update is disabled in the desktop app.
+- **The Windows tray app uses the foxnio names.** The bundled `bin/omp-web-tray.exe` was still the upstream build: its **Start with Windows** item checked and created `omp-web-tray.lnk`, while the tray installer and uninstaller use `foxnio-tray.lnk`, so the menu showed autostart as off and turning it on added a second startup shortcut that uninstalling left behind. It is rebuilt from the fork's source.
+- **The Nix package (`nix/package.nix`) builds again.** Its font patch no longer applied to `app/layout.tsx`, and its `npmDepsHash` did not match the lockfile.
 - Smaller fixes: a corrupt usage database is quarantined and rebuilt; restoring an archived session into a removed folder works; a subagent transcript line larger than 256 KiB is no longer dropped; the file viewer keeps updating after a file is replaced by rename; a timed-out utility `omp` process is replaced; the draft store evicts the least recently used draft; the agent routes answer `409`/`504` for transient session errors and `400` for malformed bodies.
-
----
-
-## [v0.6.1] - 2026-11-01
-
-### Added
-
-- **Desktop installers use the fork's executable name and include Linux package metadata.** Electron's Linux executable, desktop entry, AppImage, and Debian package are now named for foxnio, and the Debian package has its maintainer field.
-- Desktop installers exclude Next.js development output, build caches, build traces, generated type-check artifacts, and dependency source maps, while retaining runtime-traced `lib/` assets and `public/` static assets.
-- **Release distribution moved to GitHub Packages.** The `@telagod/foxnio` package is published to `npm.pkg.github.com`, and in-app version checks follow the repository's GitHub Releases instead of the public npm registry.
-
-- **Full-screen composer editor and short previews of long sent messages.** An expand button in the composer toolbar opens the same draft (text, attachments, slash and `@` menus, draft recovery) in a near-full-screen dialog; Enter inserts a newline there and Ctrl/Cmd+Enter sends, Esc closes menus first and then collapses, and sending returns to the compact composer. Long sent messages now show a three-line preview with a "Show N more lines" toggle instead of a 300px scrolling box, live and in history. ([upstream #351](https://github.com/kahme247/ompweb/issues/351))
-- **A finished turn collapses into one summary row above its final reply.** Thinking, tool calls, outputs and intermediate text fold into a single "Completed N steps · N tool calls · N thinking blocks · 2m 41s" row that expands to the full trajectory; the running turn stays as it was, and a turn with a provider error is left unfolded. Turn it off with the new **Fold completed turns** setting. ([upstream #354](https://github.com/kahme247/ompweb/issues/354))
-- **Session tabs on desktop.** Sessions you open stay as tabs above the chat, so you can flip between them and keep an eye on several runs. Each tab shows the session title, a spinner while the agent runs, and a marker when it is waiting for your input; close with × or middle-click, drag (or Ctrl+Shift+←/→) to reorder, and `+` starts a new chat. Tabs are remembered per browser, each tab restores where you were reading, and closing one never stops the session. Turn them off in Settings → General → Session tabs. Phones keep the single-session view. ([upstream #353](https://github.com/kahme247/ompweb/issues/353))
-
-### Fixes & Improvements
-
 - **Scrolling on a phone no longer opens or closes the sidebar and file panel by accident.** A drawer swipe now needs 56px of mostly horizontal travel (at least twice the vertical travel), and a touch that moves more than 36px vertically before then stays a scroll even if it later drifts sideways. The Explorer's inline Mention and Download buttons are 36px on phones, up from 24px, so a tap on a row no longer lands on them. ([upstream #355](https://github.com/kahme247/ompweb/issues/355))
-
 - **Mobile file-panel drags no longer open files or folders by accident.** Explorer rows and local Markdown preview links now swallow the click produced by a scroll or horizontal panel gesture after more than 10px of pointer travel, while deliberate taps and keyboard activation remain unchanged. ([upstream #355](https://github.com/kahme247/ompweb/issues/355))
 - **A new chat no longer fails with "Session not found" when its runtime was lost before the first message.** Typing `/` (or any action that starts omp early: `/compact`, `/btw`, `!` shell commands, Fast/Slow toggles, the system prompt panel) creates the runtime for an unsaved chat, which has no session file yet. If that runtime disappeared before the next action (cleaned up while no tab observed it, omp exited, the server restarted), every command for its id answered `session_not_found` because, unlike a saved session, it cannot be resumed from disk. These actions and the first message now check the runtime is still running (skipped while the chat's event stream is open, one shared check for concurrent actions) and start a replacement when it is not. ([upstream #316](https://github.com/kahme247/ompweb/issues/316))
 - **A new chat shows the Advisor as On when it is on by default.** The per-chat indicator started Off even when `advisor.enabled: true` was set in omp's `config.yml` or the project's launch settings, although omp was already running the advisor. The default is now read from both sources (`/api/advisor-default`), and a chat's own toggle only adds the advisor to a chat whose default is off: omp has no launch flag that turns a configured advisor off, so a default locks the toggle On and says why. A project launched with `--profile` reads that profile's own `config.yml`, as omp does. Settings → **Agent & Intelligence** has its Advisor section back (enable by default, backlog, review subagents) to change the persistent default. ([upstream #323](https://github.com/kahme247/ompweb/issues/323))
