@@ -346,7 +346,7 @@ npm run lint
 npm test
 ```
 
-`npm test` 从不启动 `omp`。驱动真实 `omp` 的测试（使用 `OMP_WEB_OMP_BIN` 或 `PATH` 中的 `omp`，与你的凭据和配置隔离）需要主动开启：
+`npm test` 不需要安装 `omp`。驱动真实 `omp` 的测试（使用 `OMP_WEB_OMP_BIN` 或 `PATH` 中的 `omp`，与你的凭据和配置隔离）需要主动开启：
 
 ```bash
 OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs

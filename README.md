@@ -346,7 +346,7 @@ npm run lint
 npm test
 ```
 
-`npm test` never starts `omp`. The tests that drive the real `omp` (from `OMP_WEB_OMP_BIN` or your `PATH`, isolated from your credentials and config) are opt-in:
+`npm test` does not need an installed `omp`. The tests that drive the real `omp` (from `OMP_WEB_OMP_BIN` or your `PATH`, isolated from your credentials and config) are opt-in:
 
 ```bash
 OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs

@@ -346,7 +346,7 @@ npm run lint
 npm test
 ```
 
-`npm test` は `omp` を起動しません。実際の `omp`（`OMP_WEB_OMP_BIN` または `PATH` にあるもの。認証情報や設定からは分離されます）を操作するテストは、明示的に有効にしたときだけ実行されます:
+`npm test` に `omp` がインストールされている必要はありません。実際の `omp`(`OMP_WEB_OMP_BIN` または `PATH` にあるもの。認証情報や設定からは分離されます)を操作するテストは opt-in です:
 
 ```bash
 OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs
