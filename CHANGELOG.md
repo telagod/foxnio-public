@@ -4,6 +4,14 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ---
 
+## [Unreleased]
+
+### Fixes & Improvements
+
+- **`nix build` works from a clean checkout.** `nix/package.nix` listed the git-ignored `next-env.d.ts` in its source set, so evaluating the flake failed on every checkout, v0.6.2 included.
+
+---
+
 ## [v0.6.2] - 2026-11-06
 
 The first published foxnio release. v0.6.1 was prepared but never published, so its changes are listed here as well.
@@ -58,7 +66,6 @@ Coming from ompweb or omp-web: remove the old services, units and scheduled task
 - **In-app updates work again for a plain `foxnio` launcher install.** The worker killed the launcher it needed, the launcher was never told to restart, and the restart request had the wrong shape, so the server stayed down while the update showed success. The update now pre-flights the registry before stopping anything, restarts the previous release when the install fails, and uses a plain `node npm-cli.js` call on Windows.
 - **Desktop installers**: the Windows installer and portable build no longer share one file name, the workflow uploads installers instead of whole build directories (about 3 GB per run before) with 7 day retention and a write-permission job only for tags, test files are not packaged, the port falls back when 30177 is busy, and in-app self-update is disabled in the desktop app.
 - **The Windows tray app uses the foxnio names.** The bundled `bin/omp-web-tray.exe` was still the upstream build: its **Start with Windows** item checked and created `omp-web-tray.lnk`, while the tray installer and uninstaller use `foxnio-tray.lnk`, so the menu showed autostart as off and turning it on added a second startup shortcut that uninstalling left behind. It is rebuilt from the fork's source.
-- **The Nix package (`nix/package.nix`) builds again.** Its font patch no longer applied to `app/layout.tsx`, and its `npmDepsHash` did not match the lockfile.
 - Smaller fixes: a corrupt usage database is quarantined and rebuilt; restoring an archived session into a removed folder works; a subagent transcript line larger than 256 KiB is no longer dropped; the file viewer keeps updating after a file is replaced by rename; a timed-out utility `omp` process is replaced; the draft store evicts the least recently used draft; the agent routes answer `409`/`504` for transient session errors and `400` for malformed bodies.
 - **Scrolling on a phone no longer opens or closes the sidebar and file panel by accident.** A drawer swipe now needs 56px of mostly horizontal travel (at least twice the vertical travel), and a touch that moves more than 36px vertically before then stays a scroll even if it later drifts sideways. The Explorer's inline Mention and Download buttons are 36px on phones, up from 24px, so a tap on a row no longer lands on them. ([upstream #355](https://github.com/kahme247/ompweb/issues/355))
 - **Mobile file-panel drags no longer open files or folders by accident.** Explorer rows and local Markdown preview links now swallow the click produced by a scroll or horizontal panel gesture after more than 10px of pointer travel, while deliberate taps and keyboard activation remain unchanged. ([upstream #355](https://github.com/kahme247/ompweb/issues/355))
@@ -71,6 +78,10 @@ Coming from ompweb or omp-web: remove the old services, units and scheduled task
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
 - **The Provider Usage header stays put while its list scrolls.** Scrolling a long provider list in the sidebar also scrolled the section header (title, window toggle, refresh) out of view, on desktop and mobile. Only the list scrolls now.
 - **The Git panel shows changes when the project is opened through a symlink.** Changed files were matched against the repository root with a purely lexical path check, so a cwd that was a directory symlink to the repository dropped every file. Status and diff now canonicalize paths before the containment check, report file paths in the caller's cwd namespace, and still refuse paths that leave the repository through a symlink.
+
+### Known issues
+
+- `nix build` of this release fails while evaluating `nix/package.nix` (`next-env.d.ts ... is a path that does not exist`). It is fixed on the `foxnio` branch after the release.
 
 ---
 

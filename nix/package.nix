@@ -106,7 +106,7 @@ let
       ../instrumentation.ts
       ../instrumentation.node.ts
       ../next.config.ts
-      ../next-env.d.ts
+      # next-env.d.ts is git-ignored (a checkout has none); `next build` writes it.
       ../package.json
       ../package-lock.json
       ../postcss.config.mjs

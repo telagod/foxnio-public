@@ -64,20 +64,21 @@ access in the package's GitHub settings.
   cp native/tray/bin/publish/omp-web-tray.exe bin/omp-web-tray.exe
   ```
 
-- `nix/package.nix` has a pinned `npmDepsHash`. It is stale after any
-  `package-lock.json` change and must be recomputed with Nix (set it to
-  `lib.fakeHash`, build once, and copy the hash from the error). Without a local
-  Nix, build in a container; a stale hash fails with `hash mismatch` and prints
-  the right one after `got:`. The standalone `prefetch-npm-deps` prints a
-  different hash, so do not use it.
+- `nix/package.nix` has a pinned `npmDepsHash`. The hash covers
+  `package-lock.json` itself, including its `version` field, so it is stale
+  after every dependency change and every version bump. Recompute it against
+  the nixpkgs that `flake.lock` pins: set it to `lib.fakeHash`, build once, and
+  copy the value after `got:` from the `hash mismatch` error. With Nix,
+  `nix build .#default`; without it, in a container:
 
   ```bash
   docker run --rm -v "$PWD:/src:ro" nixos/nix nix --extra-experimental-features 'nix-command flakes' \
-    build --impure --no-link -L --expr 'let pkgs = (builtins.getFlake "nixpkgs").legacyPackages.x86_64-linux; in pkgs.callPackage /src/nix/package.nix {}'
+    build --impure --no-link -L --expr 'let rev = (builtins.fromJSON (builtins.readFile /src/flake.lock)).nodes.nixpkgs.locked.rev; pkgs = (builtins.getFlake "github:NixOS/nixpkgs/${rev}").legacyPackages.x86_64-linux; in pkgs.callPackage /src/nix/package.nix {}'
   ```
 
-  Its `localFontsPatch` rewrites the top of `app/layout.tsx`, so it also needs
-  updating whenever those imports change.
+  The source set must list only files git tracks (a checkout has nothing
+  else), and `localFontsPatch` rewrites the top of `app/layout.tsx`, so update
+  the patch whenever those imports change.
 - Desktop installers are unsigned. Say so in the release notes: Windows
   SmartScreen shows a warning, and macOS needs right-click **Open** or
   `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
@@ -150,9 +151,18 @@ and `CHANGELOG.md` contains an entry for the new version:
 ```bash
 npm ci
 npm run release:check
-npm version patch
+npm version patch --no-git-tag-version
+```
+
+The bump changes `package-lock.json`, so update `npmDepsHash` now (see "Before
+each release"), then commit, tag and push:
+
+```bash
+VERSION="$(node -p 'require("./package.json").version')"
+git commit -am "chore(release): $VERSION"
+git tag -a "v$VERSION" -m "v$VERSION"
 git push foxnio foxnio
-git push foxnio "v$(node -p 'require("./package.json").version')"
+git push foxnio "v$VERSION"
 ```
 
 Push the tag by name, never with `--follow-tags`: this history carries the
@@ -160,9 +170,9 @@ upstream ompweb tags (`v0.2.1` to `v0.5.2`), which `--follow-tags` would push
 too, and GitHub starts no workflows for a push that creates more than three
 tags.
 
-Use `npm version minor` or `npm version major` when appropriate. `npm version`
-updates `package.json` and `package-lock.json`, creates a commit, and creates a
-`v<version>` tag. Review the generated commit before pushing.
+Use `minor` or `major` instead of `patch` when appropriate. With
+`--no-git-tag-version`, `npm version` only updates `package.json` and
+`package-lock.json`. Review the commit before pushing the tag.
 
 Pushing the tag starts both release workflows. The package workflow skips an
 already-published version, so a rerun can safely finish publishing the GitHub
