@@ -5,6 +5,10 @@ import { getProfileSettingsPath, getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
 import { effectiveCompactionMethodOrder, isCompactionMethodOrder, type CompactionMethod } from "../compaction-methods";
 
+type ApprovalMode = "always-ask" | "always-ask-cached" | "write" | "yolo";
+type SyncBacklog = "off" | "1" | "3" | "5" | "strict";
+type MemoryBackend = "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter";
+
 export type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   providers?: { autoThinkingSource?: "classifier" | "vendor" };
@@ -12,8 +16,12 @@ export type NativeSettings = {
   externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
+  advisor?: { enabled?: boolean; syncBacklog?: "off" | "1" | "3" | "5" | "strict"; immuneTurns?: number };
+  /** `task.agentAdvisor.task`: the advisor on the bundled generic `task` subagent (omp's replacement for
+   *  `advisor.subagents`). Reads return any configured value ("on", "off" or a model pattern); writes accept on/off. */
+  task?: { agentAdvisor?: { task?: string } };
+  /** `approval.bash: null` removes the key, so the bash policy follows `approvalMode` again. */
+  tools?: { approvalMode?: ApprovalMode; approval?: { bash?: "allow" | "prompt" | "deny" | null; extension?: "allow" | "prompt" } };
   skills?: { showStartupDiagnostics?: boolean };
   enabledModels?: string[];
   disabledProviders?: string[];
@@ -27,7 +35,7 @@ export type NativeSettings = {
     fallbackChains?: Record<string, string[]>;
   };
   compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
-  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
+  memory?: { backend?: MemoryBackend };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
@@ -36,11 +44,12 @@ export type NativeSettings = {
 const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const TEXT_VERBOSITIES = new Set(["low", "medium", "high"]);
 const PERSONALITIES = new Set(["default", "friendly", "pragmatic", "none"]);
-const BACKLOGS = new Set(["off", "1", "3", "5"]);
-const APPROVAL_MODES = new Set(["always-ask", "write", "yolo"]);
+const BACKLOGS = new Set(["off", "1", "3", "5", "strict"]);
+const APPROVAL_MODES = new Set(["always-ask", "always-ask-cached", "write", "yolo"]);
 const APPROVAL_POLICIES = new Set(["allow", "prompt", "deny"]);
 const FALLBACK_REVERT_POLICIES = new Set(["cooldown-expiry", "never"]);
-const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight"]);
+const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight", "sharpshooter"]);
+const AGENT_ADVISOR_TOGGLES = new Set(["on", "off"]);
 const MEMORY_SCOPES = new Set(["global", "per-project", "per-project-tagged"]);
 
 function configPath(): string {
@@ -101,6 +110,27 @@ export function readAnthropicSlowMode(): boolean {
   }
 }
 
+/** An advisor toggle as omp normalizes it: booleans become "on"/"off", other values must be a non-empty string. */
+function advisorToggle(value: unknown): string | undefined {
+  if (typeof value === "boolean") return value ? "on" : "off";
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * `task.agentAdvisor.task` as omp sees it after its on-load migration: an
+ * explicit `task` entry wins, otherwise the legacy `advisor.subagents` boolean
+ * (nested or dotted) maps to "on"/"off" (config/settings.ts, advisor.subagents
+ * migration). Undefined when neither is set.
+ */
+function readAgentAdvisorTask(data: Record<string, unknown>): string | undefined {
+  const task = isRecord(data.task) ? data.task : {};
+  const agentAdvisor = isRecord(task.agentAdvisor) ? task.agentAdvisor : {};
+  if ("task" in agentAdvisor) return advisorToggle(agentAdvisor.task);
+  const advisor = isRecord(data.advisor) ? data.advisor : undefined;
+  const legacy = advisor && "subagents" in advisor ? advisor.subagents : data["advisor.subagents"];
+  return typeof legacy === "boolean" ? advisorToggle(legacy) : undefined;
+}
+
 /** Returns the persisted native OMP values only; omitted keys keep OMP defaults. */
 export function readNativeSettings(): { path: string; settings: NativeSettings } {
   const { path, doc } = readDocument();
@@ -108,6 +138,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   if (!isRecord(data)) return { path, settings: {} };
   const advisor = isRecord(data.advisor) ? data.advisor : {};
   const providers = isRecord(data.providers) ? data.providers : {};
+  const agentAdvisorTask = readAgentAdvisorTask(data);
   const autoThinkingSource = providers.autoThinkingSource;
   const tools = isRecord(data.tools) ? data.tools : {};
   const approval = isRecord(tools.approval) ? tools.approval : {};
@@ -141,16 +172,16 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
       ...(typeof data.externalThinking === "boolean" ? { externalThinking: data.externalThinking } : {}),
       ...(TEXT_VERBOSITIES.has(data.textVerbosity as string) ? { textVerbosity: data.textVerbosity as NativeSettings["textVerbosity"] } : {}),
       ...(PERSONALITIES.has(data.personality as string) ? { personality: data.personality as NativeSettings["personality"] } : {}),
+      ...(agentAdvisorTask !== undefined ? { task: { agentAdvisor: { task: agentAdvisorTask } } } : {}),
       ...(Object.keys(advisor).length ? {
         advisor: {
           ...(typeof advisor.enabled === "boolean" ? { enabled: advisor.enabled } : {}),
-          ...(typeof advisor.subagents === "boolean" ? { subagents: advisor.subagents } : {}),
-          ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as "off" | "1" | "3" | "5" } : {}),
+          ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as SyncBacklog } : {}),
           ...(typeof advisor.immuneTurns === "number" && Number.isInteger(advisor.immuneTurns) ? { immuneTurns: advisor.immuneTurns } : {}),
         },
       } : {}),
       ...(Object.keys(tools).length ? { tools: {
-        ...(APPROVAL_MODES.has(tools.approvalMode as string) ? { approvalMode: tools.approvalMode as "always-ask" | "write" | "yolo" } : {}),
+        ...(APPROVAL_MODES.has(tools.approvalMode as string) ? { approvalMode: tools.approvalMode as ApprovalMode } : {}),
         ...(APPROVAL_POLICIES.has(approval.bash as string) || approval.extension === "allow" || approval.extension === "prompt" ? { approval: {
           ...(APPROVAL_POLICIES.has(approval.bash as string) ? { bash: approval.bash as "allow" | "prompt" | "deny" } : {}),
           ...(approval.extension === "allow" || approval.extension === "prompt" ? { extension: approval.extension } : {}),
@@ -177,7 +208,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
         ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
       } } : {}),
-      ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as "off" | "local" | "mnemopi" | "hindsight" } : {}) } } : {}),
+      ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as MemoryBackend } : {}) } } : {}),
       ...(Object.keys(autolearn).length ? { autolearn: {
         ...(typeof autolearn.enabled === "boolean" ? { enabled: autolearn.enabled } : {}),
         ...(typeof autolearn.autoContinue === "boolean" ? { autoContinue: autolearn.autoContinue } : {}),
@@ -208,7 +239,7 @@ const TOP_LEVEL_KEYS = [
 ] as const;
 const SECTION_KEYS = {
   providers: ["autoThinkingSource"],
-  advisor: ["enabled", "subagents", "syncBacklog", "immuneTurns"],
+  advisor: ["enabled", "syncBacklog", "immuneTurns"],
   skills: ["showStartupDiagnostics"],
   retry: ["enabled", "maxRetries", "modelFallback", "fallbackRevertPolicy", "fallbackChains"],
   compaction: ["enabled", "midTurnEnabled", "methodOrder", "autoContinue", "keepRecentTokens"],
@@ -235,6 +266,8 @@ export function writeNativeSettings(settings: NativeSettings): void {
     throw new Error("Invalid Auto thinking source");
   }
   assertOptionalRecord(settings.advisor, "advisor");
+  assertOptionalRecord(settings.task, "task");
+  assertOptionalRecord(settings.task?.agentAdvisor, "task.agentAdvisor");
   assertOptionalRecord(settings.tools, "tools");
   assertOptionalRecord(settings.tools?.approval, "tools.approval");
   assertOptionalRecord(settings.skills, "skills");
@@ -244,17 +277,18 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.autolearn, "autolearn");
   assertOptionalRecord(settings.mnemopi, "mnemopi");
   assertOptionalRecord(settings.mcp, "mcp");
-  assertKnownKeys(settings, "settings", [...TOP_LEVEL_KEYS, "providers", "tools", "registryHasScopedEntries", ...Object.keys(SECTION_KEYS)]);
+  assertKnownKeys(settings, "settings", [...TOP_LEVEL_KEYS, "providers", "tools", "task", "registryHasScopedEntries", ...Object.keys(SECTION_KEYS)]);
   for (const [section, keys] of Object.entries(SECTION_KEYS)) {
     assertKnownKeys(settings[section as keyof NativeSettings], section, keys);
   }
+  assertKnownKeys(settings.task, "task", ["agentAdvisor"]);
+  assertKnownKeys(settings.task?.agentAdvisor, "task.agentAdvisor", ["task"]);
   assertKnownKeys(settings.tools, "tools", ["approvalMode", "approval"]);
   assertKnownKeys(settings.tools?.approval, "tools.approval", ["bash", "extension"]);
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
     externalThinking: settings.externalThinking,
     "advisor.enabled": settings.advisor?.enabled,
-    "advisor.subagents": settings.advisor?.subagents,
     "retry.enabled": settings.retry?.enabled,
     "skills.showStartupDiagnostics": settings.skills?.showStartupDiagnostics,
     "retry.modelFallback": settings.retry?.modelFallback,
@@ -275,8 +309,9 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.personality !== undefined && !PERSONALITIES.has(settings.personality)) throw new Error("Invalid personality");
   if (settings.advisor?.syncBacklog !== undefined && !BACKLOGS.has(settings.advisor.syncBacklog)) throw new Error("Invalid advisor sync backlog");
   if (settings.advisor?.immuneTurns !== undefined && (!Number.isInteger(settings.advisor.immuneTurns) || settings.advisor.immuneTurns < 0 || settings.advisor.immuneTurns > 20)) throw new Error("Advisor immune turns must be an integer between 0 and 20");
+  if (settings.task?.agentAdvisor?.task !== undefined && !AGENT_ADVISOR_TOGGLES.has(settings.task.agentAdvisor.task)) throw new Error("Invalid subagent advisor setting");
   if (settings.tools?.approvalMode !== undefined && !APPROVAL_MODES.has(settings.tools.approvalMode)) throw new Error("Invalid approval mode");
-  if (settings.tools?.approval?.bash !== undefined && !APPROVAL_POLICIES.has(settings.tools.approval.bash)) throw new Error("Invalid Bash approval policy");
+  if (settings.tools?.approval?.bash !== undefined && settings.tools.approval.bash !== null && !APPROVAL_POLICIES.has(settings.tools.approval.bash)) throw new Error("Invalid Bash approval policy");
   if (settings.tools?.approval?.extension !== undefined && settings.tools.approval.extension !== "allow" && settings.tools.approval.extension !== "prompt") throw new Error("Invalid extension tool approval policy");
   if (settings.retry?.maxRetries !== undefined && (!Number.isInteger(settings.retry.maxRetries) || settings.retry.maxRetries < 0 || settings.retry.maxRetries > 20)) throw new Error("Retry attempts must be an integer between 0 and 20");
   if (settings.retry?.fallbackRevertPolicy !== undefined && !FALLBACK_REVERT_POLICIES.has(settings.retry.fallbackRevertPolicy)) throw new Error("Invalid fallback revert policy");
@@ -304,8 +339,11 @@ export function writeNativeSettings(settings: NativeSettings): void {
     const values = settings[section as keyof NativeSettings] as Record<string, unknown> | undefined;
     for (const key of keys) updates.push([[section, key], values?.[key]]);
   }
+  updates.push([["task", "agentAdvisor", "task"], settings.task?.agentAdvisor?.task]);
   updates.push([["tools", "approvalMode"], settings.tools?.approvalMode]);
-  updates.push([["tools", "approval", "bash"], settings.tools?.approval?.bash]);
+  // Only `tools.approval.bash` is clearable: its unset state (follow `approvalMode`) is not any of its values.
+  const clearBash = settings.tools?.approval?.bash === null;
+  updates.push([["tools", "approval", "bash"], clearBash ? undefined : settings.tools?.approval?.bash]);
   updates.push([["tools", "approval", "extension"], settings.tools?.approval?.extension]);
 
   const { path, doc } = readDocument();
@@ -313,5 +351,6 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [location, value] of updates) {
     if (value !== undefined) doc.setIn(location, value);
   }
+  if (clearBash) doc.deleteIn(["tools", "approval", "bash"]);
   writeFileAtomic(path, doc.toString());
 }

@@ -71,10 +71,11 @@ type NativeSettings = {
   externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
+  advisor?: { enabled?: boolean; syncBacklog?: "off" | "1" | "3" | "5" | "strict"; immuneTurns?: number };
+  task?: { agentAdvisor?: { task?: string } };
+  tools?: { approvalMode?: "always-ask" | "always-ask-cached" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny" | null; extension?: "allow" | "prompt" } };
   compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
-  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
+  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
@@ -1430,10 +1431,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="approval-mode" label={t("settingsConfig.approvalMode")} description={t("settingsConfig.approvalModeDesc")} scope="Native OMP">
                     <select
                       style={nativeSelectStyle}
+                      // omp's default when tools.approvalMode is unset (tools/settings.ts).
                       value={nativeSettings?.tools?.approvalMode ?? "yolo"}
-                      onChange={(event) => patchSection("tools", { approvalMode: event.target.value as "always-ask" | "write" | "yolo" })}
+                      onChange={(event) => patchSection("tools", { approvalMode: event.target.value as NonNullable<NativeSettings["tools"]>["approvalMode"] })}
                     >
                       <option value="always-ask" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
+                      <option value="always-ask-cached" style={nativeOptionStyle}>{t("settingsConfig.askAndRemember")}</option>
                       <option value="write" style={nativeOptionStyle}>{t("settingsConfig.allowWrites")}</option>
                       <option value="yolo" style={nativeOptionStyle}>{t("settingsConfig.autoApproveYolo")}</option>
                     </select>
@@ -1441,9 +1444,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="bash-override" label={t("settingsConfig.bashOverride")} description={t("settingsConfig.bashOverrideDesc")} scope="Native OMP">
                     <select
                       style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approval?.bash ?? "prompt"}
-                      onChange={(event) => patchApproval({ bash: event.target.value as "allow" | "prompt" | "deny" })}
+                      // No tools.approval.bash key means no per-tool policy: bash follows the approval mode.
+                      value={nativeSettings?.tools?.approval?.bash ?? ""}
+                      onChange={(event) => patchApproval({ bash: event.target.value === "" ? null : event.target.value as "allow" | "prompt" | "deny" })}
                     >
+                      <option value="" style={nativeOptionStyle}>{t("settingsConfig.followApprovalMode")}</option>
                       <option value="allow" style={nativeOptionStyle}>{t("settingsConfig.allow")}</option>
                       <option value="prompt" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
                       <option value="deny" style={nativeOptionStyle}>{t("settingsConfig.deny")}</option>
@@ -1593,19 +1598,21 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                           <select
                             style={nativeSelectStyle}
                             value={nativeSettings?.advisor?.syncBacklog ?? "off"}
-                            onChange={(e) => patchSection("advisor", { syncBacklog: e.target.value as "off" | "1" | "3" | "5" })}
+                            onChange={(e) => patchSection("advisor", { syncBacklog: e.target.value as NonNullable<NativeSettings["advisor"]>["syncBacklog"] })}
                           >
                             <option value="off" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogOff")}</option>
                             <option value="1" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogOne")}</option>
                             <option value="3" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogThree")}</option>
                             <option value="5" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogFive")}</option>
+                            <option value="strict" style={nativeOptionStyle}>{t("settingsConfig.advisorBacklogStrict")}</option>
                           </select>
                         </NativeSetting>
                         <NativeSetting searchId="review-subagents" label={t("settingsConfig.reviewSubagents")} description={t("settingsConfig.reviewSubagentsDesc")} scope="Native OMP">
                           <ToggleSwitch
                             disabled={nativeToggleDisabled}
-                            checked={nativeSettings?.advisor?.subagents ?? false}
-                            onChange={(checked) => patchSection("advisor", { subagents: checked })}
+                            // "off" or unset is off; "on" or a model pattern set in the /agents hub is on.
+                            checked={nativeSettings?.task?.agentAdvisor?.task !== undefined && nativeSettings.task.agentAdvisor.task !== "off"}
+                            onChange={(checked) => patchNativeSettings({ task: { agentAdvisor: { task: checked ? "on" : "off" } } })}
                           />
                         </NativeSetting>
                       </>
@@ -1656,26 +1663,28 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     <NativeSetting searchId="memory-backend" label={t("settingsConfig.memoryBackend")} description={t("settingsConfig.memoryBackendDesc")} scope="Native OMP">
                       <select
                         style={nativeSelectStyle}
-                        value={nativeSettings?.memory?.backend ?? "mnemopi"}
+                        // omp's default when memory.backend is unset (memory-backend/settings.ts).
+                        value={nativeSettings?.memory?.backend ?? "off"}
                         onChange={(e) => patchSection("memory", { backend: e.target.value as NonNullable<NativeSettings["memory"]>["backend"] })}
                       >
                         <option value="off" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendOff")}</option>
                         <option value="local" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendLocal")}</option>
                         <option value="mnemopi" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendMnemopi")}</option>
                         <option value="hindsight" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendHindsight")}</option>
+                        <option value="sharpshooter" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendSharpshooter")}</option>
                       </select>
                     </NativeSetting>
                     <NativeSetting searchId="enable-auto-learn" label={t("settingsConfig.enableAutoLearn")} description={t("settingsConfig.enableAutoLearnDesc")} scope="Native OMP">
                       <ToggleSwitch
                         disabled={nativeToggleDisabled}
-                        checked={nativeSettings?.autolearn?.enabled ?? true}
+                        checked={nativeSettings?.autolearn?.enabled ?? false}
                         onChange={(checked) => patchSection("autolearn", { enabled: checked })}
                       />
                     </NativeSetting>
                     <NativeSetting searchId="private-capture-turn" label={t("settingsConfig.privateCaptureTurn")} description={t("settingsConfig.privateCaptureTurnDesc")} scope="Native OMP">
                       <ToggleSwitch
                         disabled={nativeToggleDisabled}
-                        checked={nativeSettings?.autolearn?.autoContinue ?? true}
+                        checked={nativeSettings?.autolearn?.autoContinue ?? false}
                         onChange={(checked) => patchSection("autolearn", { autoContinue: checked })}
                       />
                     </NativeSetting>
@@ -1733,7 +1742,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     <NativeSetting searchId="model-fallback" label={t("settingsConfig.modelFallback")} description={t("settingsConfig.modelFallbackDesc")} scope="Native OMP">
                       <ToggleSwitch
                         disabled={nativeToggleDisabled}
-                        checked={nativeSettings?.retry?.modelFallback ?? false}
+                        checked={nativeSettings?.retry?.modelFallback ?? true}
                         onChange={(checked) => patchSection("retry", { modelFallback: checked })}
                       />
                     </NativeSetting>

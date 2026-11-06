@@ -109,7 +109,9 @@ export type RetrySettings = {
   retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean; fallbackRevertPolicy?: "cooldown-expiry" | "never"; fallbackChains?: Record<string, string[]> };
 };
 export const COMPOSER_MODELS_STORAGE_KEY = "omp-composer-models";
-export const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
+// omp's chat-section roles (config/model-roles.ts). The kind-section roles (image, web, speech,
+// dictation, judge) are left out: they need non-chat model kinds this picker cannot filter.
+export const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget"];
 // omp's models.yml ApiSchema (config/models-config-schema.ts)
 export const API_OPTIONS = [
   "openai-completions",
