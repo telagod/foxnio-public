@@ -334,8 +334,8 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   // fs.watch on a file path follows the inode, not the path. An atomic save
   // (write a temp file, rename it over the target) leaves the watcher on the
   // replaced inode, silent forever, so the watcher is re-armed once the path
-  // names another file. The file identity decides, not the event type: macOS
-  // (kqueue) reports the replacement as `change`.
+  // names another file. The file identity decides, not the event type: a
+  // replacement can arrive as `change` (inotify reports it that way first).
   const fileIdentity = (): string | null => {
     try {
       const { dev, ino } = fs.statSync(filePath);
