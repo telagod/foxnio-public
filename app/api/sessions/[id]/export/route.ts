@@ -28,9 +28,12 @@ const EXPORT_DOCUMENT_HEADERS = {
 };
 
 /**
- * Render a session to self-contained HTML by shelling out to the user's omp
- * binary: `omp --export <sessionPath> <outPath>` (the output path is the first
+ * Render a session to HTML by shelling out to the user's omp binary:
+ * `omp --export <sessionPath> <outPath>` (the output path is the first
  * positional argument; verified against oh-my-pi main.ts/flag-tables.ts).
+ * Since omp 18.14 the page is not self-contained: it loads its viewer, marked
+ * and highlight.js from stencil.so (SRI-pinned, CORS `*`, so the sandboxed
+ * opaque origin can still run them), and needs network access to render.
  */
 async function exportSession(filePath: string, outputPath: string): Promise<void> {
   const bin = resolveOmpBin();

@@ -6,8 +6,16 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ## [Unreleased]
 
+### Added
+
+- **omp release tracking.** A daily workflow checks every new omp release against foxnio: it runs foxnio's native omp tests against the released binary and opens an issue (label `omp-update`) with the result and what changed since the verified version (`.github/omp-version.json`): RPC commands and frames, CLI flags, settings, session format, changed files per area and the changelog.
+
 ### Fixes & Improvements
 
+- **Reopening a session that omp continued in another file no longer starts a second omp for it.** Since omp 18.13.2, resuming a session file opens the newest copy of the conversation (`continuationOf`), which happens after another omp process held the file. foxnio kept that child only under the copy's id, so every request for the original id spawned another omp on the same conversation and the chat's event stream answered "Session is not managed by foxnio". The requested id now stays an alias of the child, as for a live move.
+- **Settings show and accept omp's newer values.** The approval mode **Ask and remember** (`always-ask-cached`) displayed as "Auto approve"; the advisor backlog `strict` and the `sharpshooter` memory backend read as unset. Unset settings now show omp's defaults (Autolearn and its auto-continue off, model fallback on, memory backend off), Bash approval can follow the approval mode again, and the advisor-for-subagents toggle uses `task.agentAdvisor.task`, the key omp migrates `advisor.subagents` to. The model roles list drops `designer`, which omp no longer has, and adds `memory` and `widget`.
+- **Secret prompts from extensions are masked** (`secret: true` input dialogs, omp 18.13.2+).
+- **A prompt refused by omp's cost cap shows omp's message** instead of leaving the composer busy (`session.maxCost` / `--max-cost`, omp 18.13+).
 - **`nix build` works from a clean checkout.** `nix/package.nix` listed the git-ignored `next-env.d.ts` in its source set, so evaluating the flake failed on every checkout, v0.6.2 included.
 
 ---

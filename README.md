@@ -221,7 +221,7 @@ stored hash alone is never enough to forge a session.
 
 **Without a password**, foxnio only answers requests whose `Host` header is a loopback name (`localhost`, `127.0.0.0/8`, `[::1]`) and returns `403` for anything else. That stops a web page you happen to visit from reaching your local agent through DNS rebinding. To reach a password-less server through a reverse proxy, tunnel or Tailscale name, list that name in `OMP_WEB_ALLOWED_HOSTS` (better: set a password). Failed sign-ins are throttled: five wrong passwords lock the client out for 15 seconds, doubling up to five minutes (HTTP `429`).
 
-The exported-session page ("View full history") opens in a sandbox with no access to your session cookie or the API, because an exported conversation can contain HTML written by a model or a web page.
+The exported-session page ("View full history") opens in a sandbox with no access to your session cookie or the API, because an exported conversation can contain HTML written by a model or a web page. With omp 18.14 or later the page loads its viewer from omp's CDN (`stencil.so`), so the browser needs internet access to render it, and a downloaded export is not readable offline.
 
 The service installers (`foxnio systemd install`, `foxnio-launchd install`, the
 Linux tray, and the Windows service) still accept `OMP_WEB_PASSWORD` at install

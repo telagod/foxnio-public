@@ -13,6 +13,11 @@ Lint: `npm run lint`
 The dev server needs the `omp` binary installed (on `PATH`, or set `OMP_WEB_OMP_BIN`).
 All live-agent features go through it; session browsing works without it.
 
+Native omp tests (opt-in; they run the real `omp` from `OMP_WEB_OMP_BIN` or `PATH`,
+isolated from your credentials and config by `tests/omp-native-env.mjs`):
+`OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs`,
+and `OMP_WEB_TEST_NATIVE_EDIT=1` for `lib/omp/session-edit.native.test.mjs`. See "Tracking omp releases".
+
 ---
 
 ## Architecture
@@ -259,6 +264,12 @@ hooks/
   live wrapper reporting the requested session file instead of spawning a second
   `--resume` child (which would fork again). `onDestroy` removes every key that
   points at the wrapper.
+- Since omp 18.13.2 `--resume <file>` opens the newest copy of the conversation
+  when it went on in a sibling file (header `continuationOf`), so a resumed
+  child can report another id at the handshake. `initialize()` treats that id
+  change like a move, and `startRpcSession` keeps the requested id as an alias:
+  without it every request for the original id spawned another child on the
+  same conversation.
 - `POST /api/sessions/[id]/auto-name` asks omp to generate the title
   (`AgentSessionWrapper.generateTitle()`: native `generate_title`, else
   argument-less `/rename`, never while a run is in flight). Only when omp cannot
@@ -835,6 +846,26 @@ during the wait.
   to `/login?next=/?session=…`, and `LoginForm` returns there (only `/?…`
   targets are accepted). The worker navigates non-app windows to the session
   URL; the app falls back to that URL when `/api/sessions` cannot be read.
+
+## Tracking omp releases
+
+- `.github/omp-version.json` records the omp version foxnio is verified against.
+- `.github/workflows/omp-tracking.yml` runs daily. When omp has published a newer
+  release it downloads that release's `omp-linux-x64` (checksum-verified), runs
+  both native suites against it and opens an issue `omp vX.Y.Z released`
+  (label `omp-update`, plus `bug` when a test failed). The body comes from
+  `.github/scripts/omp-release-report.mjs`: RPC wire schema changes (commands
+  and frames added, removed or changed; names foxnio's code uses are marked),
+  CLI flags, setting definitions, the session format version, changed files per
+  area and the changelog since the verified version. A scheduled run never
+  touches a version that already has an issue; a manual run (`workflow_dispatch`,
+  any `version`) refreshes its issue, and `dry_run` only writes the run summary.
+- Adapting to a release: fix what the report and the failing tests show, then set
+  `verified` to that version in the same change.
+- The native suites replace omp's whole environment (temp HOME and agent dir,
+  every catalog provider disabled, one inert model). When omp adds a provider,
+  the native edit suite's discovery check fails until `DISABLED_PROVIDERS` in
+  `tests/omp-native-env.mjs` lists it.
 
 ## Git history and PR landing rules
 
