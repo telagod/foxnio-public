@@ -622,6 +622,11 @@ export class AgentSessionWrapper {
       // Bounded like get_state so a child that never answers cannot stall startup.
       await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
       const state = await this.getStateWithTimeout();
+      // omp >= 18.13.2 resumes the newest copy of a conversation that went on in
+      // another file (header `continuationOf`), so a resumed child can report
+      // another session than the file it was given. Same conversation: keep the
+      // requested id as an alias, as for a move.
+      if (this._sessionId && state.sessionId !== this._sessionId) this.sessionMovePending = true;
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
       // This happens when the recorded cwd was deleted (removed worktree, moved
@@ -2829,6 +2834,10 @@ export async function startRpcSession(
       registry.set(newId, created);
     });
     registry.set(realSessionId, created);
+    // A resume that landed on a continuation copy (see initialize) still serves
+    // the id the caller asked for; without the alias every request for it
+    // would spawn another child on the same conversation.
+    if (sessionFile && realSessionId !== sessionId) registry.set(sessionId, created);
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);
