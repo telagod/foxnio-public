@@ -5,10 +5,11 @@ import { join } from "node:path";
 // (`lib/omp/*.native.test.mjs`): no credentials, config or provider endpoints
 // of the developer's machine may reach the child.
 
-// OMP 18.12.6's supported disabledProviders setting gates implicit probes,
-// built-in managers AND credential-free catalog refreshes. Keep the complete
-// catalog list (packages/catalog/src/compat/provider-ids.ts), plus llama.cpp,
-// rather than merely disabling the three usual localhost inference engines.
+// omp's supported disabledProviders setting gates implicit probes, built-in
+// managers AND credential-free catalog refreshes. Keep the complete catalog
+// list (packages/catalog/src/compat/provider-ids.ts, as of omp 18.17.0), plus
+// llama.cpp, rather than merely disabling the three usual localhost inference
+// engines. The omp release report lists catalog ids missing here.
 export const DISABLED_PROVIDERS = [
   "abliteration", "aiand", "aimlapi", "alibaba-coding-plan", "alibaba-token-plan", "amazon-bedrock",
   "anthropic", "apple", "azure", "baseten", "bedrock-mantle", "cerebras", "charm-hyper", "cline-pass",
@@ -16,10 +17,10 @@ export const DISABLED_PROVIDERS = [
   "deepinfra", "deepseek", "devin", "factory-droid", "firepass", "fireworks", "github-copilot",
   "gitlab-duo", "gitlab-duo-agent", "gmi-cloud", "google", "google-antigravity", "google-gemini-cli",
   "google-vertex", "groq", "helmcode", "huggingface", "inception", "kilo", "kimi-code", "litellm",
-  "llama.cpp", "lm-studio", "local", "meta", "minimax", "minimax-code", "minimax-code-cn", "mistral",
+  "llama.cpp", "lm-studio", "local", "meta", "minimax", "minimax-code", "minimax-code-cn", "mistral", "modular",
   "moonshot", "muse-code", "nanogpt", "novita", "nvidia", "ollama", "ollama-cloud", "openai",
   "openai-codex", "opencode-go", "opencode-zen", "openrouter", "qianfan", "qwen-portal", "sakana",
-  "sambanova", "siliconflow", "siliconflow-cn", "singularityapi-dev", "singularityapi-tech", "snowflake",
+  "sambanova", "scaleway", "siliconflow", "siliconflow-cn", "singularityapi-dev", "singularityapi-tech", "snowflake",
   "stepfun", "synthetic", "together", "typesafe", "umans", "venice", "vercel-ai-gateway", "vllm",
   "wafer-serverless", "web", "xai", "xai-oauth", "xiaomi", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn",
   "xiaomi-token-plan-sgp", "yolo-auto", "zai", "zenmux", "zhipu-coding-plan",

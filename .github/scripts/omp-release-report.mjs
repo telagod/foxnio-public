@@ -14,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const { OMP_SRC: ompSrc, FROM: from, TO: to, RELEASE_URL: releaseUrl, SMOKE_STATUS: smokeStatus = "", SMOKE_TAP: smokeTap } = process.env;
 const foxnioRoot = process.env.FOXNIO_ROOT || process.cwd();
@@ -208,6 +209,19 @@ function sessionVersion(tag) {
   return /CURRENT_SESSION_VERSION\s*=\s*(\d+)/.exec(show(tag, `${AGENT}/src/session/session-entries.ts`) ?? "")?.[1] ?? "unknown";
 }
 
+// The native suites disable every catalog provider (tests/omp-native-env.mjs);
+// one the list misses could reach a real service from the tests.
+async function isolationLine() {
+  const { DISABLED_PROVIDERS } = await import(pathToFileURL(join(foxnioRoot, "tests", "omp-native-env.mjs")).href);
+  const catalog = show(toTag, "packages/catalog/src/compat/provider-ids.ts");
+  if (!catalog) return "`packages/catalog/src/compat/provider-ids.ts` is missing at this release: find where omp lists its providers and update `DISABLED_PROVIDERS` in `tests/omp-native-env.mjs`.";
+  const missing = [...new Set([...catalog.matchAll(/"([a-z0-9.-]+)"/g)].map((match) => match[1]))]
+    .filter((id) => !DISABLED_PROVIDERS.includes(id)).sort();
+  return missing.length
+    ? `Catalog providers missing from \`DISABLED_PROVIDERS\` in \`tests/omp-native-env.mjs\`: ${missing.map((id) => `\`${id}\``).join(", ")}. Add them so the native tests cannot reach those services.`
+    : "`DISABLED_PROVIDERS` covers every catalog provider of this release.";
+}
+
 const AREAS = [
   ["RPC mode", [`${AGENT}/src/modes/rpc`, "docs/rpc.md"]],
   ["Sessions", [`${AGENT}/src/session`]],
@@ -300,6 +314,8 @@ const head = [
   "### Compatibility smoke",
   "",
   ...smoke.lines,
+  "",
+  await isolationLine(),
   "",
   "### RPC wire protocol",
   "",
