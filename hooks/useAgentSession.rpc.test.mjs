@@ -1210,6 +1210,61 @@ test("a silent idle transition shows a fallback error instead of disappearing", 
   assert.ok(w.latest.notices.some((notice) => /stopped without returning a response/i.test(notice.message)));
 });
 
+const COST_CAP_RESULT = {
+  type: "prompt_result",
+  agentInvoked: true,
+  status: "error",
+  error: { message: "Session cost cap of $5.00 reached", retryable: false, code: "cost_cap" },
+};
+
+test("a cost-cap refusal before any run ends the pending prompt and shows omp's message", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", "q1");
+  world.agents.set("s1", { running: true, state: {} });
+
+  // omp refuses the prompt: no agent_start / agent_end ever follow.
+  await act(async () => { es.emit(COST_CAP_RESULT); });
+  await settle();
+
+  assert.equal(w.latest.agentRunning, false, "the composer must be released without waiting for the reconcile poll");
+  assert.deepEqual(
+    w.latest.notices.filter((n) => n.type === "error").map((n) => n.message),
+    ["Session cost cap of $5.00 reached"],
+  );
+});
+
+test("a failed prompt_result after a started run adds no second error", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", "q1");
+
+  const providerError = "The provider rejected the request (HTTP 500)";
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "prompt_result", ...COST_CAP_RESULT, error: { message: "mid-run result", retryable: false } });
+    await Promise.resolve();
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "a result while the run is live must not end it");
+
+  await act(async () => {
+    es.emit({
+      type: "message_end",
+      message: { ...assistantMsg("a1", ""), content: [], stopReason: "error", errorMessage: providerError },
+    });
+    es.emit({ type: "agent_end", isTerminal: true });
+    await Promise.resolve();
+  });
+  await settle();
+  // omp reports the run's outcome again in a prompt_result that follows agent_end.
+  await act(async () => { es.emit({ ...COST_CAP_RESULT, error: { message: providerError, retryable: false } }); });
+  await settle();
+
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error").map((n) => n.message), [providerError]);
+});
+
 for (const completion of ["visibilitychange", "agent_end"]) {
   test(`a saved response missed by SSE is recovered on ${completion} without a failure notice`, async () => {
     resetWorld();

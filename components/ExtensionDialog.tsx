@@ -430,6 +430,18 @@ export function ExtensionDialog({
           {request.method === "input" && (
             <input
               autoFocus
+              // `secret` is omp's hint that the value is a credential: mask it
+              // and keep browsers/password managers from remembering or
+              // correcting it. The text lives only in this component's state.
+              type={request.secret ? "password" : undefined}
+              {...(request.secret ? {
+                autoComplete: "off",
+                autoCapitalize: "off",
+                autoCorrect: "off",
+                spellCheck: false,
+                "data-1p-ignore": true,
+                "data-lpignore": "true",
+              } : {})}
               aria-label={request.title || request.placeholder || "Input value"}
               value={value}
               placeholder={request.placeholder}

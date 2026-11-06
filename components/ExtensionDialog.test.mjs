@@ -74,3 +74,28 @@ test("question selection survives request replay but is cleared for the next que
     view.unmount();
   }
 });
+
+test("a secret input is masked and not autofilled, a normal input is a plain text box", async () => {
+  const base = { type: "extension_ui_request", method: "input", placeholder: "paste it" };
+  const responses = [];
+  const onRespond = (current, response) => responses.push({ id: current.id, ...response });
+  const dialog = (current) => React.createElement(ExtensionDialog, { request: current, onRespond, attached: true });
+  const view = render(dialog({ ...base, id: "secret-1", title: "API token", secret: true }));
+  try {
+    const field = screen.getByPlaceholderText("paste it");
+    assert.equal(field.getAttribute("type"), "password");
+    assert.equal(field.getAttribute("autocomplete"), "off");
+    assert.equal(field.getAttribute("spellcheck"), "false");
+    assert.equal(screen.queryByRole("textbox", { name: "API token" }), null);
+    fireEvent.change(field, { target: { value: "sk-live-123" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    assert.deepEqual(responses, [{ id: "secret-1", value: "sk-live-123" }]);
+
+    view.rerender(dialog({ ...base, id: "plain-1", title: "Name" }));
+    const plain = screen.getByRole("textbox", { name: "Name" });
+    assert.notEqual(plain.getAttribute("type"), "password");
+    assert.equal(plain.value, "");
+  } finally {
+    view.unmount();
+  }
+});

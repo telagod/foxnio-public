@@ -418,6 +418,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // double click cannot act on a second same-text queue entry.
   const queuedRemovalRef = useRef<{ sessionId: string } | null>(null);
   const agentRunningRef = useRef(false);
+  // True from a prompt's dispatch until its agent_start: a prompt_result that
+  // reports an error in this window is a refusal before any run (cost cap).
+  const awaitingRunStartRef = useRef(false);
   const bashRunningRef = useRef(false);
   const forkInFlightRef = useRef(false);
   const editInFlightRef = useRef<{ sessionId: string; pendingHistoryChange: AgentEvent | null } | null>(null);
@@ -2170,6 +2173,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         responseRunVersionRef.current += 1;
         interruptReplyPendingRef.current = false;
         agentRunningRef.current = true;
+        awaitingRunStartRef.current = false;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         clearLiveToolResults();
@@ -2287,8 +2291,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "prompt_result":
-        // A prompt handled entirely by a builtin/extension slash command:
-        // no agent_start/agent_end pair will follow.
+        // omp refused the prompt before any run began (cost cap): no
+        // agent_start/agent_end follows, so end the pending prompt like
+        // prompt_error does. A prompt whose run started (agent_start seen)
+        // already reported its failure through agent_end and is skipped.
+        if (
+          event.agentInvoked === true
+          && event.status === "error"
+          && awaitingRunStartRef.current
+          && agentRunningRef.current
+        ) {
+          // finishPromptWithoutStream shows lastRunErrorRef, the same way a
+          // failed prompt does.
+          awaitingRunStartRef.current = false;
+          lastRunErrorRef.current = readAgentError(event.error) ?? translate("agentSession.commandFailed");
+          void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
+          break;
+        }
+        // A prompt handled entirely by a builtin/extension slash command: no
+        // agent_start/agent_end pair will follow.
         if (event.agentInvoked !== false) break;
         if (!agentRunningRef.current) {
           // Slash commands such as /slow change session state without a run;
@@ -2791,6 +2812,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         if (busy && !agentRunningRef.current) {
           agentRunningRef.current = true;
+          awaitingRunStartRef.current = false;
           setAgentRunning(true);
         }
       }
@@ -2889,6 +2911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     lastRunErrorRef.current = null;
     runPreviousEntryIdsRef.current = sessionIdRef.current ? null : [];
     agentRunningRef.current = true;
+    awaitingRunStartRef.current = true;
     slashCommandRunRef.current = isSlashCommandPrompt;
     // A new run starts fresh: drop any rescued in-flight reconcile state from
     // the previous run (its late response is fenced out by the new run id).
@@ -3061,6 +3084,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const promptRunId = ++promptRunIdRef.current;
     promptDispatchPendingRef.current = true;
     runHadContentRef.current = false;
+    awaitingRunStartRef.current = true;
     lastQuotaErrorRef.current = null;
     lastRunErrorRef.current = null;
     const previousRunEntryIds = runPreviousEntryIdsRef.current;
@@ -4046,6 +4070,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void connectEvents(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
+            awaitingRunStartRef.current = false;
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });

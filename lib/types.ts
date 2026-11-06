@@ -207,6 +207,8 @@ export type ExtensionUiRequest =
       method: "input";
       title: string;
       placeholder?: string;
+      /** Host hint: mask typed characters (omp >= 18.13.2). */
+      secret?: boolean;
       timeout?: number;
       expiresAt?: number;
     }

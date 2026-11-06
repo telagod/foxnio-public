@@ -231,7 +231,7 @@ export interface RpcAskDialogAnswer {
 export type OmpExtensionUiRequest =
   | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; /** Host hint: mask typed characters (omp >= 18.13.2). */ secret?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "ask"; questions: RpcAskDialogQuestion[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
