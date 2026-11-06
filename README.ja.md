@@ -20,6 +20,7 @@ foxnio は [kahme247/ompweb](https://github.com/kahme247/ompweb) のフォーク
 
 ![スマートフォンで表示した foxnio](docs/screenshot-mobile.png)
 
+</details>
 
 ## 機能
 

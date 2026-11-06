@@ -20,6 +20,7 @@ foxnio 是 [kahme247/ompweb](https://github.com/kahme247/ompweb) 的 fork，专�
 
 ![手机上的 foxnio](docs/screenshot-mobile.png)
 
+</details>
 
 ## 功能特性
 

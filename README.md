@@ -20,6 +20,7 @@ foxnio is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) focuse
 
 ![foxnio on a phone](docs/screenshot-mobile.png)
 
+</details>
 
 ## Features
 
