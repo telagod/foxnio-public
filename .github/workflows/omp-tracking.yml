@@ -1,0 +1,164 @@
+name: omp release tracking
+
+# Once a day: when omp has published a release newer than the version foxnio is
+# verified against (.github/omp-version.json), run foxnio's native omp tests
+# against that release's binary and open an issue with the result and what
+# changed. A manual run checks any release and updates its issue.
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: omp release to check, e.g. 18.17.0 (empty = latest)
+        required: false
+        default: ""
+      dry_run:
+        description: Only write the report to the run summary, do not touch issues
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-tracking
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Pick the omp release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          verified="$(node -p 'require("./.github/omp-version.json").verified')"
+          if [ -n "$REQUESTED" ]; then
+            tag="v${REQUESTED#v}"
+          else
+            tag="$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)"
+          fi
+          url="$(gh release view "$tag" --repo can1357/oh-my-pi --json url --jq .url)"
+          version="${tag#v}"
+          run=true
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            newest="$(printf '%s\n%s\n' "$verified" "$version" | sort -V | tail -1)"
+            if [ "$version" = "$verified" ] || [ "$newest" != "$version" ]; then
+              echo "Latest omp release $version is not newer than the verified $verified."
+              run=false
+            elif [ -n "$(gh issue list --repo "$GITHUB_REPOSITORY" --label omp-update --state all --limit 200 --json title --jq ".[] | select(.title == \"omp v$version released\") | .title")" ]; then
+              echo "The tracking issue for omp $version exists already."
+              run=false
+            fi
+          fi
+          {
+            echo "verified=$verified"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "url=$url"
+            echo "run=$run"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        if: steps.release.outputs.run == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.release.outputs.run == 'true'
+        run: npm ci
+
+      - name: Download the omp binary
+        if: steps.release.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/omp"
+          mkdir -p "$dir"
+          gh release download "$TAG" --repo can1357/oh-my-pi --pattern omp-linux-x64 --pattern SHA256SUMS.txt --dir "$dir"
+          (cd "$dir" && grep ' omp-linux-x64$' SHA256SUMS.txt | sha256sum --check -)
+          chmod +x "$dir/omp-linux-x64"
+          "$dir/omp-linux-x64" --version
+
+      - name: Fetch omp sources for the report
+        if: steps.release.outputs.run == 'true'
+        env:
+          VERIFIED: ${{ steps.release.outputs.verified }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/omp-src"
+          git init -q "$src"
+          git -C "$src" remote add origin https://github.com/can1357/oh-my-pi.git
+          git -C "$src" fetch -q --depth=1 --filter=blob:none origin tag "v$VERIFIED" tag "$TAG"
+
+      - name: Run foxnio's native omp tests against the release
+        id: smoke
+        if: steps.release.outputs.run == 'true'
+        env:
+          OMP_WEB_OMP_BIN: ${{ runner.temp }}/omp/omp-linux-x64
+          OMP_WEB_TEST_NATIVE_COMPAT: "1"
+          OMP_WEB_TEST_NATIVE_EDIT: "1"
+        run: |
+          set +e
+          node --experimental-strip-types --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/smoke.tap" \
+            lib/omp/omp-compat.native.test.mjs lib/omp/session-edit.native.test.mjs
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Write the report
+        if: steps.release.outputs.run == 'true'
+        env:
+          OMP_SRC: ${{ runner.temp }}/omp-src
+          FROM: ${{ steps.release.outputs.verified }}
+          TO: ${{ steps.release.outputs.version }}
+          RELEASE_URL: ${{ steps.release.outputs.url }}
+          SMOKE_STATUS: ${{ steps.smoke.outputs.status }}
+          SMOKE_TAP: ${{ runner.temp }}/smoke.tap
+        run: |
+          node .github/scripts/omp-release-report.mjs > "$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the tracking issue
+        if: steps.release.outputs.run == 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          SMOKE_STATUS: ${{ steps.smoke.outputs.status }}
+        run: |
+          set -euo pipefail
+          title="omp v$VERSION released"
+          gh label create omp-update --repo "$GITHUB_REPOSITORY" --color 1D76DB --description "A new omp release to adapt foxnio to" --force
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --label omp-update --state all --limit 200 --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/report.md"
+          else
+            url="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label omp-update --body-file "$RUNNER_TEMP/report.md")"
+            number="${url##*/}"
+          fi
+          if [ "$SMOKE_STATUS" != "0" ]; then
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --add-label bug
+          fi
+          echo "Tracking issue: #$number"
+
+      - name: Fail when the native tests failed
+        if: steps.release.outputs.run == 'true' && steps.smoke.outputs.status != '0'
+        run: |
+          echo "::error::foxnio's native omp tests failed against omp ${{ steps.release.outputs.version }}; see the report above."
+          exit 1
