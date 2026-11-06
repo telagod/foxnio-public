@@ -1,152 +1,114 @@
 # foxnio
 
-[![GitHub Packages](https://img.shields.io/badge/GitHub%20Packages-%40telagod%2Ffoxnio-181717?logo=github)](https://github.com/telagod/foxnio-public/packages)
-[![node version](https://img.shields.io/node/v/@telagod/foxnio.svg?logo=node.js&color=44cc11)](https://nodejs.org)
-[![license](https://img.shields.io/github/license/telagod/foxnio-public.svg?color=44cc11)](./LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/telagod/foxnio-public.svg?logo=github)](https://github.com/telagod/foxnio-public/stargazers)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/telagod/foxnio-public/pulls)
+[![Release](https://img.shields.io/github/v/release/telagod/foxnio-public?logo=github)](https://github.com/telagod/foxnio-public/releases/latest)
+[![Verify](https://github.com/telagod/foxnio-public/actions/workflows/verify-pr.yml/badge.svg?branch=foxnio)](https://github.com/telagod/foxnio-public/actions/workflows/verify-pr.yml)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D24-44cc11?logo=node.js)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/github/license/telagod/foxnio-public?color=44cc11)](./LICENSE)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-foxnio is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) focused on agent customization. It is still configured through the `OMP_WEB_*` environment variables, and existing `omp-web` data (settings, sessions, notification history) keeps working unchanged.
+foxnio is a browser workspace for the [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) coding agent. It runs on the machine where `omp` runs and works with the same sessions and settings as the `omp` CLI. From a desktop browser or your phone you chat with the agent, review what it changed, and configure it.
 
-Upstream community: [ompweb Discord](https://discord.gg/evqgGzRfM5)
+foxnio is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) focused on agent customization. It keeps ompweb's `OMP_WEB_*` environment variables and data files, so an existing ompweb setup carries over.
 
-A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) coding agent. It reads your local omp sessions and gives you a browser workspace to chat with the agent, browse projects, manage settings, and preview files.
-
-![foxnio — live session demo](docs/demo.gif)
+![foxnio with a finished turn folded into its summary row, the session sidebar and the Git changes panel](docs/screenshot-light.png)
 
 <details>
-<summary>Screenshots (light / dark)</summary>
+<summary>Dark theme and phone layout</summary>
 
-![foxnio — light theme](docs/screenshot-light.png)
+![foxnio in the dark theme with the turn's steps expanded](docs/screenshot-dark.png)
 
-![foxnio — dark theme](docs/screenshot-dark.png)
+![foxnio on a phone](docs/screenshot-mobile.png)
 
-</details>
+
+## Features
+
+**Chat with the agent**
+
+- Streaming replies with thinking, tool calls and their live output, token and cost counters, a context gauge and tokens per second.
+- A finished turn folds into one summary row ("Completed 7 steps · 5 tool calls · 2m 41s") above its final reply. Expand it to see every step.
+- Queue messages while the agent works, turn a queued message into a steer, or stop the run and get the queued text back into the composer. The queue is omp's own, so every device shows the same one.
+- Edit an earlier message to rewind the conversation, fork a new session from any point, ask a side question with `/btw`, and run shell commands with `!`.
+- Slash commands, a `Ctrl/Cmd+K` command palette, word prediction, voice dictation and a full-screen composer. Unsent drafts survive a reload.
+
+**Sessions and workspaces**
+
+- A sidebar with an **Active** section (running, waiting for you, unread), pinned sessions shared by all your devices, and your workspaces. Search covers titles and transcripts.
+- Session tabs on desktop, archive and restore, session file import, and links that open a session (`?session=`).
+- Live plan and subagent panels above the composer, with each subagent's transcript.
+- A file explorer with previews (code, Markdown, Mermaid, images, audio, PDF), a Git changes panel with diffs, and Git worktrees per project ([docs/worktrees.md](./docs/worktrees.md)).
+
+**Configure the agent**
+
+- omp's own settings (approvals, models and thinking, advisor, memory, compaction, retries), edited in the browser and saved to omp's `config.yml`.
+- Providers and models (`models.yml`), model roles, API keys and provider logins, MCP servers, skills, plugins and task agents.
+- Tool presets and a launch configuration per workspace (omp profile and extra `omp` arguments).
+- A usage dashboard: tokens, costs and cache savings by provider, model, project and day.
+
+**On every device**
+
+- Notifications when a run finishes, fails or waits for your answer, including Web Push to a closed browser or to the app on your phone.
+- Installable as an app (PWA). On a phone the sidebar and the file panel become drawers you swipe in from the edge.
+- 14 color themes (among them Catppuccin, Dracula, Nord, Rosé Pine, Tokyo Night and an omp.sh midnight theme), adjustable text size and interface scale, and English, 简体中文 and 日本語.
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
-- Node.js `>= 24`
+- [omp](https://github.com/can1357/oh-my-pi) on your `PATH`, or its path in `OMP_WEB_OMP_BIN`. foxnio is tested against omp **18.16.0** (see [omp compatibility](#omp-compatibility)). Older omp versions lack commands that some features use, such as the queue panel, steering a queued message and completion notifications.
+- Node.js 24 or later for the npm package. The desktop app brings its own Node.js.
 
-The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; foxnio does not send a duplicate steering message.
+## Install
 
-Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
+### npm package
 
-The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
-
-## App installation behind authentication
-
-To install the web app, sign in first and use your browser's installation menu.
-The single manifest link requests `/api/manifest` with credentials; that endpoint
-uses the existing web-password guard and private, revalidating caching. Its
-192×192 and 512×512 PNG icons are embedded from the packaged assets because
-Android's native installer fetches ordinary icon URLs without authentication
-cookies. The app still launches at `/` with scope `/`.
-
-Keep Cloudflare Access and application authentication enabled; no public
-manifest exception or Access bypass rule is needed. This does not add offline
-support. Local Chromium verification covered cookie-gated metadata with HTTP
-icon URLs blocked (zero installability errors). The owner also confirmed that
-installation on a physical phone works as expected behind Cloudflare Access.
-
-Skill startup notices require an OMP runtime with `get_skill_diagnostics`,
-`set_skill_startup_diagnostics`, and `skill_diagnostics_update`. Conflicts and
-redundant installations appear above the composer when its OMP session starts;
-an empty new-chat page does not start OMP just for diagnostics. **Details** shows
-the resolved default, variants, identical copies, backing paths, sources, and
-selection reason. The **×** button dismisses the notice for that session until
-the diagnostic report changes. **Turn off** and **Settings →
-Interface & Behavior → Skill startup notices** use OMP's persisted
-`skills.showStartupDiagnostics` preference, not a separate browser setting.
-**Settings → Extensions & Tools → Skills → View skill diagnostics** remains
-available for a selected running session when notices are off. Inspection does
-not resume stopped sessions. Missing support or no running session is unavailable,
-not a clean result.
-
-## Notifications
-
-Turn on notifications in **Settings → Notifications**. Each browser keeps its own
-settings: which events notify (task finished, waiting for input, run failed,
-model switched automatically) and what happens while you use foxnio in another
-tab (an in-app toast, or always a system notification). Nothing is shown for the
-session you are viewing. Clicking a notification opens its session.
-
-- **Push** reaches the browser even when no foxnio tab is open. It needs a
-  secure context (HTTPS through your reverse proxy, or `localhost`), and the
-  foxnio server needs outbound HTTPS access to the browser vendors' push
-  services. foxnio generates its push (VAPID) keys on first use and stores them,
-  with the device list and the notification history, in its data directory
-  (owner-only), so they survive restarts.
-- On **iPhone and iPad** (iOS 16.4 or later), push works only in the app added
-  to the Home Screen.
-- In a secure context without push support, system notifications appear while
-  a foxnio tab is open. Over plain HTTP on a non-localhost address, browsers
-  allow no system notifications: only the in-app toasts shown while you use
-  foxnio remain.
-- Desktop browsers show notifications through the operating system's
-  notification center. Push delivery needs the browser process running.
-
-Completion notifications use omp's `prompt_result` and `session_settled` RPC
-frames (omp 18.3.1 or later).
-
-## Quick Start
-
-> **Not released yet.** `@telagod/foxnio` has not been published to GitHub Packages and the GitHub Release does not exist yet. The commands below work once the first release is out.
-
-foxnio is distributed through GitHub Packages, not the public npm registry. GitHub requires an access token to install any package from it, including public ones. Before the first install:
+foxnio is published to GitHub Packages, not to npmjs.com. GitHub asks for an access token to install any package from it, public ones included, so set that up once:
 
 1. Create a classic personal access token with the `read:packages` scope (GitHub → Settings → Developer settings → Personal access tokens (classic)).
-2. Map the `@telagod` scope to GitHub Packages and store the token in your user-level npm config. `npm login` asks for your GitHub username and the token as the password:
+2. Point the `@telagod` scope at GitHub Packages. `npm login` asks for your GitHub username and takes the token as the password:
 
-```bash
-npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
-```
+   ```bash
+   npm login --scope=@telagod --auth-type=legacy --registry=https://npm.pkg.github.com
+   ```
 
-Or write the two lines to `~/.npmrc` yourself:
+   That writes these two lines to `~/.npmrc`, which you can also add by hand:
 
-```ini
-@telagod:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=<token>
-```
+   ```ini
+   @telagod:registry=https://npm.pkg.github.com
+   //npm.pkg.github.com/:_authToken=<token>
+   ```
 
-Only the `@telagod` scope uses GitHub Packages; unscoped dependencies keep resolving from npmjs. With Bun, map the scope with the same token in `bunfig.toml` (`[install.scopes]`).
+Only the `@telagod` scope comes from GitHub Packages; foxnio's dependencies still install from npmjs.com. With Bun, map the scope and the token in `bunfig.toml` (`[install.scopes]`).
 
-The in-app updater runs the same install command and needs the same configuration. It checks that the new version can be read from the registry before it stops anything, and reports the missing configuration if it cannot.
-
-**Run directly without installing:**
-
-```bash
-npx @telagod/foxnio@latest
-```
-
-or
-```bash
-nix run github:telagod/foxnio-public
-```
-
-**Or install globally:**
+Then install and start foxnio:
 
 ```bash
 npm install -g @telagod/foxnio
 foxnio
 ```
 
-Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
+foxnio opens <http://127.0.0.1:30177> in your browser. `npx @telagod/foxnio@latest` runs it without installing.
 
-### Desktop installers
+### Desktop app
 
-Windows (NSIS installer and portable `.exe`), macOS (DMG and ZIP) and Linux (AppImage and `.deb`) installers are attached to each GitHub Release once one exists. They are **not code-signed or notarized**:
+Every [release](https://github.com/telagod/foxnio-public/releases/latest) has installers for Windows (setup and portable `.exe`), macOS (DMG and ZIP, for Apple silicon and Intel) and Linux (AppImage and `.deb`). The app starts its own foxnio server on port 30177, or on the next free port when that one is taken. It does not include `omp`: install that separately.
+
+The installers are not code-signed:
 
 - **Windows:** SmartScreen shows "Windows protected your PC". Choose **More info → Run anyway**.
-- **macOS:** Gatekeeper blocks the first launch. Right-click the app, choose **Open**, and confirm, or run `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
+- **macOS:** Gatekeeper blocks the first start. Right-click the app, choose **Open** and confirm, or run `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
 
-The desktop app still needs `omp` installed separately. It starts its own local server on port 30177, or on the next free port when that one is taken, and does not use the in-app updater: install a newer installer to update.
+### Nix
+
+```bash
+nix run github:telagod/foxnio-public
+```
+
+### Updates
+
+An npm or Bun install updates itself from **Settings → System & Updates**, which also tells you when `omp` has an update. foxnio learns about new versions from GitHub Releases and installs them through the registry setup above. It checks that the registry serves the new version before it stops anything. The desktop app does not update itself: install the newer installer. `OMP_WEB_DISABLE_AUTOUPDATE=1` turns the checks off.
 
 ### Moving from ompweb / omp-web
 
-The rename to foxnio changed the names of the background services. Old ones keep running (or fail to start) next to the new ones until you remove them by hand. Settings, sessions and notification history under `~/.omp` are shared and need no migration.
+Settings, sessions and notification history under `~/.omp` are shared and need no migration. The background services were renamed, though, and the old ones keep running (or keep failing to start) next to the new ones until you remove them:
 
 ```bash
 # npm package
@@ -163,268 +125,110 @@ rm ~/Library/LaunchAgents/com.kahme247.ompweb.plist
 ```
 
 ```powershell
-# Windows: scheduled task and shortcuts created by omp-web (stop its tray icon first)
+# Windows: scheduled task and shortcuts created by omp-web (quit its tray icon first)
 schtasks /delete /tn "omp-web" /f
 $programs = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
 Remove-Item "$programs\Startup\omp-web-tray.lnk", "$programs\omp-web.lnk", "$([Environment]::GetFolderPath('Desktop'))\omp-web.lnk" -ErrorAction SilentlyContinue
 ```
 
-Then install the foxnio services again (`foxnio systemd install`, `foxnio-launchd install`, `foxnio --install-tray`).
+Then install the foxnio service for your platform ([Background service](#background-service)).
 
-### CLI Options
+## Running foxnio
 
-```bash
-foxnio --port 8080                         # Custom port
-foxnio --hostname 0.0.0.0                  # Listen on network
-foxnio hash-password                       # Print the value for OMP_WEB_PASSWORD_HASH
-foxnio --no-open                           # Don't auto-open the browser
-foxnio --install-tray                      # Install Windows System Tray service & Desktop shortcuts
-foxnio --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
-foxnio --tray                              # Start background System Tray manager
-foxnio systemd install                     # Install Linux systemd user service
-foxnio --help                              # Show help
-foxnio --version                           # Show version
+### Command line
+
+```text
+foxnio [options]
+  -p, --port <port>        Server port (default 30177, env PORT)
+  -H, --hostname <host>    Bind address (default 127.0.0.1, env OMP_WEB_HOSTNAME)
+      --no-open            Do not open the browser
+      --install-tray       Install the system tray (Windows: with the background service and shortcuts)
+      --uninstall-tray     Remove it again
+      --tray               Start the tray
+  -h, --help               Show the help
+      --version            Show the version
+
+foxnio hash-password       Read a password from stdin and print the value for OMP_WEB_PASSWORD_HASH
+foxnio systemd <command>   Manage the Linux systemd service (same as foxnio-systemd)
+foxnio launchd <command>   Manage the macOS launchd agent (same as foxnio-launchd)
 ```
 
-### Password protection
+### Background service
 
-foxnio **never passes a plaintext password to the server**, because every
-`omp` session inherits the server's environment: an agent running `env` would
-print the password into its session file and send it to the model provider.
-`--password` stops `foxnio` at startup. An `OMP_WEB_PASSWORD` still works for
-now: `foxnio` hashes it at startup, keeps it out of the server's environment,
-and logs a warning with the hash to put in `OMP_WEB_PASSWORD_HASH` instead.
-Switch soon: agents can still read the plaintext from the `foxnio` launcher
-process, and each start makes a new hash, so every restart signs all browsers
-out. Setting both variables stops `foxnio`; remove `OMP_WEB_PASSWORD`.
+The services start foxnio at login, restart it when it stops unexpectedly, and do not open a browser. On Linux and macOS, the environment variables set at install time (port, bind address, password) go into the service configuration, with a password stored only as its hash; install with `OMP_WEB_NO_OPEN=0` there to have the browser opened.
 
-Generate a hash instead and give that to the server:
+**Linux (systemd user service)**, after `npm install -g`:
 
 ```bash
-foxnio hash-password                       # asks twice, input hidden
+foxnio systemd install        # create ~/.omp/agent/web-service.env, install and start foxnio.service
+foxnio systemd status         # also start, stop, restart, open, uninstall
+journalctl --user -u foxnio -f
+```
+
+The service runs the `foxnio` it finds at install time (`OMP_WEB_SYSTEMD_BIN` overrides it). It reads its port, bind address and password hash from `~/.omp/agent/web-service.env` (mode `600`): edit that file and restart the service, no reinstall needed. To serve your network, install with a password:
+
+```bash
+OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='change-me' foxnio systemd install
+```
+
+On a headless server, `loginctl enable-linger "$USER"` keeps the service running after you log out.
+
+**Linux tray** (KDE Plasma and other desktops with a StatusNotifierItem host):
+
+```bash
+foxnio-tray --install         # icons, autostart entry, start the tray
+foxnio-tray --status
+foxnio-tray --uninstall
+```
+
+The tray menu opens the web UI, copies its URL, starts, stops and restarts the systemd service, shows the logs, changes the port and the web password, and toggles autostart (`~/.config/autostart/foxnio-tray.desktop`). **Expose to Network** binds the service to `0.0.0.0`; it asks for a password first (through `kdialog` or `zenity`) when none is set.
+
+**macOS (launchd agent):**
+
+```bash
+foxnio launchd install        # also status, uninstall
+```
+
+The agent runs `npx --yes @telagod/foxnio@latest`, so it needs the GitHub Packages setup from [npm package](#npm-package). Pin a version with `foxnio launchd install @telagod/foxnio@0.6.2` (or `OMP_WEB_PKG`). The plist is `~/Library/LaunchAgents/com.telagod.foxnio.plist` (mode `600`), the log `~/Library/Logs/foxnio/foxnio.log`.
+
+**Windows (tray and background service):**
+
+```powershell
+foxnio --install-tray         # tray, background service, logon autostart, Desktop and Start Menu shortcuts
+foxnio --uninstall-tray
+```
+
+Manage it from **Settings → System & Updates → Windows Background Service & System Tray**. The tray and the service read `OMP_WEB_PASSWORD_HASH` and `OMP_WEB_TRUSTED_HEADER_SHA256` from your user or system environment (for example `setx OMP_WEB_PASSWORD_HASH "scrypt$…"`) each time they start the server, so a change applies at the next server restart without signing out of Windows.
+
+## Remote access and security
+
+foxnio runs `omp` agents that have a shell: anyone who can use its web UI can run commands as your user. It therefore binds to `127.0.0.1` unless you choose otherwise.
+
+- **Without a password**, foxnio answers only requests whose `Host` header is a loopback name (`localhost`, `127.0.0.0/8`, `[::1]`) and returns `403` for anything else. That stops a web page you visit from reaching your agent through DNS rebinding. To use a password-less server through a reverse proxy, tunnel or Tailscale name, list that name in `OMP_WEB_ALLOWED_HOSTS`, or better, set a password.
+- **Binding to any other address requires a password hash** (`OMP_WEB_PASSWORD_HASH`). Serve foxnio through HTTPS (a reverse proxy or a VPN) so the password and the session cookie never cross the network in plain text.
+- **Sign-in is throttled:** five wrong passwords lock the client out for 15 seconds, doubling up to five minutes (HTTP `429`).
+- **Exported sessions** ("View full history") open in a sandbox without your cookie or the API, because an exported conversation can contain HTML that a model or a web page wrote. Since omp 18.14 that page loads its viewer from omp's CDN (`stencil.so`), so it needs internet access to render, a downloaded copy too.
+
+### Password
+
+foxnio never hands the server a plaintext password. Every `omp` session inherits the server's environment, and an agent that runs `env` would copy the password into its session file and send it to the model provider. Give foxnio a hash instead:
+
+```bash
+foxnio hash-password                                   # asks twice, input hidden
 echo "a-long-random-password" | foxnio hash-password   # or pipe it in
 
 OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' foxnio
 ```
 
-`foxnio hash-password` reads the password from stdin — never from a command
-line argument — so it stays out of your shell history and out of `ps` output.
-The hash is scrypt (N = 2^15, r = 8, p = 1) with a fresh 16-byte salt, printed
-in the self-describing form `scrypt$<ln>$<r>$<p>$<salt>$<digest>`. Anyone who
-reads the hash cannot sign in with it, and it cannot be turned back into the
-password.
+`foxnio hash-password` reads the password from stdin, never from an argument, so it stays out of your shell history and out of `ps`. The hash is scrypt (N = 2^15, r = 8, p = 1) with a fresh 16-byte salt, printed as `scrypt$<ln>$<r>$<p>$<salt>$<digest>`. Nobody can sign in with the hash or turn it back into the password. Session cookies are signed with a random key from `~/.omp/agent/omp-web/web-auth-secret.json` (mode `0600`) mixed with the hash, so changing the password signs everyone out, and the stored hash alone cannot forge a session.
 
-Sessions are not signed with the password hash. A random signing key is created
-on first start in `~/.omp/agent/omp-web/web-auth-secret.json` (mode `0600`) and
-mixed with the hash, so changing the password still signs everyone out while the
-stored hash alone is never enough to forge a session.
+`--password` is refused. A legacy `OMP_WEB_PASSWORD` still works for now: foxnio hashes it at startup, keeps it out of the server's environment and logs the hash to use instead. Switch soon: agents can still read the plaintext from the `foxnio` launcher process, and every start creates a new hash, which signs all browsers out. Setting both variables is refused.
 
-**Without a password**, foxnio only answers requests whose `Host` header is a loopback name (`localhost`, `127.0.0.0/8`, `[::1]`) and returns `403` for anything else. That stops a web page you happen to visit from reaching your local agent through DNS rebinding. To reach a password-less server through a reverse proxy, tunnel or Tailscale name, list that name in `OMP_WEB_ALLOWED_HOSTS` (better: set a password). Failed sign-ins are throttled: five wrong passwords lock the client out for 15 seconds, doubling up to five minutes (HTTP `429`).
+### Skipping the password on trusted networks
 
-The exported-session page ("View full history") opens in a sandbox with no access to your session cookie or the API, because an exported conversation can contain HTML written by a model or a web page. With omp 18.14 or later the page loads its viewer from omp's CDN (`stencil.so`), so the browser needs internet access to render it, and a downloaded export is not readable offline.
+foxnio cannot see the client's address, so it leaves that decision to your reverse proxy. The proxy sends a secret in the `X-Omp-Web-Auth` header, and foxnio holds only that secret's SHA-256 digest in `OMP_WEB_TRUSTED_HEADER_SHA256`. A request whose header hashes to that digest counts as signed in; everyone else signs in with the password. Without a password there is nothing to skip and the header is ignored. Keep foxnio bound to `127.0.0.1` so only the proxy reaches it.
 
-The service installers (`foxnio systemd install`, `foxnio-launchd install`, the
-Linux tray, and the Windows service) still accept `OMP_WEB_PASSWORD` at install
-time and hash it before writing it to their configuration. Only the hash is
-stored.
-
-On Windows, the tray and background service read `OMP_WEB_PASSWORD_HASH` from
-your user or system environment (for example `setx OMP_WEB_PASSWORD_HASH
-"scrypt$…"`) each time they start the server, not from the environment they were
-started with. Changing or removing the hash takes effect at the next server
-restart, without signing out of Windows.
-
-### Run as a Windows Service (System Tray)
-
-Install foxnio as a Windows background service with a system tray icon and autostart at login:
-
-```bash
-foxnio --install-tray
-```
-
-Manage it from **Settings → System & Updates → Windows Background Service**, or via CLI:
-
-```bash
-foxnio --tray          # Start the tray manager
-foxnio --uninstall-tray
-```
-
-Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray.
-
-### Run as a macOS Service (launchd)
-
-Install foxnio as a launchd user agent that starts at login and restarts on crash:
-
-```bash
-npx --yes @telagod/foxnio@latest foxnio-launchd install
-```
-
-Manage it with:
-
-```bash
-npx --yes @telagod/foxnio@latest foxnio-launchd status      # Show service state
-npx --yes @telagod/foxnio@latest foxnio-launchd uninstall   # Stop and remove
-```
-
-The service runs `npx --yes @telagod/foxnio@latest`; pass a package spec to pin a
-version, e.g. `foxnio-launchd install @telagod/foxnio@0.3.6`. All
-[environment variables](#environment-variables) are read at install time and baked
-into the plist, plus `OMP_WEB_PKG` (package spec, same as the positional argument).
-As a service, the browser is **not** auto-opened by default — install with
-`OMP_WEB_NO_OPEN=0` to restore that.
-
-```bash
-OMP_WEB_PASSWORD=secret npx --yes @telagod/foxnio@latest foxnio-launchd install
-```
-
-`OMP_WEB_PASSWORD` is hashed at install time; the plist holds the hash, never
-the password. Pass `OMP_WEB_PASSWORD_HASH` to install a hash you generated with
-`foxnio hash-password`.
-
-When binding to a non-loopback host, require authentication (`OMP_WEB_PASSWORD_HASH`
-or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
-Never expose the unauthenticated web UI or send its password/session cookie over
-plaintext HTTP.
-
-Logs go to `~/Library/Logs/foxnio/foxnio.log` and the plist lives at
-`~/Library/LaunchAgents/com.telagod.foxnio.plist` (mode 600; the password
-hash — not the password — is stored there).
-
-### Run as a Linux Service (systemd)
-
-Install foxnio as a systemd **user** service that starts at login and restarts
-on crash:
-
-```bash
-npx --yes --package=@telagod/foxnio@latest foxnio-systemd install
-```
-The installer creates `~/.omp/agent/web-service.env` automatically with mode
-`600`; no manual file creation is required. The explicit `--package` form makes
-`npx` run the systemd executable from the selected package.
-
-To bind the service to all IPv4 interfaces for LAN access, set a password while
-installing:
-
-```bash
-OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='change-me' \
-  npx --yes --package=@telagod/foxnio@latest foxnio-systemd install
-```
-
-The password is hashed before it is written to `web-service.env`.
-
-Manage it with:
-
-```bash
-npx --yes --package=@telagod/foxnio@latest foxnio-systemd status    # Show service state
-npx --yes --package=@telagod/foxnio@latest foxnio-systemd restart   # start / stop / restart
-npx --yes --package=@telagod/foxnio@latest foxnio-systemd uninstall # Stop and remove
-```
-
-The service runs the locally installed `foxnio` binary resolved at install time
-(override with `OMP_WEB_SYSTEMD_BIN`). Runtime configuration lives in
-`~/.omp/agent/web-service.env` — the tray (or any editor) can change the port,
-hostname, and password hash there and just restart the service; no reinstall
-needed.
-Install-time [environment variables](#environment-variables) are baked into
-that file. As a service, the browser is **not** auto-opened by default. The
-unit lives at `~/.config/systemd/user/foxnio.service` and logs go to the
-journal:
-
-```bash
-journalctl --user -u foxnio -f
-```
-
-On a headless server, enable user lingering if the service must keep running
-after the last login session ends:
-
-```bash
-loginctl enable-linger "$USER"
-```
-
-### Linux System Tray (KDE Plasma and compatible)
-
-On Linux, `foxnio-tray` registers a StatusNotifierItem tray icon with a context
-menu: open the web UI, copy its URL, start/stop/restart the systemd service,
-view logs, expose the web UI to the network, change the port, set the web
-password, toggle autostart, and quit the tray.
-
-```bash
-npx --yes @telagod/foxnio@latest foxnio-tray --install      # Icons + autostart + start tray
-npx --yes @telagod/foxnio@latest foxnio-tray --status       # Tray and service status
-npx --yes @telagod/foxnio@latest foxnio-tray --uninstall    # Remove autostart, stop tray
-```
-
-**Expose to Network** rebinds the service from `127.0.0.1` to `0.0.0.0` so the
-web UI is reachable from your LAN or VPN (e.g. Tailscale). Leaving loopback
-requires a web password — the tray prompts for one via `kdialog`/`zenity` when
-needed, and stores its hash. **Change Port…** and **Set Web Password…** edit
-`~/.omp/agent/web-service.env` and restart the service. When binding to a
-non-loopback host, use HTTPS through a trusted reverse proxy or VPN for remote
-access.
-
-"Start with Plasma" in the tray menu toggles a desktop autostart entry at
-`~/.config/autostart/foxnio-tray.desktop`. Requires a running StatusNotifierItem
-host (KDE Plasma, and most Wayland/X11 desktops).
-
-## Features
-
-- **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
-- **Message Copy**: Copy user messages and completed assistant replies as rendered plain text or original Markdown using the buttons below each message. Thinking, tool output, and message controls are excluded. Oversized messages that use the raw-text viewer copy their full source in either format.
-- **Queue Deletion Confirmation**: Preview and confirm before cancelling queued follow-ups or steered messages in OMP. Requires native `remove_queued_message` support; already-delivered messages cannot be recalled.
-- **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
-- **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
-- **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
-- **Tool Presets & Workspace Launch Config**: New browser profiles default to `full`, matching the CLI. `default` limits built-in tools to `read,bash,edit,write`; `full` keeps OMP's complete default toolset, including search and subagents. The active session toolset is shown in chat. Configure a workspace's OMP profile and extra launch arguments from its sidebar menu; changes apply on the next start or reload. Preset selection persists to localStorage.
-- **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
-- **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
-- **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.
-- **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
-- **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/foxnio`.
-- **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
-- **Notifications**: Desktop and mobile (PWA) notifications for finished tasks, questions waiting for an answer, failed runs, and automatic model switches, with Web Push when served over HTTPS. See [Notifications](#notifications).
-- **Web-based Settings** (10 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Notifications, System & Updates.
-- **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
-- **UI Themes & Localization**: Warm paper light/dark themes plus an omp.sh-inspired midnight (`omp`) theme, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
-
-## Environment Variables
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `PORT` | Server port | `30177` |
-| `OMP_WEB_HOSTNAME` | Server bind host | `127.0.0.1` |
-| `OMP_WEB_PASSWORD_HASH` | Optional scrypt hash of the web login password, from `foxnio hash-password`. Required for a non-loopback bind | _None (auth disabled)_ |
-| `OMP_WEB_TRUSTED_HEADER_SHA256` | SHA-256 hex digest of the secret a trusted reverse proxy sends in `X-Omp-Web-Auth` to skip the password for that request; see [Skipping the password on trusted networks](#skipping-the-password-on-trusted-networks) | _None (disabled)_ |
-| `OMP_WEB_ALLOWED_HOSTS` | Comma-separated `Host` names (`name` or `*.example.com`) accepted when no password is configured, in addition to loopback names | _None_ |
-| `OMP_WEB_PUSH_ALLOWED_HOSTS` | Extra Web Push service hostnames (`name` or `*.example.com`) accepted for push subscriptions, in addition to Google (FCM), Mozilla, Apple and Windows | _None_ |
-| `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
-| `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
-| `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `foxnio`. Any other value is used as-is. Restart after changing | `foxnio` |
-| `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
-| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
-| `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
-| `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
-| `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
-| `OMP_WEB_STT_MODEL` | Model name for the STT endpoint. Without an endpoint: an omp speech-to-text model run with omp's logins, such as `openai-codex/codex-transcribe` (ChatGPT subscription; needs an omp version with that model) | _None (disabled without an endpoint)_ |
-
-See [`docs/desktop-packaging.md`](./docs/desktop-packaging.md) for desktop installer builds. The first desktop package is a local foxnio launcher and still requires `omp` to be installed separately; Android and iOS use the authenticated PWA as remote clients over HTTPS.
-
-**`OMP_WEB_NAME` and installed apps.** An installed app (PWA) is usually named after the page it was installed from. If you later change `OMP_WEB_NAME`, or reach foxnio through a different address while `OMP_WEB_NAME` is `url`, `host` or `domain`, your operating system may rename the installed app as well. Leave `OMP_WEB_NAME` empty, or set a name that identifies this foxnio server whatever domain name or address is used to reach it.
-
-## Skipping the password on trusted networks
-
-foxnio cannot see the client's address itself, so it leaves the decision to
-your reverse proxy. The proxy sends a secret in the `X-Omp-Web-Auth` header,
-and foxnio holds only that secret's SHA-256 digest in
-`OMP_WEB_TRUSTED_HEADER_SHA256`. A request whose header hashes to that digest
-is treated as signed in. Everyone else still signs in with the password whose
-hash is in `OMP_WEB_PASSWORD_HASH`; without a password there is nothing to
-skip, and the header is ignored. Keep foxnio bound to `127.0.0.1` so only the
-proxy reaches it.
-
-Generate the secret and its digest without typing the secret on a command line,
-so it never lands in your shell history. This writes a random secret straight
-into an nginx include file readable only by root and nginx, and prints only the
-digest:
+Generate the secret without typing it on a command line, so it never lands in your shell history. This writes a random secret into an nginx include file readable only by root and nginx, and prints only the digest:
 
 ```bash
 secret=$(openssl rand -hex 32)
@@ -434,18 +238,9 @@ printf %s "$secret" | sha256sum | cut -d' ' -f1
 unset secret
 ```
 
-Use your nginx group in place of `www-data` (`nginx` on some distributions).
-Set the printed digest as `OMP_WEB_TRUSTED_HEADER_SHA256`. The command history
-holds only the commands, never the secret. On Windows, the tray and background
-service read it from your user or system environment, like
-`OMP_WEB_PASSWORD_HASH`.
+Use your nginx group in place of `www-data` (`nginx` on some distributions) and set the printed digest as `OMP_WEB_TRUSTED_HEADER_SHA256`. Always generate the secret this way rather than reusing a password: foxnio stores a fast, unsalted SHA-256 digest, which is safe only for a long random secret.
 
-Always generate the secret this way; do not reuse a password or another chosen
-value. foxnio stores only a fast, unsalted SHA-256 digest, which is safe only
-for a long random secret: anyone who reads the digest could recover a short or
-guessable one with a dictionary attack.
-
-With nginx, send the secret only to the address ranges you trust:
+Send the secret only to the address ranges you trust:
 
 ```nginx
 # http {} context
@@ -459,36 +254,20 @@ include /etc/nginx/foxnio-auth.conf;  # the map written above
 proxy_set_header X-Omp-Web-Auth $foxnio_auth;
 ```
 
-Always set the header, as above: the empty value for other clients replaces any
-`X-Omp-Web-Auth` a client sends itself. nginx only inherits `proxy_set_header`
-from outer blocks when a block sets none of its own, so put this line next to
-the location's other `proxy_set_header` lines.
+Always set the header as above: the empty value for other clients replaces any `X-Omp-Web-Auth` a client sends itself. nginx inherits `proxy_set_header` from outer blocks only when a block sets none of its own, so put this line next to the location's other `proxy_set_header` lines.
 
-Serve foxnio only for its own hostname: give its `server` block an explicit
-`server_name`, and add a `default_server` block that answers every other
-hostname with `return 444;`. Otherwise a web page that a trusted browser visits
-can point its own domain name at your nginx (DNS rebinding) and have nginx add
-the secret to its requests.
+Serve foxnio only for its own hostname: give its `server` block an explicit `server_name`, and add a `default_server` block that answers every other hostname with `return 444;`. Otherwise a web page that a trusted browser visits can point its own domain at your nginx (DNS rebinding) and have nginx add the secret to its requests.
 
-`geo` checks `$remote_addr`, the address that connected to nginx. When clients
-reach nginx through another proxy, use the
-[`realip` module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) to
-replace it with the real client address. It does so only for connections from
-addresses you list in `set_real_ip_from`:
+`geo` checks `$remote_addr`, the address that connected to nginx. When clients reach nginx through another proxy, use the [`realip` module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) to replace it with the real client address, which it does only for connections from the addresses listed in `set_real_ip_from`:
 
-- **Cloudflare (proxied DNS):** trust `CF-Connecting-IP`, and only from
-  Cloudflare. List every range from <https://www.cloudflare.com/ips-v4/> and
-  <https://www.cloudflare.com/ips-v6/>, and keep them up to date. Use this only
-  when Cloudflare is really in front.
+- **Cloudflare (proxied DNS):** trust `CF-Connecting-IP`, and only from Cloudflare. List every range from <https://www.cloudflare.com/ips-v4/> and <https://www.cloudflare.com/ips-v6/> and keep them up to date.
 
   ```nginx
   set_real_ip_from 173.245.48.0/20;  # ...one line per Cloudflare range
   real_ip_header   CF-Connecting-IP;
   ```
 
-  Also refuse connections that come neither from Cloudflare nor from your
-  trusted ranges. `$realip_remote_addr` is the address that actually
-  connected, before `realip` replaced it:
+  Also refuse connections that come neither from Cloudflare nor from your trusted ranges. `$realip_remote_addr` is the address that actually connected:
 
   ```nginx
   geo $realip_remote_addr $foxnio_peer_allowed {
@@ -500,13 +279,7 @@ addresses you list in `set_real_ip_from`:
   if ($foxnio_peer_allowed = 0) { return 403; }
   ```
 
-- **Cloudflare Tunnel (`cloudflared`):** the tunnel connects to nginx from
-  `cloudflared`'s address (`127.0.0.1` when it runs on the same machine), so
-  trust `CF-Connecting-IP` from there: `set_real_ip_from 127.0.0.1;` and
-  `real_ip_header CF-Connecting-IP;`. Any local process can then send its own
-  `CF-Connecting-IP` to nginx and claim a trusted address, and a local
-  connection without that header keeps `127.0.0.1`, so listing `127.0.0.1` in
-  `$foxnio_trusted` trusts every local process that connects to nginx.
+- **Cloudflare Tunnel (`cloudflared`):** the tunnel connects from `cloudflared`'s address (`127.0.0.1` when it runs on the same machine), so use `set_real_ip_from 127.0.0.1;` and `real_ip_header CF-Connecting-IP;`. Any local process can then claim a trusted address by sending its own `CF-Connecting-IP`, and a local connection without that header keeps `127.0.0.1`, so listing `127.0.0.1` in `$foxnio_trusted` trusts every local process that connects to nginx.
 - **Any other proxy or load balancer:**
 
   ```nginx
@@ -515,9 +288,47 @@ addresses you list in `set_real_ip_from`:
   real_ip_recursive on;
   ```
 
-  `real_ip_recursive on` reads `X-Forwarded-For` from the right and skips the
-  hops listed in `set_real_ip_from`. Addresses a client adds itself are
-  ignored.
+  `real_ip_recursive on` reads `X-Forwarded-For` from the right and skips the hops listed in `set_real_ip_from`, so addresses a client adds itself are ignored.
+
+## Phones, notifications and the app
+
+**Install as an app:** sign in first, then use your browser's install menu. The app manifest and its icons are served behind the password (the icons are embedded, because Android's installer fetches icon URLs without cookies), so installing works behind Cloudflare Access or another login without a bypass rule. The app needs the server and does not work offline. On Android and iOS it is a remote client of the foxnio server on your computer or server.
+
+**Notifications:** turn them on in **Settings → Notifications**. Each browser keeps its own choices: which events notify (task finished, waiting for your input, run failed, model switched automatically) and what happens while foxnio is open in another tab (an in-app toast, or always a system notification). The session you are looking at never notifies, and clicking a notification opens its session.
+
+- **Web Push** reaches the browser even when no foxnio tab is open. It needs a secure context (HTTPS, or `localhost`) and outbound HTTPS from the foxnio server to the browser vendors' push services. foxnio creates its push (VAPID) keys on first use and keeps them with the device list and the notification history in its data directory (owner-only).
+- **iPhone and iPad** (iOS 16.4 or later) receive push only in the app added to the Home Screen.
+- Without push support, a secure context still shows system notifications while a foxnio tab is open. Over plain HTTP on an address other than `localhost`, browsers allow only foxnio's in-app toasts.
+
+## Configuration
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PORT` | Server port | `30177` |
+| `OMP_WEB_HOSTNAME` | Bind address | `127.0.0.1` |
+| `OMP_WEB_PASSWORD_HASH` | scrypt hash of the web password, from `foxnio hash-password`. Required for a non-loopback bind | _none (no sign-in)_ |
+| `OMP_WEB_TRUSTED_HEADER_SHA256` | SHA-256 hex digest of the secret a trusted reverse proxy sends in `X-Omp-Web-Auth` ([Skipping the password on trusted networks](#skipping-the-password-on-trusted-networks)) | _none_ |
+| `OMP_WEB_ALLOWED_HOSTS` | Comma-separated `Host` names (`name` or `*.example.com`) accepted without a password, besides loopback names | _none_ |
+| `OMP_WEB_PUSH_ALLOWED_HOSTS` | Extra Web Push service hosts (`name` or `*.example.com`), besides Google (FCM), Mozilla, Apple and Windows | _none_ |
+| `OMP_WEB_OMP_BIN` | Path of the `omp` executable | found on `PATH` |
+| `PI_CODING_AGENT_DIR` | omp's agent directory, as for omp itself | `~/.omp/agent` |
+| `OMP_WEB_NO_OPEN` | `1`: do not open the browser | `0` |
+| `OMP_WEB_DISABLE_AUTOUPDATE` | `1`: no update checks and no in-app updates (restart to apply) | `0` |
+| `OMP_WEB_NAME` | Name in browser tabs and installed apps. `url`, `host` or `domain` uses the hostname the browser connected to (localhost and IP addresses keep `foxnio`); anything else is used as written. Restart to apply | `foxnio` |
+| `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible speech-to-text endpoint for dictation. Unset: transcribe with `OMP_WEB_STT_MODEL` through omp's own logins | _none_ |
+| `OMP_WEB_STT_KEY` | API key for that endpoint | _none_ |
+| `OMP_WEB_STT_MODEL` | Model for the endpoint. Without an endpoint, an omp speech-to-text model such as `openai-codex/codex-transcribe` (ChatGPT subscription) | _none (dictation off without an endpoint)_ |
+| `OMP_WEB_DEV_ORIGIN` | Extra hostname the development server accepts (no scheme or port) | _none_ |
+
+An installed app is usually named after the page it was installed from, so changing `OMP_WEB_NAME`, or reaching foxnio at another address while it is `url`, `host` or `domain`, can rename the installed app. Leave it unset, or pick a name that identifies this server whatever address you use.
+
+The desktop app has a few settings of its own (port and bundled runtime); see [docs/desktop-packaging.md](./docs/desktop-packaging.md).
+
+## omp compatibility
+
+foxnio never loads omp's code: omp's packages need Bun, and foxnio runs on Node.js. It drives the `omp` executable instead, with one `omp --mode rpc-ui` process per open session and subcommands such as `omp skill list`, and it reads omp's files under `~/.omp/agent` directly ([DESIGN.md](./DESIGN.md)).
+
+omp publishes a release every few days. [`.github/omp-version.json`](./.github/omp-version.json) records the omp version foxnio is verified against. Every day a [workflow](./.github/workflows/omp-tracking.yml) looks for a newer omp release, runs foxnio's tests that drive the real `omp` against it, and opens an issue labeled [`omp-update`](https://github.com/telagod/foxnio-public/issues?q=label%3Aomp-update) with the result and what changed in omp's RPC protocol, CLI flags, settings and session format.
 
 ## Development
 
@@ -525,35 +336,28 @@ addresses you list in `set_real_ip_from`:
 git clone https://github.com/telagod/foxnio-public.git foxnio
 cd foxnio
 npm install
-npm run dev
+npm run dev        # http://127.0.0.1:30178
 ```
-
-The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
-
-The development server allows loopback and RFC1918 private IPv4 origins
-(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
-or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
 
 ```bash
-OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
+npm run typecheck
+npm run lint
+npm test
 ```
 
-For a persistent setup, set the variable in your local environment or service
-configuration and restart the dev server. This does not change the bind address
-or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
-a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
-
-### Checks
+`npm test` never starts `omp`. The tests that drive the real `omp` (from `OMP_WEB_OMP_BIN` or your `PATH`, isolated from your credentials and config) are opt-in:
 
 ```bash
-npm run typecheck   # Type check (TypeScript)
-npm run lint        # ESLint
-npm test            # Run test suite
+OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs
+OMP_WEB_TEST_NATIVE_EDIT=1 node --experimental-strip-types --test lib/omp/session-edit.native.test.mjs
 ```
 
-> **Note**: Do not run `npm run build` during local dev — it populates `.next/` and can break `npm run dev`.
+Do not run `npm run build` in the checkout you use for `npm run dev`: the production build writes `.next/` and breaks the dev server.
 
-## License & Credits
+The development server accepts loopback and private IPv4 origins (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). For a tunnel or proxy hostname, start it with `OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev`. A private IPv6 origin has to be given the same way (for example `[fd00::1]`).
 
-- Forked from [agegr/pi-web](https://github.com/agegr/pi-web) (MIT) and adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
-- Released under the [MIT License](./LICENSE).
+More: [AGENTS.md](./AGENTS.md) (architecture, conventions and traps), [CONTRIBUTING.md](./CONTRIBUTING.md), [docs/release.md](./docs/release.md), [docs/desktop-packaging.md](./docs/desktop-packaging.md).
+
+## License and credits
+
+MIT, see [LICENSE](./LICENSE). foxnio is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb), which grew out of [agegr/pi-web](https://github.com/agegr/pi-web). The upstream community meets on the [ompweb Discord](https://discord.gg/evqgGzRfM5).
