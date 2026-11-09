@@ -74,9 +74,10 @@ composer still covers the viewport.
 
 Legacy `chief.db`, preferences and dispatch records are preserved as history.
 The one-time policy migration reads only legacy autonomy rows, read-only.
-`/api/chief/*` returns 410; no old approval may execute. The wake loop persists
-dedupe and daily-budget metadata only; pending retries stay in memory and are
-reconstructed from current native signals after restart.
+The legacy Chief modules and `/api/chief/*` routes are deleted; no old approval
+may execute. The wake loop persists dedupe and daily-budget metadata only;
+pending retries stay in memory and are reconstructed from current native signals
+after restart.
 
 ---
 

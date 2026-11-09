@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FoxServiceConfig } from "@/lib/fox-service-config";
 import type { FoxServiceStatus } from "@/lib/fox-service";
-import { foxServiceHealth } from "@/lib/fox-workbench";
+import { foxServiceHealth } from "@/lib/fox-service-health";
 import { useI18n } from "@/lib/i18n";
 
 export function useFoxService() {

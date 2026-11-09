@@ -252,8 +252,9 @@ OMP todos or reads worker transcripts; FOX reviews the evidence itself.
 
 Historical `chief.db`, `dispatches.json` and preference files remain untouched.
 A one-time read-only migration copies only autonomy policy; old tickets and
-approvals do not become executable state. Retired `/api/chief/*` routes return
-410. Historical code remains dormant for rollback, not part of new workflows.
+approvals do not become executable state, and no old approval can authorize
+execution. The legacy Chief modules and `/api/chief/*` routes are deleted; the
+database and dispatch/preference records stay on disk as history only.
 
 The scheduler may only call existing RPC/session operations and existing
 file/Git APIs. It must not add a browser-triggered host execution path.

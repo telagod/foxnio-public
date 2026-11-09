@@ -560,12 +560,15 @@ as the store, not a security boundary.
 Batch 3, rollback requires the archived JSON and a revert of the deletion
 commits; approvals are intentionally not recoverable.
 
-## 7. Decisions needed
+## 7. Decision record (superseded by Status)
+
+The Status section records the implemented outcome. The table below is the
+original proposal; where the two differ, Status wins.
 
 | ID | Question | Recommendation |
 |---|---|---|
 | D1 | Keep `PREFERENCES.md`? | **Drop it.** Memory is authoritative; a file mirror either needs `write` in FOX's toolset (risk) or a new server store (violates the principle). |
-| D2 | Autonomy shape | **Three levels in `service.json`** (`observe`/`ask`/`auto`). `suggest` and `approve` were indistinguishable in enforcement. |
+| D2 | Autonomy shape | **Three levels in `service.json`** (`observe`/`confirm`/`auto`). `suggest` and `approve` were indistinguishable in enforcement. |
 | D3 | Todo durability | **Accept session-scoped todos**, export on reset. A database for this is the thing we are removing. |
 | D4 | Hard approval | **Accept model-mediated `ask`**; keep `observe` as the hard switch. If hard approval is required, keep the approval table and drop Option A. |
 | D5 | Lineage mechanism | **Post-spawn `new_session { parentSession }`**, then adopt the id. No header rewriting by foxnio; OMP owns session files. |
