@@ -1,39 +1,16 @@
-// omp-web service worker: shows notifications and opens their session on click.
+// Clean up legacy push subscriptions and preserve existing notification clicks.
 // It does not cache anything; the app stays online-only.
 
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
-
-self.addEventListener("push", (event) => {
-  let data = {};
+self.addEventListener("activate", (event) => event.waitUntil((async () => {
   try {
-    data = event.data ? event.data.json() : {};
-  } catch {
-    // Unreadable payload: still show something (iOS revokes silent pushes).
-  }
-  const shown = {
-    type: data.type === "error" ? "error" : "info",
-    title: data.title || "foxnio",
-    body: data.body || "",
-    tag: data.tag || "",
-    sessionId: data.sessionId || "",
-  };
-  event.waitUntil(
-    (async () => {
-      await self.registration.showNotification(shown.title, {
-        body: shown.body,
-        icon: "/icon-192.png",
-        badge: "/badge-96.png",
-        tag: shown.tag || undefined,
-        renotify: Boolean(shown.tag),
-        data: { url: data.url || "/", sessionId: shown.sessionId },
-      });
-      // Open tabs list it in their Notifications tab, like a notification the page showed itself.
-      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      for (const client of windows) client.postMessage({ type: "omp-notification-shown", notification: shown });
-    })(),
-  );
-});
+    const subscription = await self.registration.pushManager.getSubscription();
+    await subscription?.unsubscribe();
+    const notifications = await self.registration.getNotifications();
+    for (const notification of notifications) notification.close();
+  } catch {}
+  await self.clients.claim();
+})()));
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

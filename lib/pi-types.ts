@@ -260,7 +260,7 @@ export interface HostToolDefinition {
   description: string;
   parameters: Record<string, unknown>;
   hidden?: boolean;
-  loadMode?: "always" | "discoverable" | "explicit";
+  loadMode?: "essential" | "always" | "discoverable" | "explicit";
 }
 
 export interface HostToolCallFrame {

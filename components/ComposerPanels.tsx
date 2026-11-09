@@ -303,7 +303,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
                     transition: "transform var(--dur-med) var(--ease-out-warm)",
                   }}
                 />
-                {t("chatWindow.completedSubagents", { count: completed.length })}
+                {t("chatWindow.endedSubagents", { count: completed.length })}
               </button>
               {completedExpanded && (
                 <div className="flex flex-wrap gap-1.5">{completed.map(renderChip)}</div>

@@ -8,14 +8,14 @@ import type { SidebarSectionId, SidebarUiState } from "./sidebar-types";
 // pure reducers the sidebar container applies. No React, no DOM, no clock:
 // the container owns the state, the scheduler is injected.
 //
-// Persisted: expanded workspaces, collapsed workspaces, collapsed sections and
-// the sort mode. The recent-runs limit is owned by the settings hook
+// Persisted: collapsed workspaces, collapsed sections and the sort mode.
+// Workspace expansion itself is derived from activity (see sidebar-model), so
+// it is not persisted; the recent-runs limit is owned by the settings hook
 // (`hooks/useRecentRunsLimit`); it is only read here. Everything else (extra
 // rows, folded forks, sticky workspaces, frozen order, running-only) lives for
 // the page's life.
 // ============================================================================
 
-export const EXPANDED_PROJECTS_STORAGE_KEY = "omp-web:expanded-projects";
 export const COLLAPSED_PROJECTS_STORAGE_KEY = "omp-web:collapsed-projects";
 export const COLLAPSED_SECTIONS_STORAGE_KEY = "omp-web:sidebar-collapsed-sections";
 export const PROJECT_SORT_STORAGE_KEY = "omp-web:project-sort";
@@ -42,10 +42,9 @@ export function sectionExtraRowsKey(section: SidebarSectionId): string {
 
 export function createDefaultSidebarUiState(): SidebarUiState {
   return {
-    sortMode: "none",
+    sortMode: "updated",
     runningOnly: false,
     recentRunsLimit: DEFAULT_LIMIT,
-    expandedProjects: new Set(),
     collapsedProjects: new Set(),
     collapsedSections: new Set(),
     extraRows: new Map(),
@@ -77,9 +76,9 @@ function readProjectKeys(storage: SidebarStorage, key: string): Set<string> {
 function readSortMode(storage: SidebarStorage): ProjectSortMode {
   try {
     const raw = storage.getItem(PROJECT_SORT_STORAGE_KEY);
-    return raw === "alphabetical" || raw === "updated" ? raw : "none";
+    return raw === "alphabetical" || raw === "none" ? raw : "updated";
   } catch {
-    return "none";
+    return "updated";
   }
 }
 
@@ -106,13 +105,12 @@ export function loadSidebarUiState(storage: SidebarStorage | null | undefined): 
   if (!storage) return defaults;
   const sections = new Set<SidebarSectionId>();
   for (const id of readStringArray(storage, COLLAPSED_SECTIONS_STORAGE_KEY)) {
-    if (id === "active" || id === "pinned") sections.add(id);
+    if (id === "pinned") sections.add(id);
   }
   return {
     ...defaults,
     sortMode: readSortMode(storage),
     recentRunsLimit: readRecentRunsLimit(storage),
-    expandedProjects: readProjectKeys(storage, EXPANDED_PROJECTS_STORAGE_KEY),
     collapsedProjects: readProjectKeys(storage, COLLAPSED_PROJECTS_STORAGE_KEY),
     collapsedSections: sections,
   };
@@ -124,10 +122,9 @@ export function loadSidebarUiState(storage: SidebarStorage | null | undefined): 
 function serialize(state: SidebarUiState): ReadonlyMap<string, string | null> {
   const list = (values: ReadonlySet<string>): string | null => (values.size === 0 ? null : JSON.stringify([...values]));
   return new Map<string, string | null>([
-    [EXPANDED_PROJECTS_STORAGE_KEY, list(state.expandedProjects)],
     [COLLAPSED_PROJECTS_STORAGE_KEY, list(state.collapsedProjects)],
     [COLLAPSED_SECTIONS_STORAGE_KEY, list(state.collapsedSections)],
-    [PROJECT_SORT_STORAGE_KEY, state.sortMode === "none" ? null : state.sortMode],
+    [PROJECT_SORT_STORAGE_KEY, state.sortMode === "updated" ? null : state.sortMode],
   ]);
 }
 
@@ -219,27 +216,22 @@ export function toggleProject(state: SidebarUiState, projectKey: string, expande
   if (expanded) {
     return {
       ...state,
-      expandedProjects: withoutKey(state.expandedProjects, key),
       collapsedProjects: withKey(state.collapsedProjects, key),
       stickyOpenProjects: withoutKey(state.stickyOpenProjects, key),
     };
   }
   return {
     ...state,
-    expandedProjects: withKey(state.expandedProjects, key),
     collapsedProjects: withoutKey(state.collapsedProjects, key),
+    stickyOpenProjects: withKey(state.stickyOpenProjects, key),
   };
 }
 
 /** Open a workspace because the user navigated into it (selecting it overrides an earlier explicit collapse). */
 export function openProject(state: SidebarUiState, projectKey: string): SidebarUiState {
   const key = comparableProjectPath(projectKey);
-  if (state.expandedProjects.has(key) && !state.collapsedProjects.has(key)) return state;
-  return {
-    ...state,
-    expandedProjects: withKey(state.expandedProjects, key),
-    collapsedProjects: withoutKey(state.collapsedProjects, key),
-  };
+  if (!state.collapsedProjects.has(key)) return state;
+  return { ...state, collapsedProjects: withoutKey(state.collapsedProjects, key) };
 }
 
 /** Section header chevron; `workspaces` is not collapsible. */
@@ -316,7 +308,6 @@ export function pruneProjects(state: SidebarUiState, knownProjects: Iterable<str
     }
     return values;
   };
-  const expandedProjects = keep(state.expandedProjects);
   const collapsedProjects = keep(state.collapsedProjects);
   const stickyOpenProjects = keep(state.stickyOpenProjects);
   let extraRows = state.extraRows;
@@ -326,12 +317,11 @@ export function pruneProjects(state: SidebarUiState, knownProjects: Iterable<str
     break;
   }
   if (
-    expandedProjects === state.expandedProjects &&
     collapsedProjects === state.collapsedProjects &&
     stickyOpenProjects === state.stickyOpenProjects &&
     extraRows === state.extraRows
   ) {
     return state;
   }
-  return { ...state, expandedProjects, collapsedProjects, stickyOpenProjects, extraRows };
+  return { ...state, collapsedProjects, stickyOpenProjects, extraRows };
 }

@@ -237,7 +237,7 @@ test("zero context tokens never print a null gauge", () => {
   assert.match(html, /read/);
 });
 
-test("completed subagents nest under a collapsed Completed group", () => {
+test("finished subagents nest under a collapsed Ended group", () => {
   // Roster expanded from storage, as after a user opened it; the completed
   // group itself must still start collapsed.
   globalThis.window = { localStorage: { getItem: () => "false", setItem: () => {} } };
@@ -253,7 +253,7 @@ test("completed subagents nest under a collapsed Completed group", () => {
       onSelectSubagent: noop,
     }));
     assert.match(html, /Map the surface/);
-    assert.match(html, /Completed \(3\)/);
+    assert.match(html, /Ended \(3\)/);
     assert.match(html, /aria-expanded="false"/);
     assert.doesNotMatch(html, /Write the code/);
     assert.doesNotMatch(html, /Break the build/);

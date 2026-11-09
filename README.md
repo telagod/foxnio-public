@@ -34,7 +34,7 @@ foxnio is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) focuse
 
 **Sessions and workspaces**
 
-- A sidebar with an **Active** section (running, waiting for you, unread), pinned sessions shared by all your devices, and your workspaces. Search covers titles and transcripts.
+- A sidebar that lists workspaces by recent activity — workspaces with running, waiting or unread sessions open by themselves, the rest stay folded — plus pinned sessions shared by all your devices. Search covers titles and transcripts.
 - Session tabs on desktop, archive and restore, session file import, and links that open a session (`?session=`).
 - Live plan and subagent panels above the composer, with each subagent's transcript.
 - A file explorer with previews (code, Markdown, Mermaid, images, audio, PDF), a Git changes panel with diffs, and Git worktrees per project ([docs/worktrees.md](./docs/worktrees.md)).

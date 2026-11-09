@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
 import { join } from "path";
+import { startFoxService } from "@/lib/fox-service";
 import { getDiagnosticsDir } from "@/lib/omp/paths";
 
 export async function register(): Promise<void> {
@@ -132,4 +133,14 @@ export async function register(): Promise<void> {
     }
   }, 15_000);
   watchdog.unref?.();
+
+  // Resident FOX service: one observation tick over the existing session /
+  // notification / live views. It never starts a second model loop; a wake is
+  // an ordinary prompt to the FOX OMP session. Fire-and-forget so a slow
+  // session store cannot block boot.
+  try {
+    startFoxService();
+  } catch (error) {
+    console.warn(`[omp-web] FOX service failed to start: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

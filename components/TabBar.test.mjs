@@ -33,15 +33,12 @@ test("right-panel tabs support roving arrows, Home/End, and keyboard close", asy
     onSelectExplorer: () => selected.push("explorer"),
     gitSelected: false,
     onSelectGit: () => selected.push("git"),
-    onSelectNotifications: () => selected.push("notifications"),
     worktreesSelected: false,
     onSelectWorktrees: () => selected.push("worktrees"),
   }));
 
-  // Notifications is the first pinned tab, so Home lands there.
-  const notifications = screen.getByRole("tab", { name: "Notifications" });
-
   const explorer = screen.getByRole("tab", { name: "Explorer" });
+  const git = screen.getByRole("tab", { name: "Git" });
   const alpha = screen.getByRole("tab", { name: "/workspace/alpha.ts" });
   const beta = screen.getByRole("tab", { name: "/workspace/beta.ts" });
   assert.equal(alpha.tabIndex, 0);
@@ -55,18 +52,18 @@ test("right-panel tabs support roving arrows, Home/End, and keyboard close", asy
 
   fireEvent.keyDown(beta, { key: "Home" });
   await nextFrame();
-  assert.equal(document.activeElement, notifications);
-  assert.deepEqual(selected, ["beta", "notifications"]);
-
-  fireEvent.keyDown(notifications, { key: "ArrowRight" });
-  await nextFrame();
   assert.equal(document.activeElement, explorer);
-  assert.deepEqual(selected, ["beta", "notifications", "explorer"]);
+  assert.deepEqual(selected, ["beta", "explorer"]);
 
-  fireEvent.keyDown(explorer, { key: "End" });
+  fireEvent.keyDown(explorer, { key: "ArrowRight" });
+  await nextFrame();
+  assert.equal(document.activeElement, git);
+  assert.deepEqual(selected, ["beta", "explorer", "git"]);
+
+  fireEvent.keyDown(git, { key: "End" });
   await nextFrame();
   assert.equal(document.activeElement, beta);
-  assert.deepEqual(selected, ["beta", "notifications", "explorer", "beta"]);
+  assert.deepEqual(selected, ["beta", "explorer", "git", "beta"]);
 
   fireEvent.keyDown(beta, { key: "Delete" });
   assert.deepEqual(closed, ["beta"]);
@@ -74,5 +71,5 @@ test("right-panel tabs support roving arrows, Home/End, and keyboard close", asy
   fireEvent.keyDown(alpha, { key: "ArrowLeft" });
   await nextFrame();
   assert.equal(document.activeElement, screen.getByRole("tab", { name: "Worktrees" }));
-  assert.deepEqual(selected, ["beta", "notifications", "explorer", "beta", "worktrees"]);
+  assert.deepEqual(selected, ["beta", "explorer", "git", "beta", "worktrees"]);
 });

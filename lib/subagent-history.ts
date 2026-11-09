@@ -76,6 +76,17 @@ function resultStatus(value: Record<string, unknown>): SubagentHistoryEntry["sta
 }
 
 /**
+ * Terminal state of a detached async job from its later `async-result` notice.
+ * Running/pending jobs return undefined so an in-flight job never reads done.
+ */
+function asyncJobStatus(value: string | undefined): SubagentHistoryEntry["status"] | undefined {
+  if (value === "completed") return "completed";
+  if (value === "failed" || value === "error") return "failed";
+  if (value === "aborted" || value === "cancelled" || value === "stopped") return "aborted";
+  return undefined;
+}
+
+/**
  * True when an entry already carries a settled state that a stale/duplicate
  * progress snapshot must not regress (unknown/running → "started"). Mirrors
  * the precedence rule mergeSubagentRoster enforces on the live roster.
@@ -269,6 +280,35 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
           transcriptAvailable: false,
         }, { ignoreTerminal: true });
       }
+    }
+  }
+  // A detached task's spawn result only carries `async.state: "running"` and a
+  // pending progress snapshot; its completion arrives later as an
+  // `async-result` notice. Without reading that notice a finished background
+  // subagent stays "started" on reload and never counts toward the header.
+  for (const entry of entries) {
+    if (entry.type !== "custom_message" || entry.customType !== "async-result") continue;
+    if (!isRecord(entry.details)) continue;
+    const jobs = Array.isArray(entry.details.jobs) ? entry.details.jobs : [];
+    for (const raw of jobs) {
+      if (!isRecord(raw)) continue;
+      const type = asString(raw.type);
+      if (type !== undefined && type !== "task") continue;
+      // `agentId` names the roster entry; `jobId` is the fallback for older
+      // notices that only carried the job id.
+      const id = asString(raw.agentId) ?? asString(raw.jobId) ?? asString(raw.id);
+      if (!id) continue;
+      const existing = byId.get(id);
+      if (!existing) continue;
+      const status = asyncJobStatus(asString(raw.status) ?? asString(raw.state));
+      if (!status) continue;
+      const durationMs = asNumber(raw.durationMs);
+      upsert({
+        ...existing,
+        status,
+        detached: true,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      }, { ignoreTerminal: true });
     }
   }
   // Resolve sibling transcript files and detached markers.

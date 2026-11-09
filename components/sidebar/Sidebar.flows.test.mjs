@@ -185,6 +185,12 @@ test("a workspace folds and unfolds from its row", async () => {
   await until(() => link(/Session A/));
 });
 
+test("opening FOX does not collapse the selected project or write collapsed state", async () => {
+  mount({ props: { foxOpen: true } });
+  await until(() => link(/Session A/), "the selected project's sessions stay reachable in FOX");
+  assert.ok(screen.getByRole("button", { name: "Collapse app" }));
+});
+
 test("renaming sends the trimmed title and the list shows the server's answer", async () => {
   const { server } = mount();
   await until(() => link(/Session A/));
@@ -282,17 +288,15 @@ test("Add workspace opens the directory picker through the shell's open state", 
   await until(() => screen.queryByRole("dialog", { name: "Select directory" }));
 });
 
-test("New session buttons start a session in the selected workspace and in a given one", async () => {
+test("New session from a workspace row starts a session in that workspace", async () => {
   const { events } = mount({ server: { projects: [{ path: APP }, { path: LIB }] }, sessions: [info("A"), info("L", { cwd: LIB, projectRoot: LIB, name: "Lib one" })] });
   await until(() => link(/Session A/));
-  fireEvent.click(screen.getByRole("button", { name: /^New Session/ }));
-  assert.equal(events.created.length, 1);
-  assert.equal(events.created[0][1], APP);
-  assert.match(events.created[0][0], /^[0-9a-f-]{20,}$/i);
 
   const libGroup = treeitems().find((item) => item.textContent.includes("lib") && item.querySelector('button[aria-label="New session here"]'));
   fireEvent.click(within(libGroup).getByRole("button", { name: "New session here" }));
-  assert.equal(events.created.at(-1)[1], LIB);
+  assert.equal(events.created.length, 1);
+  assert.equal(events.created[0][1], LIB);
+  assert.match(events.created[0][0], /^[0-9a-f-]{20,}$/i);
   await until(() => events.cwd.at(-1)?.[0] === LIB, "the new session's workspace becomes the selection");
 });
 

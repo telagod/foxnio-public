@@ -1,7 +1,6 @@
 export { BottomSheet } from "./BottomSheet";
 export { GroupRow } from "./GroupRow";
 export { MoreRow } from "./MoreRow";
-export { NewSessionButton } from "./NewSessionButton";
 export { PlaceholderRow } from "./PlaceholderRow";
 export { PopoverMenu } from "./PopoverMenu";
 export { SectionRow } from "./SectionRow";

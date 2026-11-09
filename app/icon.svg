@@ -1,9 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="12" fill="#241810" />
-  <g transform="translate(32 33) scale(1.1) translate(-32 -33)">
-    <path fill="#f2802e" d="M9 8l17 13h12L55 8l2 26-25 24L7 34z" />
-    <path fill="#fff1e2" d="M7 34l15 2 10 11 10-11 15-2-25 24z" />
-    <path fill="#5a2a10" d="M14 17l7 6-8 5zM50 17l-7 6 8 5z" />
-    <path fill="#241810" d="M16 28l8 2-6 4zM48 28l-8 2 6 4zM28 52h8l-4 6z" />
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="12" fill="#241810"/>
+  <svg x="10" y="6" width="44" height="52" viewBox="192 223 804 951">
+    <path d="M 819.5 223 L 823 225.5 L 996 634.5 L 594.5 1174 L 592 1173 L 192 632.5 L 360 236.5 L 364.5 231 L 371 229 L 480 592.5 L 494.5 634 L 693.5 634 L 696 633 L 819.5 223 Z M 297 671 L 295 673 L 592 772 L 597 772 L 894 673 L 893 671 L 297 671 Z M 544 797 L 590 1080 L 592 1084 L 592 1092 L 595 1098 L 643 803 L 645 799 L 644 797 L 544 797 Z " fill="#f2802e" fill-rule="evenodd"/>
+  </svg>
 </svg>

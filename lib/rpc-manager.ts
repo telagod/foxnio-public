@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
+import { join } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
@@ -30,11 +31,21 @@ import {
 } from "./agent-tools";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
 import { getToolPresetStatus, PRESET_FULL, type ToolPresetStatus } from "./tool-presets";
+import { effectiveToolNamesForCwd, isFoxToolPolicy, isFoxWorkspacePath } from "./fox";
+import { FoxDispatchReceipts } from "./omp/fox-dispatch-guard.mjs";
+import { foxDispatchPolicy, foxDispatchProjectKey, initializeFoxNativePolicy } from "./fox-service-config";
+import { acceptFoxReport, configureFoxReportDelivery, foxWorkerParent, recoverFoxWorkerReports, wakeFoxReportDelivery } from "./fox-report-store";
+import type { FoxWorkerReport } from "./fox-report-types";
+import { deliverNativeFoxReport, FoxReportAgentInvocationError, isFoxReportReply } from "./omp/fox-report-delivery";
+import { FOX_REPORT_COMMAND, FOX_REPORT_EVENT_PREFIX, FOX_REPORT_READY_PREFIX, FOX_REPORT_TOOL, FOX_REPORT_TOOL_DEFINITION, parseFoxReport } from "./omp/fox-reports.mjs";
 import { comparableProjectPath } from "./comparable-path";
+import { compareAndSetFoxSessionId, readFoxSessionRecord } from "./fox-session";
+import { nativeSessionLineage, sameNativeConversation } from "./omp/session-lineage";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
+import { markHistoryRead } from "./notification-store";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
@@ -72,6 +83,8 @@ interface CompactionResultLike {
 }
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
+const FOX_NATIVE_EXTENSION_PATH = join(process.cwd(), "lib", "omp", "fox-native-extension.mjs");
+const FOX_REPORT_EXTENSION_PATH = join(process.cwd(), "lib", "omp", "fox-report-extension.mjs");
 /**
  * How long a session may sit with **no web UI attached** before its omp child is
  * torn down. IDLE_DESTROY_MS (10min) is the backstop for a session that keeps
@@ -360,6 +373,12 @@ interface IdentityChangeOptions {
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  private foxDispatchReceipts = new FoxDispatchReceipts();
+  private foxReportingAvailable = false;
+  readonly createdAt = Date.now();
+  private unpersistedFoxWorkerId: string | null = null;
+  private foxReportCalls = new Map<string, Promise<FoxWorkerReport>>();
+  private foxReportInbox: Promise<void> | null = null;
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private extensionStatuses = new Map<string, string>();
@@ -368,6 +387,7 @@ export class AgentSessionWrapper {
   private promptDispatchPendingCount = 0;
   private historyMutationPendingCount = 0;
   private historyEditInFlight = false;
+  private sessionTransitionInFlight = false;
   private awaitingAgentStart = false;
   private awaitingAgentStartDeadline = 0;
   private continuationGraceUntil = 0;
@@ -381,6 +401,8 @@ export class AgentSessionWrapper {
   /** Positive evidence for this run, retained after native completion but before disk append. */
   private responseObserved = false;
   private responseRunActive = false;
+  /** Last failed run's message; cleared when the next run starts or succeeds. */
+  private lastRunError: string | null = null;
   private fastModeEnabled = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Lazily-armed deadline for tearing down a session nobody is watching. */
@@ -484,6 +506,9 @@ export class AgentSessionWrapper {
   get toolPreset(): ToolPresetStatus | null {
     return this._toolPreset;
   }
+  get toolNames(): readonly string[] | null | undefined {
+    return this._toolNames;
+  }
 
   isAlive(): boolean {
     return this._alive && this.proc.isAlive;
@@ -498,7 +523,34 @@ export class AgentSessionWrapper {
 
   /** Local history navigation is busy control work, not an interruptible model turn. */
   isEditingHistory(): boolean {
-    return this.historyEditInFlight;
+    return this.historyEditInFlight || this.sessionTransitionInFlight || Boolean(this.foxReportInbox);
+  }
+
+  /** Number of UI requests waiting for a human answer. Read-only; no state. */
+  pendingHumanRequests(): number {
+    return this.pendingUiRequests.size;
+  }
+
+  /** The first pending dialog's title/message/question, for the FOX brief. */
+  pendingHumanRequestDetail(): string | null {
+    for (const request of this.pendingUiRequests.values()) {
+      const title = typeof request.title === "string" ? request.title.trim() : "";
+      const message = typeof request.message === "string" ? request.message.trim() : "";
+      const instructions = typeof request.instructions === "string" ? request.instructions.trim() : "";
+      const first = Array.isArray(request.questions) && isRecord(request.questions[0])
+        ? request.questions[0]
+        : null;
+      const header = first && typeof first.header === "string" ? first.header.trim() : "";
+      const question = first && typeof first.question === "string" ? first.question.trim() : "";
+      const text = [title || header, message || question || instructions].filter(Boolean).join(" — ");
+      if (text) return text.length > 240 ? `${text.slice(0, 239)}…` : text;
+    }
+    return null;
+  }
+
+  /** Last failed run's message, or null after a successful/new run. Read-only. */
+  lastRunErrorMessage(): string | null {
+    return this.lastRunError;
   }
 
   /** A web UI (SSE stream) is currently attached to this session. */
@@ -628,6 +680,8 @@ export class AgentSessionWrapper {
       // requested id as an alias, as for a move.
       if (this._sessionId && state.sessionId !== this._sessionId) this.sessionMovePending = true;
       this.applyIdentity(state);
+      const catalog = await this.proc.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS).catch(() => null);
+      this.foxReportingAvailable ||= Boolean(Array.isArray(catalog?.commands) && catalog.commands.some((command) => command.name === FOX_REPORT_COMMAND && command.source === "extension"));
       // Warn when the spawn cwd differs from the session's recorded directory.
       // This happens when the recorded cwd was deleted (removed worktree, moved
       // repo, different machine): resolveSpawnCwd silently substituted a live
@@ -708,7 +762,7 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
 
-    if (this.historyEditInFlight) throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+    if (this.isEditingHistory()) throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     this.historyMutationPendingCount += 1;
     try {
       return await this.generateSessionTitle(quiet);
@@ -841,10 +895,26 @@ export class AgentSessionWrapper {
     // The helper has its own process listener. Its correlated control replies
     // must never become browser notices, replayed dialogs, or notifications,
     // even when they arrive after a failed/timed-out edit.
-    if (isSessionEditReply(frame)) return;
+    if (isSessionEditReply(frame) || isFoxReportReply(frame)) return;
+    if (isFoxWorkspacePath(this.cwd) && this.foxDispatchReceipts.capture(frame)) return;
+    if (frame.type === "extension_ui_request" && frame.method === "notify" && typeof frame.message === "string") {
+      if (frame.message.startsWith(FOX_REPORT_READY_PREFIX)) {
+        this.foxReportingAvailable = true;
+        return;
+      }
+      if (frame.message.startsWith(FOX_REPORT_EVENT_PREFIX)) {
+        let report;
+        try { report = parseFoxReport(JSON.parse(frame.message.slice(FOX_REPORT_EVENT_PREFIX.length))); } catch { return; }
+        if (!report) return;
+        const pending = this.captureFoxReport(report as FoxWorkerReport);
+        if (report.toolCallId) this.foxReportCalls.set(report.toolCallId, pending);
+        void pending.catch((error) => this.emit({ type: "notice", level: "warning", message: `Worker report delivery is pending: ${error instanceof Error ? error.message : String(error)}` }));
+        return;
+      }
+    }
     this.resetIdleTimer();
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
-      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
+      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND && command.name !== FOX_REPORT_COMMAND) }
       : frame;
     let refreshSessionList = false;
 
@@ -908,6 +978,7 @@ export class AgentSessionWrapper {
         break;
       case "session_settled":
         this.unsettled = false;
+        if (isFoxWorkspacePath(this.cwd)) wakeFoxReportDelivery(this.sessionId);
         break;
       case "prompt_result":
         // Local-only prompt (builtin/extension slash command) — no agent run.
@@ -963,7 +1034,7 @@ export class AgentSessionWrapper {
           this.promptRunning = false;
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
-          const promptError = { type: "prompt_error", errorMessage: detail, error: event.error, command: event.command };
+          const promptError = { type: "prompt_error", errorMessage: detail, error: event.error, command: event.command, terminal: !this.streaming };
           this.publishNotifications(promptError);
           this.emit(promptError);
           notifyRunningChange();
@@ -984,8 +1055,8 @@ export class AgentSessionWrapper {
         // Server-side agent tools (#275) are answered here, before any
         // browser routing, so they work with no tab open. A disabled gate
         // is an explicit error, not a silent hang and not a browser call.
-        if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
-          if (loadWebServerSettings().agentToolsEnabled) {
+        if (id && toolName && (AGENT_TOOL_NAMES.has(toolName) || toolName === FOX_REPORT_TOOL)) {
+          if (toolName === FOX_REPORT_TOOL || loadWebServerSettings().agentToolsEnabled) {
             void this.answerServerAgentTool(event);
           } else {
             this.proc.sendFrame({
@@ -1091,9 +1162,28 @@ export class AgentSessionWrapper {
   }
 
   private clearPendingUiRequests(): void {
+    const hadPending = this.pendingUiRequests.size > 0;
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
+    if (hadPending) this.settleInputNotification();
+  }
+
+  /**
+   * A blocking dialog ended without the user answering it (timeout, cancel,
+   * restart, or an answer from another client): the recorded "input"
+   * notification is stale and must not keep the sidebar on "waiting for
+   * input". Only settle once no other dialog is pending.
+   */
+  private settleInputNotification(): void {
+    if (this.pendingUiRequests.size > 0) return;
+    const ids = [this._sessionId, ...this.movedFromIds].filter(Boolean);
+    if (ids.length === 0) return;
+    try {
+      markHistoryRead(ids.map((id) => `${id}:input`));
+    } catch {
+      // Notification bookkeeping must never break dialog lifecycle.
+    }
   }
 
   private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
@@ -1101,6 +1191,7 @@ export class AgentSessionWrapper {
     const id = event.id as string;
     if (method === "cancel") {
       this.forgetPendingUiRequest(event.targetId as string);
+      this.settleInputNotification();
       return false;
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
@@ -1114,6 +1205,7 @@ export class AgentSessionWrapper {
     if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && autoApproveExtension) {
       this.forgetPendingUiRequest(id);
       this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
+      this.settleInputNotification();
       return true;
     }
     // Blocking dialogs stay pending until the client answers (replayed to
@@ -1123,7 +1215,10 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          this.forgetPendingUiRequest(id);
+          this.settleInputNotification();
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -1213,6 +1308,14 @@ export class AgentSessionWrapper {
     this.pendingHostUris.clear();
   }
 
+  private finishPromptRun(): void {
+    this.responseRunActive = false;
+    this.streaming = false;
+    this.compacting = false;
+    this.promptRunning = false;
+    this.clearLiveSnapshots();
+  }
+
   private emit(nativeEvent: UnsequencedAgentEvent): void {
     // Tool-result images go out (and into the replay snapshot) as media URLs:
     // big screenshots must never sit in the browser's chat state as base64.
@@ -1222,6 +1325,7 @@ export class AgentSessionWrapper {
     delete event.web;
     switch (event.type) {
       case "agent_start":
+        this.lastRunError = null;
         this.responseObserved = false;
         this.responseRunActive = true;
         this.clearLiveSnapshots();
@@ -1234,14 +1338,27 @@ export class AgentSessionWrapper {
         this.compacting = false;
         this.clearLiveSnapshots();
         break;
-      case "prompt_error":
-      case "prompt_result":
-        this.responseRunActive = false;
-        this.streaming = false;
-        this.compacting = false;
-        this.promptRunning = false;
-        this.clearLiveSnapshots();
+      case "prompt_error": {
+        this.lastRunError = typeof event.errorMessage === "string" && event.errorMessage.trim()
+          ? event.errorMessage
+          : typeof event.detail === "string" && event.detail.trim() ? event.detail : "Run failed";
+        this.finishPromptRun();
         break;
+      }
+      case "prompt_result": {
+        if (event.agentInvoked !== false) {
+          if (event.status === "error") {
+            const error = isRecord(event.error) ? event.error : undefined;
+            this.lastRunError = error && typeof error.message === "string" && error.message.trim()
+              ? error.message
+              : this.lastRunError ?? "Run failed";
+          } else if (event.status === "completed" || event.status === "aborted") {
+            this.lastRunError = null;
+          }
+        }
+        this.finishPromptRun();
+        break;
+      }
       case "message_start":
       case "message_update": {
         const message = event.message as Partial<AgentMessage> | undefined;
@@ -1353,14 +1470,17 @@ export class AgentSessionWrapper {
     this.listeners.push(listener);
     this.noteActivity();
     const now = Date.now();
+    let expired = false;
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
         this.forgetPendingUiRequest(id);
+        expired = true;
         continue;
       }
       listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
     }
+    if (expired) this.settleInputNotification();
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
@@ -1440,16 +1560,130 @@ export class AgentSessionWrapper {
     };
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
-      const result = await executeAgentTool(toolName, args, createAgentToolOps(), {
+      if (toolName === FOX_REPORT_TOOL) {
+        const callId = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        const pending = this.foxReportCalls.get(callId);
+        this.foxReportCalls.delete(callId);
+        if (!pending) throw new Error("The native worker report was not recorded. Reporting requires the FOX worker extension.");
+        const report = await pending;
+        sendResult(JSON.stringify({ accepted: true, reportId: report.id, parentSessionId: report.parentSessionId, delivery: "pending", persisted: "native-worker-session" }));
+        return;
+      }
+      if ((toolName === "new_session" || toolName === "send_to_session") && foxWorkerParent(this.sessionFile)) {
+        throw new Error("Project workers report through report_to_parent; cross-project delegation belongs to FOX.");
+      }
+      if (isFoxWorkspacePath(this.cwd) && (toolName === "new_session" || toolName === "send_to_session")) {
+        if (this.foxReportInbox) throw new Error("Receiving a worker report cannot authorize new execution.");
+        const projectRef = await this.foxActionProject(toolName, args);
+        const policy = foxDispatchPolicy(initializeFoxNativePolicy(), projectRef);
+        if (policy === "observe") throw new Error("This project is observation-only. No work was dispatched.");
+        this.consumeFoxDispatchConsent(event, args, projectRef, policy === "confirm");
+        args.cwd = projectRef;
+      }
+      const result = await executeAgentTool(toolName, args, createAgentToolOps(this), {
         sourceSessionId: this.sessionId,
         sourceCwd: this.cwd,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
+        allowSendTarget: isFoxWorkspacePath(this.cwd)
+          ? async (target, cwd) => { await this.foxActionProject("send_to_session", { sessionId: target, cwd }); return true; }
+          : undefined,
       });
       sendResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       sendResult(error instanceof Error ? error.message : String(error), true);
     }
+  }
+
+  hasFoxReporting(): boolean {
+    return this.foxReportingAvailable;
+  }
+
+  hasFoxWorkerReporting(): boolean {
+    return this.foxReportingAvailable && this.hostToolNames.has(FOX_REPORT_TOOL);
+  }
+
+  private async captureFoxReport(report: FoxWorkerReport): Promise<FoxWorkerReport> {
+    this.resetIdleTimer();
+    if (this.sessionId !== report.sourceSessionId) this.applyIdentity(await this.getStateWithTimeout());
+    if (this.sessionId !== report.sourceSessionId) throw new Error("The report source does not match the native worker");
+    const accepted = await acceptFoxReport(this.sessionFile, report);
+    this.invalidateSessionLists();
+    return accepted;
+  }
+
+  async receiveFoxReport(report: FoxWorkerReport, parentFile = this.sessionFile): Promise<void> {
+    if (this.foxReportInbox || this.isRunning() || this.historyMutationPendingCount > 0
+      || this.historyEditInFlight || this.pendingHumanRequests() > 0 || this.restarting || this.mcpListInFlight) {
+      throw new WebRpcError("FOX is busy; its native report inbox will retry after settlement", "session_busy");
+    }
+    const receive = async () => {
+      this.resetIdleTimer();
+      this.pendingCommands += 1;
+      try {
+        const matches = (file: string) => readSessionHeader(parentFile)?.id === report.parentSessionId && sameNativeConversation(file, parentFile);
+        if (!this.isAlive() || !isFoxWorkspacePath(this.cwd) || !matches(this.sessionFile)) throw new Error("The original FOX recipient is unavailable");
+        const state = await this.getStateWithTimeout();
+        if (!state.sessionFile || !matches(state.sessionFile)) throw new Error("The native parent changed identity; the report was not redirected");
+        if (state.isSettled !== true || state.hasPendingAsyncWork || state.isStreaming || state.isCompacting || state.queuedMessageCount > 0) {
+          throw new WebRpcError("FOX has pending work; report delivery waits for native settlement", "session_busy");
+        }
+        await deliverNativeFoxReport(this.proc, report, parentFile);
+        const after = await this.getStateWithTimeout();
+        if (!after.sessionFile || !matches(after.sessionFile)) throw new Error("The native parent changed during report delivery");
+        if (after.isSettled !== true || after.hasPendingAsyncWork || after.isStreaming || after.isCompacting || after.queuedMessageCount > 0) {
+          throw new FoxReportAgentInvocationError();
+        }
+        this.invalidateSessionLists();
+        this.emit({ type: "session_history_changed", leafId: null });
+      } catch (error) {
+        if (error instanceof FoxReportAgentInvocationError || error instanceof RpcCommandTimeoutError) await this.destroyAndWait();
+        throw error;
+      } finally {
+        this.pendingCommands = Math.max(0, this.pendingCommands - 1);
+      }
+    };
+    const operation = receive();
+    this.foxReportInbox = operation;
+    try { await operation; } finally {
+      if (this.foxReportInbox === operation) this.foxReportInbox = null;
+    }
+  }
+
+  private async foxActionProject(toolName: string, args: Record<string, unknown>): Promise<string> {
+    if (toolName === "new_session") {
+      const cwd = typeof args.cwd === "string" ? args.cwd.trim() : "";
+      if (!cwd || isFoxWorkspacePath(cwd)) throw new Error("FOX workers require an explicit project directory outside the FOX workspace.");
+      if (!existsSync(cwd)) throw new Error(`Directory does not exist: ${cwd}`);
+      const project = foxDispatchProjectKey(cwd);
+      if (isFoxWorkspacePath(project)) throw new Error("FOX cannot delegate implementation to its own workspace.");
+      return project;
+    }
+
+    const sessionId = typeof args.sessionId === "string" ? args.sessionId.trim() : "";
+    if (!sessionId) throw new Error("Agent tool argument \"sessionId\" is required and must be a non-empty string.");
+    const file = await resolveSessionPath(sessionId);
+    const header = file ? readSessionHeader(file) : null;
+    if (!header?.cwd) throw new Error(`Session not found: ${sessionId}`);
+    const parent = file ? foxWorkerParent(file) : null;
+    if (!parent || !sameNativeConversation(parent.parentFile, this.sessionFile)) {
+      throw new Error("FOX can only follow up direct workers of this conversation. Use new_session for new work.");
+    }
+    if (typeof args.cwd !== "string" || foxDispatchProjectKey(args.cwd) !== foxDispatchProjectKey(header.cwd)) {
+      throw new Error("The approved project cwd does not match this worker. Read its exact cwd from list_sessions.");
+    }
+    return foxDispatchProjectKey(header.cwd);
+  }
+
+  /** Consume native hook consent for exactly one pending FOX dispatch. */
+  private consumeFoxDispatchConsent(event: UnsequencedAgentEvent, args: Record<string, unknown>, projectKey: string, requireConfirmation: boolean): void {
+    if (!this.foxDispatchReceipts.take({
+      sessionId: this.sessionId,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: args,
+      projectKey,
+    }, requireConfirmation)) throw new Error("Native FOX authorization is missing, expired, or no longer matches this action. No work was dispatched.");
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -1481,7 +1715,7 @@ export class AgentSessionWrapper {
   private async runMcpCommand(action: "list" | "enable" | "disable" | "reload", name?: string, apply = false): Promise<string> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
-    if (this.isRunning() || this.historyEditInFlight || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0) throw new WebRpcError("Wait for the current operation to finish", "session_busy");
+    if (this.isRunning() || this.isEditingHistory() || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0) throw new WebRpcError("Wait for the current operation to finish", "session_busy");
     if (this.mcpListWaiter || this.mcpListInFlight) throw new WebRpcError("MCP list is already loading", "mcp_list_loading");
 
     // Dedicated synchronous mutex: promptRunning alone is not atomic — two
@@ -1828,6 +2062,7 @@ export class AgentSessionWrapper {
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    this.foxReportingAvailable = false;
     this.resetStream();
     this.streaming = false;
     this.promptRunning = false;
@@ -1844,6 +2079,7 @@ export class AgentSessionWrapper {
 
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
+      this.foxDispatchReceipts.clear();
       this.clearPendingUiRequests();
       // Calls the old child made can never be answered: its pipes are gone. Left
       // in place they would keep isRunning() true for the new child.
@@ -1867,7 +2103,7 @@ export class AgentSessionWrapper {
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", toolNames, this._advisorChoice === "on", launchConfig, undefined, true), "--extension", SESSION_EDIT_EXTENSION_PATH],
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", toolNames, this._advisorChoice === "on", launchConfig, undefined, true), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, ...(isFoxWorkspacePath(this.cwd) ? ["--extension", FOX_NATIVE_EXTENSION_PATH] : [])],
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1926,20 +2162,28 @@ export class AgentSessionWrapper {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
     const mutatesHistory = HISTORY_MUTATING_COMMANDS.has(command.type as string);
+    const changesIdentity = command.type === "new_session" || command.type === "switch_session" || command.type === "fork";
+    if (mutatesHistory && this.sessionTransitionInFlight || changesIdentity && (this.isRunning() || this.historyMutationPendingCount > 0)) {
+      throw new WebRpcError("Wait for the current session operation to finish", "session_busy");
+    }
     if (mutatesHistory && this.historyEditInFlight) {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }
     if (mutatesHistory) this.historyMutationPendingCount += 1;
+    if (changesIdentity) this.sessionTransitionInFlight = true;
     this.resetIdleTimer();
     // Covers the whole command, including the awaits inside it: a route that
     // has an unwatched session in mid-command (predict_word on a keystroke, an
     // export, a follow-up) must never have its child reaped underneath it.
     this.pendingCommands += 1;
     try {
+      if (mutatesHistory && this.foxReportInbox) await this.foxReportInbox.catch(() => {});
+      if (!this.isAlive()) throw new Error("Session is no longer running");
       return await this.dispatchCommand(command);
     } finally {
       this.pendingCommands = Math.max(0, this.pendingCommands - 1);
       if (mutatesHistory) this.historyMutationPendingCount -= 1;
+      if (changesIdentity) this.sessionTransitionInFlight = false;
     }
   }
 
@@ -2145,6 +2389,9 @@ export class AgentSessionWrapper {
         const result = await this.proc.sendCommand<{ cancelled: boolean }>(command as { type: string });
         if (!result.cancelled) {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
+          const parent = type === "new_session" && typeof command.parentSession === "string" ? readSessionHeader(command.parentSession) : null;
+          this.unpersistedFoxWorkerId = parent && isFoxWorkspacePath(parent.cwd) ? newSessionId : null;
+          if (this.hostToolDefinitions.length) await this.send({ type: "set_host_tools", tools: this.hostToolDefinitions });
           return { cancelled: false, newSessionId };
         }
         return result;
@@ -2203,7 +2450,7 @@ export class AgentSessionWrapper {
         const data = await this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({
           type: "get_available_commands",
         });
-        return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND) };
+        return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND && command.name !== FOX_REPORT_COMMAND) };
       }
 
       case "reload": {
@@ -2224,7 +2471,10 @@ export class AgentSessionWrapper {
         this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
         // omp sends no cancel for an answered dialog; other tabs on this
         // session would keep showing it, so settle it for them here.
-        if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+        if (wasPending) {
+          this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+          this.settleInputNotification();
+        }
         return null;
       }
 
@@ -2252,15 +2502,17 @@ export class AgentSessionWrapper {
 
       case "set_host_tools": {
         const tools = hostRegistrationEntries(command.tools, "tools") as Array<{ name?: unknown; [key: string]: unknown }>;
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name);
+        const worker = this.foxReportingAvailable && (this.unpersistedFoxWorkerId === this.sessionId || Boolean(foxWorkerParent(this.sessionFile)));
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name && t.name !== "notify" && t.name !== FOX_REPORT_TOOL && (!worker || !AGENT_TOOL_NAMES.has(t.name)));
         // Merge the server agent tools (#275) into every registration when
         // the gate is on, so a later UI registration cannot drop them and
         // a no-tab session keeps them after its startup registration.
         // With the gate off the registration is exactly what the caller
         // asked for, so existing behavior and tests are unchanged.
-        const merged = loadWebServerSettings().agentToolsEnabled
+        const merged = !worker && loadWebServerSettings().agentToolsEnabled
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
+        if (worker) merged.push(FOX_REPORT_TOOL_DEFINITION);
         this.hostToolNames = new Set(merged.map((t) => t.name as string));
         this.hostToolDefinitions = merged;
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
@@ -2346,6 +2598,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
+    this.foxDispatchReceipts.clear();
     this.streaming = false;
     this.promptRunning = false;
     this.compacting = false;
@@ -2451,6 +2704,20 @@ function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSes
   return globalThis.__ompStartLocks;
 }
 
+/**
+ * Legacy approvals are historical records, never authorizations for a new
+ * execution. Native tool hooks now own the confirmation lifecycle; callers
+ * cannot bypass them by replaying an old browser approval.
+ */
+export async function executeApprovedFoxAction(action: {
+  toolName: string;
+  args: Record<string, unknown>;
+  sourceSessionId: string;
+  sourceCwd: string;
+}): Promise<unknown> {
+  throw new Error(`Legacy approval for ${action.toolName} cannot execute. Ask FOX in the current conversation instead.`);
+}
+
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
 }
@@ -2468,6 +2735,36 @@ export function getRunningRpcSessions(): RunningRpcSession[] {
 
 export function getRunningRpcSessionIds(): string[] {
   return getRunningRpcSessions().map((s) => s.id);
+}
+
+export interface LiveRpcSessionState {
+  id: string;
+  running: boolean;
+  pendingInput: number;
+  pendingInputDetail: string | null;
+  lastRunError: string | null;
+}
+
+/**
+ * Every live wrapper, including idle children kept for a fast resume. The
+ * briefing uses this instead of getRunningRpcSessions() so a failed run that
+ * has already settled (running=false) is still visible without notification
+ * history.
+ */
+export function getLiveRpcSessionStates(): LiveRpcSessionState[] {
+  const states = new Map<string, LiveRpcSessionState>();
+  for (const [key, session] of getRegistry()) {
+    if (!session.isAlive()) continue;
+    const id = session.sessionId || key;
+    states.set(id, {
+      id,
+      running: session.isRunning(),
+      pendingInput: session.pendingHumanRequests(),
+      pendingInputDetail: session.pendingHumanRequestDetail(),
+      lastRunError: session.lastRunErrorMessage(),
+    });
+  }
+  return [...states.values()];
 }
 
 /** Stop all live omp children after an explicit runtime update. The browser will
@@ -2589,6 +2886,16 @@ export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined
 }
 
 /**
+ * FOX sessions created before the dispatch policy have the full toolset. They
+ * must not be reused: a live wrapper keeps its old system prompt and tools, so
+ * the next prompt would still edit projects directly. Project sessions are
+ * never affected.
+ */
+function needsFoxToolPolicyRestart(wrapper: AgentSessionWrapper): boolean {
+  return isFoxWorkspacePath(wrapper.cwd) && !isFoxToolPolicy(wrapper.toolNames);
+}
+
+/**
  * Get or create the omp RPC process for the given session.
  * For new sessions (sessionFile === ""), omp generates its own id.
  * Pass toolNames to pre-configure the builtin toolset of a NEW session
@@ -2665,21 +2972,39 @@ export async function deliverToSession(
  * A waited delivery registers its turn-end waiter BEFORE sending, then
  * reads the turn's final text with get_last_assistant_text.
  */
-function createAgentToolOps(): AgentToolSessionOps {
+function createAgentToolOps(source?: AgentSessionWrapper): AgentToolSessionOps {
   return {
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listAllSessions();
-      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id) }));
+      return sessions.map((s) => {
+        const parent = foxWorkerParent(s.path);
+        const origin = nativeSessionLineage(s.path)?.at(-1)?.header.id;
+        return {
+          id: s.id, name: s.name, cwd: s.cwd, sessionFile: s.path, running: running.has(s.id),
+          ...(parent ? { parentSessionId: parent.parent.id } : s.parentSessionId ? { parentSessionId: s.parentSessionId } : {}),
+          ...(parent && source && isFoxWorkspacePath(source.cwd) ? { isFoxWorker: sameNativeConversation(parent.parentFile, source.sessionFile) } : {}),
+          ...(origin && origin !== s.id ? { originSessionId: origin } : {}),
+        };
+      });
     },
 
     async createSession(input) {
       if (!existsSync(input.cwd)) throw new Error(`Directory does not exist: ${input.cwd}`);
       const tempKey = `__new__${randomUUID()}`;
-      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
+      const { session } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
       allowFileRoot(input.cwd);
       invalidateSessionListCache();
       try {
+        if (input.parentSessionId) {
+          const parent = getRpcSession(input.parentSessionId);
+          if (!parent?.isAlive() || !isFoxWorkspacePath(parent.cwd)) throw new Error("The parent FOX conversation is no longer available.");
+          const result = await session.send({ type: "new_session", parentSession: parent.sessionFile || parent.sessionId }) as { cancelled?: boolean } | undefined;
+          if (result?.cancelled) throw new Error("OMP cancelled worker session creation.");
+          if (!session.hasFoxReporting() || !parent.hasFoxReporting()) throw new Error("Native worker reporting is unavailable. Restart FOX when idle before delegating.");
+          await session.send({ type: "set_host_tools", tools: [] });
+          if (!session.hasFoxWorkerReporting()) throw new Error("The native worker parent or reporting tool could not be verified. No project prompt was sent.");
+        }
         if (input.provider && input.modelId) {
           await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
         }
@@ -2689,7 +3014,8 @@ function createAgentToolOps(): AgentToolSessionOps {
         await session.destroyAndWait();
         throw error;
       }
-      return { sessionId: realSessionId };
+      invalidateSessionListCache();
+      return { sessionId: session.sessionId };
     },
 
     async deliver(input): Promise<AgentToolDeliverResult> {
@@ -2699,14 +3025,28 @@ function createAgentToolOps(): AgentToolSessionOps {
         const filePath = await resolveSessionPath(input.sessionId);
         if (!filePath) throw new Error(`Session not found: ${input.sessionId}`);
         const header = readSessionHeader(filePath);
+        if (header?.cwd && isFoxWorkspacePath(header.cwd)) throw new Error("Agent messages cannot impersonate user instructions to FOX. Project workers must use report_to_parent.");
         const { cwd } = resolveSpawnCwdResult(header?.cwd);
         const started = await startRpcSession(input.sessionId, filePath, cwd, undefined, undefined, header?.cwd);
         wrapper = started.session;
+      }
+      if (isFoxWorkspacePath(wrapper.cwd)) throw new Error("Agent messages cannot impersonate user instructions to FOX. Project workers must use report_to_parent.");
+      if (source && isFoxWorkspacePath(source.cwd)) {
+        const parent = foxWorkerParent(wrapper.sessionFile);
+        if (!parent || !sameNativeConversation(parent.parentFile, source.sessionFile)) throw new Error("The worker's original FOX lineage changed during startup. No message was delivered.");
       }
       return deliverToSession(wrapper, input);
     },
   };
 }
+
+configureFoxReportDelivery(async (report, parentFile) => {
+  const header = readSessionHeader(parentFile);
+  if (!header || header.id !== report.parentSessionId || !isFoxWorkspacePath(header.cwd)) throw new Error("The original FOX parent is unavailable; no replacement was selected");
+  const current = getRpcSession(header.id);
+  const parent = current?.isAlive() ? current : (await startRpcSession(header.id, parentFile, header.cwd, undefined, undefined, header.cwd)).session;
+  await parent.receiveFoxReport(report, parentFile);
+});
 
 export async function startRpcSession(
   sessionId: string,
@@ -2736,7 +3076,16 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
   launchConfig = launchConfig ?? launchConfigForCwd(cwd);
+  const fox = isFoxWorkspacePath(cwd);
+  if (fox) initializeFoxNativePolicy();
+  const effectiveToolNames = effectiveToolNamesForCwd(cwd, toolNames);
   const existing = registry.get(sessionId);
+  // A legacy FOX wrapper keeps its old prompt and full toolset even after the
+  // persona changed. Replace it before reusing it; project wrappers are left
+  // alone. This also aborts a busy legacy FOX that is editing a project.
+  if (existing?.isAlive() && needsFoxToolPolicyRestart(existing)) {
+    await existing.destroyAndWait("fox-tool-policy");
+  }
   if (existing?.isAlive()) {
     // Busy children are kept (a mid-run swap would drop in-flight work); the
     // choice reaches them with a later request. An idle child takes `/advisor
@@ -2761,6 +3110,10 @@ export async function startRpcSession(
   if (sessionFile && !existing) {
     for (const candidate of new Set(registry.values())) {
       if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
+        if (needsFoxToolPolicyRestart(candidate)) {
+          await candidate.destroyAndWait("fox-tool-policy");
+          continue;
+        }
         registry.set(sessionId, candidate);
         return { session: candidate, realSessionId: candidate.sessionId };
       }
@@ -2778,7 +3131,7 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === "on", launchConfig, spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
+        extraArgs: [...buildSessionSpawnArgs(sessionFile, effectiveToolNames, advisor === "on", launchConfig, spawnModel, fox), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, ...(fox ? ["--extension", FOX_NATIVE_EXTENSION_PATH] : [])],
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
@@ -2788,8 +3141,10 @@ export async function startRpcSession(
       advisor ?? "inherit",
       sessionFile ? sessionId : "",
       undefined,
-      getToolPresetStatus(sessionFile ? undefined : toolNames, launchConfig?.extraArgs, sessionFile ? null : "full"),
-      sessionFile ? null : toolNames,
+      fox
+        ? getToolPresetStatus(effectiveToolNames, launchConfig?.extraArgs, "full")
+        : getToolPresetStatus(sessionFile ? undefined : effectiveToolNames, launchConfig?.extraArgs, sessionFile ? null : "full"),
+      fox ? effectiveToolNames : sessionFile ? null : effectiveToolNames,
     );
     holder.wrapper = created;
     created.start();
@@ -2812,9 +3167,10 @@ export async function startRpcSession(
       // later UI registration, so this never drops the UI tools. Older omp
       // builds without host tools simply reject the registration; ignore
       // that the way the UI registration does.
-      if (loadWebServerSettings().agentToolsEnabled) {
+      if (loadWebServerSettings().agentToolsEnabled || foxWorkerParent(created.sessionFile)) {
         await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
+      if (foxWorkerParent(created.sessionFile)) void recoverFoxWorkerReports(created.sessionFile).catch(() => {});
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup
       // lock: a fire-and-forget destroy() would let a retry spawn a second
@@ -2830,9 +3186,21 @@ export async function startRpcSession(
       for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     });
     created.onIdentityChange((oldId, newId, options) => {
-      if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+      if (!options?.keepOldId) for (const [key, value] of registry) if (value === created) registry.delete(key);
       registry.set(newId, created);
+      if (fox) {
+        try {
+          const record = readFoxSessionRecord();
+          if (record.sessionId === oldId) compareAndSetFoxSessionId(newId, record);
+        } catch {}
+      }
     });
+    if (fox && sessionFile && sessionId !== realSessionId) {
+      try {
+        const record = readFoxSessionRecord();
+        if (record.sessionId === sessionId && sameNativeConversation(sessionFile, created.sessionFile)) compareAndSetFoxSessionId(realSessionId, record);
+      } catch {}
+    }
     registry.set(realSessionId, created);
     // A resume that landed on a continuation copy (see initialize) still serves
     // the id the caller asked for; without the alias every request for it

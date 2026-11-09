@@ -56,7 +56,8 @@ export interface PlanOptions {
 // post-compaction message renders standalone and never folds.
 export function isGroupAnchor(message: AgentMessage): boolean {
   if (message.role === "user") return true;
-  return message.role === "custom" && (message as CustomMessage).customType === "compaction";
+  return message.role === "custom" && ((message as CustomMessage).customType === "compaction"
+    || (message as CustomMessage).customType === "fox-worker-report-received" && (message as CustomMessage).display !== false);
 }
 
 /** Split one anchored turn into text and folded-activity segments. */

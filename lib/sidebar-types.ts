@@ -11,7 +11,7 @@ import type { ProjectSortMode } from "@/lib/project-ordering";
 /** Row density. `touch` is used for coarse pointers or the "accessible" touch-target setting. */
 export type SidebarDensity = "compact" | "comfortable" | "touch";
 
-export type SidebarSectionId = "active" | "pinned" | "workspaces";
+export type SidebarSectionId = "pinned" | "workspaces";
 
 /**
  * What a session row shows in its leading seat, strongest first:
@@ -41,7 +41,7 @@ export interface SidebarSectionRow extends RowBase {
   readonly section: SidebarSectionId;
   readonly count: number;
   readonly collapsed: boolean;
-  /** `workspaces` is not collapsible; `active` and `pinned` are. */
+  /** `workspaces` is not collapsible; `pinned` is. */
   readonly collapsible: boolean;
 }
 
@@ -85,8 +85,8 @@ export interface SidebarSessionRow extends RowBase {
   readonly hasChildren: boolean;
   readonly expanded: boolean;
   /** Where the row is rendered: workspace tree rows are indented; flat rows show `workspaceLabel`. */
-  readonly context: "tree" | "active" | "pinned" | "search";
-  /** Workspace label for flat contexts (`active`, `pinned`, `search`). */
+  readonly context: "tree" | "pinned" | "search";
+  /** Workspace label for flat contexts (`pinned`, `search`). */
   readonly workspaceLabel: string | undefined;
   /** Search hit text around the best content match, if any. */
   readonly snippet: string | undefined;
@@ -131,9 +131,7 @@ export interface SidebarUiState {
   /** Show only workspaces/sessions that are running or recently completed. */
   readonly runningOnly: boolean;
   readonly recentRunsLimit: number;
-  /** Workspaces the user opened explicitly. */
-  readonly expandedProjects: ReadonlySet<string>;
-  /** Workspaces the user explicitly folded; wins over auto-open (selected workspace) except for sticky ones. */
+  /** Workspaces the user explicitly folded; wins over auto-open (selected/active workspaces) except for sticky ones. */
   readonly collapsedProjects: ReadonlySet<string>;
   readonly collapsedSections: ReadonlySet<SidebarSectionId>;
   /** Extra rows revealed per workspace through "show more" (not persisted). */

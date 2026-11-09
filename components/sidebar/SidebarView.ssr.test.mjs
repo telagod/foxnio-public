@@ -8,7 +8,6 @@ import { group, more, placeholder, section, session, viewProps } from "./test-fi
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { SidebarView } = await jiti.import("./SidebarView.tsx");
-const { NewSessionButton } = await jiti.import("./NewSessionButton.tsx");
 
 function render(props) {
   const html = renderToStaticMarkup(React.createElement(SidebarView, viewProps(props)));
@@ -233,17 +232,6 @@ test("header and footer: navigation, close, archive count, update badge", () => 
   const mobile = render({ navigation, mobile: true, density: "touch" });
   assert.equal(mobile.querySelector('button[aria-label="Navigate back"]'), null, "no back/forward in the drawer header");
   assert.equal(mobile.querySelector("nav").getAttribute("data-density"), "touch");
-});
-
-test("new session button: disabled state, tooltip and shortcut hint", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(NewSessionButton, { disabled: true, title: "Select a project first", shortcutHint: "⌘N", onClick() {} }),
-  );
-  const button = new JSDOM(html).window.document.querySelector("button");
-  assert.equal(button.disabled, true);
-  assert.equal(button.title, "Select a project first");
-  assert.match(button.textContent, /New Session/);
-  assert.match(button.textContent, /⌘N/);
 });
 
 test("5000 rows mount only a window of tree items but reserve the full height", () => {

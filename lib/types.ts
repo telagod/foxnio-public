@@ -18,6 +18,7 @@ export interface SessionHeader {
   /** Extra workspace roots beyond cwd (multi-root workspace). */
   additionalDirectories?: string[];
   parentSession?: string;
+  continuationOf?: string;
   providerPromptCacheKey?: string;
 }
 

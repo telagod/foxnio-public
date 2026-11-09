@@ -267,26 +267,7 @@ export function buildSidebarModel(input: SidebarModelInput, extras: SidebarModel
   function buildBrowseRows(): void {
     if (input.sessionsStatus === "error") rows.push(placeholderRow("error", undefined, input.sessionsError));
 
-    // Active and Pinned: flat, cross-workspace.
-    const activeEntries: { session: SessionInfo; workspace: Workspace; time: number }[] = [];
-    const queued = new Set<string>();
-    const queue = (ids: Iterable<string>) => {
-      for (const id of ids) {
-        if (queued.has(id)) continue;
-        queued.add(id);
-        const session = byId.get(id);
-        const workspace = session && workspaceOf(session);
-        if (!session || !workspace) continue;
-        const parsed = Date.parse(session.lastMessageAt ?? session.modified);
-        activeEntries.push({ session, workspace, time: Number.isFinite(parsed) ? parsed : 0 });
-      }
-    };
-    queue(input.waiting);
-    queue(input.running);
-    queue(input.exited.keys());
-    queue(input.unread);
-    activeEntries.sort((a, b) => b.time - a.time || (a.session.id < b.session.id ? -1 : 1));
-
+    // Pinned: flat, cross-workspace.
     const pinnedEntries: { session: SessionInfo; workspace: Workspace }[] = [];
     const pinSeen = new Set<string>();
     for (const id of input.pinnedSessionIds) {
@@ -316,7 +297,6 @@ export function buildSidebarModel(input: SidebarModelInput, extras: SidebarModel
       const canCollapse = extra > 0 && entries.length > SECTION_BASE_ROWS;
       if (hidden > 0 || canCollapse) rows.push({ kind: "more", key: `more:${extraKey}`, projectKey: extraKey, hidden, canCollapse });
     };
-    pushFlatSection("active", activeEntries);
     pushFlatSection("pinned", pinnedEntries);
 
     // Workspaces.
@@ -363,7 +343,15 @@ export function buildSidebarModel(input: SidebarModelInput, extras: SidebarModel
         else if (status === "exited") counts.exited++;
       }
       const selected = key === selectedKey;
-      const expanded = ui.stickyOpenProjects.has(key) || (!ui.collapsedProjects.has(key) && (ui.expandedProjects.has(key) || selected));
+      // Only the selected workspace and ones with live attention (running,
+      // waiting, unread) open by themselves; every other workspace starts
+      // folded. Manually opening one keeps it open for this page's life.
+      const active = workspace.sessions.some((session) => {
+        const status = statusOf(session.id);
+        return status === "running" || status === "waiting" || status === "unread";
+      });
+      const expanded = ui.stickyOpenProjects.has(key)
+        || (!ui.collapsedProjects.has(key) && (selected || active));
       const position = reorderIndex.get(key);
       const group: SidebarGroupRow = {
         kind: "group",

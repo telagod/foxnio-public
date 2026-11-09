@@ -14,13 +14,11 @@ import { Sidebar } from "@/components/sidebar";
 import type { WorktreeContext } from "@/lib/worktree-context";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
-import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ConfirmDialog } from "./ui/field";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
-import { NotificationBell } from "./NotificationBell";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { CommandPaletteMount } from "./CommandPaletteMount";
@@ -37,7 +35,7 @@ import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText }
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { clearDraft } from "@/lib/draft-store";
-import { useNotifications } from "@/hooks/useNotifications";
+import { useSessionSignals } from "@/hooks/useSessionSignals";
 import {
   APP_UPDATE_COMPLETED_RELOAD_MS,
   APP_UPDATE_POLL_MS,
@@ -93,6 +91,7 @@ import {
   type AppUpdateStage,
 } from "./AppUpdateDialog";
 import { ArchiveBrowser } from "./ArchiveBrowser";
+import { FoxPage } from "./FoxPage";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 // The settings shell is part of the app bundle so opening it does not fetch or compile a modal chunk. The right panel (viewer included) is a separate chunk, preloaded on the first pointerdown or keydown and mounted on first open.
 // No loading placeholder: it would take the panel's place in the layout (on
@@ -111,6 +110,9 @@ const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
 const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 const OPEN_URL_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-url-automatically";
+
+// Stable empty list so the memoized RightPanel does not re-render per frame.
+const NO_FILE_TABS: Tab[] = [];
 
 
 type AutoNameStatus =
@@ -145,6 +147,20 @@ export function AppShell({ appName }: { appName: string }) {
   const [explorerRefreshing, setExplorerRefreshing] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [archiveBrowserOpen, setArchiveBrowserOpen] = useState(false);
+  // FOX is a first-class main view (`?fox=1`), not a modal. Its state is
+  // initialized in an effect (not from useSearchParams) so server and client
+  // first render agree; the URL is then treated as the source of truth until
+  // the user closes FOX or opens a session.
+  const [foxOpen, setFoxOpen] = useState(false);
+  // FOX's cwd, reported by FoxPage once it resolves; the file panel uses it
+  // instead of falling back to the last project the user had selected.
+  const [foxCwd, setFoxCwd] = useState<string | null>(null);
+  const foxReturnRef = useRef<{ session: SessionInfo | null; newSessionCwd: string | null } | null>(null);
+  useEffect(() => {
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fox") === "1") {
+      setFoxOpen(true);
+    }
+  }, [searchParams]);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -962,29 +978,7 @@ export function AppShell({ appName }: { appName: string }) {
   }, [isCompactOverlay]);
   const [rightPanelHasOpened, setRightPanelHasOpened] = useState(false);
   const [rightView, setRightView] = useState<RightPanelView>("explorer");
-  const unreadNotifications = useUnreadNotificationCount();
-  // Desktop shows the history in the top-bar bell's popover; mobile in the right panel's tab.
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
-  useEffect(() => {
-    if (!isMobile) setRightView((view) => view === "notifications" ? "explorer" : view);
-  }, [isMobile]);
-  // Settings replaces the top bar; the popover must not reopen on the way back.
-  useEffect(() => {
-    if (isMobile || settingsTab) setNotificationsOpen(false);
-  }, [isMobile, settingsTab]);
-  // Unread entries stay highlighted while the notifications are shown and
-  // become read once the user leaves them (switches tab, closes the panel or popover).
-  const viewingNotifications = (notificationsOpen || (rightPanelOpen && rightView === "notifications")) && !settingsTab;
-  const wasViewingNotificationsRef = useRef(false);
-  // Layout effect: marks read before a notification arriving after the close can join the list.
-  useLayoutEffect(() => {
-    if (wasViewingNotificationsRef.current && !viewingNotifications) notificationHistory.markAllRead();
-    wasViewingNotificationsRef.current = viewingNotifications;
-  }, [viewingNotifications]);
-  const opensNotifications = isMobile && unreadNotifications > 0 && !viewingNotifications;
-  const panelOpenerLabel = opensNotifications
-    ? t("appShell.showNotifications", { count: unreadNotifications })
-    : rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel");
+  const panelOpenerLabel = rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel");
   // User-chosen pixel width (null = fluid 42% default), persisted.
   const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
   const [rightPanelResizing, setRightPanelResizing] = useState(false);
@@ -1165,13 +1159,15 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
-  }, [router, selectedSession]);
+    router.replace(foxOpen || (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fox") === "1") ? "/?fox=1" : "/", { scroll: false });
+  }, [router, selectedSession, foxOpen]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Re-picking the already-open session (sidebar double-click, palette
     // re-select, notification click) must not bump sessionKey: that remounts
     // ChatWindow, reconnects SSE, and drops the mid-run streaming view.
+    setFoxOpen(false);
+    foxReturnRef.current = null;
     setSettingsTab(null);
     // Re-picking the current conversation still closes/rearms the drawer,
     // without remounting the chat or disturbing its draft.
@@ -1202,6 +1198,8 @@ export function AppShell({ appName }: { appName: string }) {
   }, [router, isMobile, selectedSession?.id]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string | null) => {
+    setFoxOpen(false);
+    foxReturnRef.current = null;
     setSettingsTab(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -1217,6 +1215,69 @@ export function AppShell({ appName }: { appName: string }) {
     }
     router.replace("/", { scroll: false });
   }, [router, isMobile]);
+
+  const openFox = useCallback(() => {
+    // Keep the chat that FOX replaces, so closing FOX returns to the same
+    // conversation instead of dumping the user on an empty screen.
+    foxReturnRef.current = { session: selectedSession, newSessionCwd };
+    setFoxOpen(true);
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setSettingsTab(null);
+    setArchiveBrowserOpen(false);
+    setActiveTopPanel(null);
+    if (isMobile) setSidebarOpen(false);
+    router.replace("/?fox=1", { scroll: false });
+  }, [selectedSession, newSessionCwd, isMobile, router]);
+
+  const closeFox = useCallback(() => {
+    const restore = foxReturnRef.current;
+    foxReturnRef.current = null;
+    setFoxOpen(false);
+    if (restore?.session) {
+      setSelectedSession(restore.session);
+      setNewSessionCwd(null);
+      router.replace(`?session=${encodeURIComponent(restore.session.id)}`, { scroll: false });
+    } else if (restore?.newSessionCwd) {
+      setSelectedSession(null);
+      setNewSessionCwd(restore.newSessionCwd);
+      router.replace("/", { scroll: false });
+    } else {
+      setSelectedSession(null);
+      setNewSessionCwd(null);
+      router.replace("/", { scroll: false });
+    }
+  }, [router]);
+
+  const toggleFox = useCallback(() => {
+    if (foxOpen) closeFox();
+    else openFox();
+  }, [foxOpen, closeFox, openFox]);
+
+  // FOX puts its overview in the main view and opens files only on demand.
+  // Restore the previous file view and visibility when leaving the workbench.
+  // This also covers `?fox=1` deep links.
+  const foxPanelReturnRef = useRef<{ view: RightPanelView; open: boolean } | null>(null);
+  const wasFoxOpenRef = useRef(false);
+  useEffect(() => {
+    if (foxOpen === wasFoxOpenRef.current) return;
+    wasFoxOpenRef.current = foxOpen;
+    if (foxOpen) {
+      foxPanelReturnRef.current = {
+        view: rightView,
+        open: rightPanelOpen,
+      };
+      setRightView("explorer");
+      setRightPanelOpen(false);
+    } else {
+      const restore = foxPanelReturnRef.current;
+      foxPanelReturnRef.current = null;
+      if (restore) {
+        setRightView(restore.view);
+        setRightPanelOpen(restore.open);
+      }
+    }
+  }, [foxOpen, isMobile, rightView, rightPanelOpen]);
 
   const sessionTabsActive = !isMobile && sessionTabsPref === true;
   const {
@@ -1369,7 +1430,7 @@ export function AppShell({ appName }: { appName: string }) {
   }, [handleSelectSession, isCompactOverlay]);
 
   // Full-page Settings hides the chat, so its session counts as not viewed.
-  useNotifications({ sessionId: settingsTab ? null : selectedSession?.id ?? null, locale, onOpenSession: openSessionById });
+  useSessionSignals({ sessionId: settingsTab ? null : selectedSession?.id ?? null, onOpenSession: openSessionById });
 
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
@@ -1591,7 +1652,9 @@ export function AppShell({ appName }: { appName: string }) {
       const cwd = comparableProjectPath(sessionCwd);
       return cwd === root || cwd.startsWith(`${root}/`);
     });
-  const explorerCwd = (sessionWorktreeRemoved ? null : sessionCwd) ?? activeCwd ?? newSessionCwd ?? null;
+  const explorerCwd = foxOpen
+    ? foxCwd
+    : (sessionWorktreeRemoved ? null : sessionCwd) ?? activeCwd ?? newSessionCwd ?? null;
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
@@ -1669,7 +1732,7 @@ export function AppShell({ appName }: { appName: string }) {
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const showChat = !foxOpen && (selectedSession !== null || effectiveNewSessionCwd !== null);
 
   // ---- Session tabs (desktop) ----
   // Tabs are shortcuts into the one live ChatWindow. A newer activation
@@ -1778,7 +1841,7 @@ export function AppShell({ appName }: { appName: string }) {
     };
   }, [isMobile, locale, settingsTab, showChat]);
   // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const showPlaceholder = initialSessionRestored && !showChat && !foxOpen;
 
   const sidebarHistory = useSidebarHistory({
     active: isMobile && (showChat || Boolean(initialSessionId)),
@@ -1833,6 +1896,8 @@ export function AppShell({ appName }: { appName: string }) {
       updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
       onClose={isMobile ? handleSidebarToggle : undefined}
       mobile={isMobile}
+      foxOpen={foxOpen}
+      onOpenFox={toggleFox}
     />
   );
 
@@ -2181,6 +2246,31 @@ export function AppShell({ appName }: { appName: string }) {
           </div>
 
           {/* Center Zone: Workspace & Session Breadcrumb + Auto-name action */}
+          {foxOpen && (
+            <div className="shell-topbar-center">
+              <div
+                className="shell-topbar-breadcrumb"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  height: 26,
+                  padding: "0 8px",
+                  borderRadius: "var(--radius-control)",
+                  background: "var(--bg-subtle)",
+                  border: "1px solid var(--border)",
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <Zap size={12} strokeWidth={2} style={{ color: "var(--accent)" }} aria-hidden="true" />
+                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, letterSpacing: "0.12em", color: "var(--text)" }}>FOX</span>
+                <span className="shell-fox-role" style={{ color: "var(--text-dim)", opacity: 0.6 }}>/</span>
+                <span className="shell-fox-role">{t("fox.role")}</span>
+              </div>
+            </div>
+          )}
           {showChat && (() => {
             const effectiveProject = selectedSession?.projectRoot ?? selectedSession?.cwd ?? activeCwd ?? "";
             const sessionTitle = selectedSession?.name || selectedSession?.firstMessage || t("appShell.newSession");
@@ -2391,19 +2481,10 @@ export function AppShell({ appName }: { appName: string }) {
                 style={{ display: "flex", height: 44, flexShrink: 0, alignSelf: "flex-start" }}
               />
             )}
-            {!isMobile && <NotificationBell open={notificationsOpen} onOpenChange={setNotificationsOpen} />}
             <button
               type="button"
               className="shell-toolbar-btn shell-panel-opener ui-focus-ring"
-              onClick={() => {
-                // Unread notifications turn the panel toggle into their shortcut.
-                if (opensNotifications) {
-                  setRightView("notifications");
-                  setRightPanelOpen(true);
-                } else {
-                  setRightPanelOpen((open) => !open);
-                }
-              }}
+              onClick={() => setRightPanelOpen((open) => !open)}
               aria-expanded={rightPanelOpen}
               aria-controls="workspace-file-panel"
               aria-pressed={rightPanelOpen}
@@ -2411,17 +2492,12 @@ export function AppShell({ appName }: { appName: string }) {
               aria-label={panelOpenerLabel}
             >
               <PanelRight size={16} strokeWidth={1.8} aria-hidden="true" />
-              {isMobile && unreadNotifications > 0 && (
-                <span aria-hidden="true" className="panel-opener-badge">
-                  {unreadNotifications > 99 ? "99+" : unreadNotifications}
-                </span>
-              )}
             </button>
           </div>
 
         </div>
 
-        {sessionTabsActive && sessionTabs.length > 0 && (
+        {sessionTabsActive && !foxOpen && sessionTabs.length > 0 && (
           <SessionTabs
             tabs={sessionTabs}
             activeId={selectedSession?.id ?? null}
@@ -2436,7 +2512,21 @@ export function AppShell({ appName }: { appName: string }) {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {showChat ? (
+          {foxOpen ? (
+            <FoxPage
+              onClose={closeFox}
+              onOpenSession={openSessionById}
+              onWorkspaceReady={setFoxCwd}
+              onOpenFile={handleOpenLinkedFile}
+              onOpenUrl={handleSessionOpenUrl}
+              modelsRefreshKey={modelsRefreshKey}
+              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              hideToolActivity={hideToolActivity}
+              foldCompletedTurns={foldCompletedTurns}
+              expandThinkingByDefault={expandThinkingByDefault}
+              hideThinkingBlock={hideThinkingBlock}
+            />
+          ) : showChat ? (
             <ChatWindow
               key={sessionKey}
               session={selectedSession}
@@ -2618,18 +2708,19 @@ export function AppShell({ appName }: { appName: string }) {
         revealPath={revealPath}
         onRevealDone={handleRevealDone}
         explorerCwd={explorerCwd}
-        worktrees={worktreeCtx}
+        worktrees={foxOpen ? null : worktreeCtx}
         explorerRefreshKey={explorerRefreshKey}
         fileSearchOpen={fileSearchOpen}
         onToggleFileSearch={handleToggleFileSearch}
         onFileSearchOpenChange={setFileSearchOpen}
         explorerUploadBusy={explorerUploadBusy}
         onUploadBusyChange={setExplorerUploadBusy}
-        explorerGitCount={explorerGitCount}
-        explorerIsRepo={explorerIsRepo}
+        explorerGitCount={foxOpen ? 0 : explorerGitCount}
+        explorerIsRepo={foxOpen ? false : explorerIsRepo}
         explorerRefreshing={explorerRefreshing}
         isMobile={isMobile}
         isCompactOverlay={isCompactOverlay}
+        foxOpen={foxOpen}
         onOpenFile={handleOpenFile}
         onSelectFileTab={handleSelectFileTab}
         onCloseFileTab={handleCloseFileTab}

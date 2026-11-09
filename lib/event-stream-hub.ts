@@ -5,6 +5,7 @@ import { filePathApiSegments } from "./file-paths";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
 import { subscribeSessionFileChanges } from "./session-watcher";
+import { subscribeFoxReports } from "./fox-report-store";
 import {
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
@@ -236,6 +237,11 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
       return openFileChannel(channel.path, channel.sessionId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
+    case "fox-reports":
+      handle.open();
+      handle.setDetach(subscribeFoxReports(() => handle.send({ type: "changed" })));
+      handle.send({ type: "connected" });
+      return SUBSCRIBED;
   }
 }
 
@@ -270,8 +276,7 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
   return SUBSCRIBED;
 }
 
-// The notifications the server routes to one tab (`clientId`). The tab counts
-// as reachable for toasts and in-page system notifications while this is open.
+// Internal session signals for the tab's navigation state.
 function openNotificationsChannel(clientId: string, handle: SubscriptionHandle): SubscribeResult {
   handle.open();
   handle.setDetach(attachNotificationClient(clientId, (message) => handle.send({ type: "notification", ...message })));

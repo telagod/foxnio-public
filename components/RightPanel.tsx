@@ -20,14 +20,12 @@ import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
 import { FileViewer } from "./FileViewer";
-import { NotificationActions, NotificationList } from "./NotificationList";
-import { useUnreadNotificationCount } from "@/lib/notification-history";
 import { WorktreesPanel } from "./WorktreesPanel";
 import type { WorktreeContext } from "@/lib/worktree-context";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
 
-export type RightPanelView = "explorer" | "git" | "notifications" | "worktrees" | "file";
+export type RightPanelView = "explorer" | "git" | "worktrees" | "file";
 
 interface Props {
   fileTabs: Tab[];
@@ -74,6 +72,8 @@ interface Props {
   onResetRightPanelWidth: () => void;
   onRightPanelResizeStart: (e: React.MouseEvent) => void;
   onRightPanelResizeKey: (e: React.KeyboardEvent) => void;
+  /** FOX is the main view: hide project-only Git views in its file panel. */
+  foxOpen: boolean;
 }
 
 // Memo boundary: AppShell re-renders on polls, timers, and session updates
@@ -125,12 +125,12 @@ export const RightPanel = memo(function RightPanel({
   onResetRightPanelWidth,
   onRightPanelResizeStart,
   onRightPanelResizeKey,
+  foxOpen,
 }: Props) {
   const { t } = useI18n();
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
-  const gitBadge = explorerIsRepo ? explorerGitCount : 0;
-  const unreadNotifications = useUnreadNotificationCount();
-  const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
+  const gitBadge = foxOpen ? 0 : explorerIsRepo ? explorerGitCount : 0;
+  const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set([rightView]));
   useEffect(() => {
     setVisitedViews((previous) => {
       if (previous.has(rightView)) return previous;
@@ -202,13 +202,10 @@ export const RightPanel = memo(function RightPanel({
               onSelectExplorer={() => onSelectView("explorer")}
               explorerBadge={gitBadge}
               gitSelected={rightView === "git"}
-              onSelectGit={() => onSelectView("git")}
+              onSelectGit={foxOpen ? undefined : () => onSelectView("git")}
               gitBadge={gitBadge}
-              notificationsSelected={rightView === "notifications"}
-              onSelectNotifications={isMobile ? () => onSelectView("notifications") : undefined}
-              notificationsBadge={unreadNotifications}
               worktreesSelected={rightView === "worktrees"}
-              onSelectWorktrees={() => onSelectView("worktrees")}
+              onSelectWorktrees={foxOpen ? undefined : () => onSelectView("worktrees")}
             />
           </div>
           {rightView === "explorer" ? (
@@ -274,8 +271,6 @@ export const RightPanel = memo(function RightPanel({
               </button>
             </div>
             )
-          ) : rightView === "notifications" ? (
-            <NotificationActions />
           ) : rightView === "file" && activeFileTab && (
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
@@ -353,6 +348,7 @@ export const RightPanel = memo(function RightPanel({
           </button>
         </div>
 
+        {/* FOX's overview lives in the main view; this panel opens files on demand. */}
         {/* Explorer tab view — kept mounted so expansion survives tab switches. */}
         <div id="workspace-file-panel-explorer" role="tabpanel" aria-label={t("sessionSidebar.explorer")} style={{ display: rightView === "explorer" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {visitedViews.has("explorer") && (explorerCwd ? (
@@ -439,9 +435,6 @@ export const RightPanel = memo(function RightPanel({
               <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
             </div>
           ))}
-        </div>
-        <div id="workspace-file-panel-notifications" role="tabpanel" tabIndex={-1} aria-label={t("appShell.notifications")} className="ui-focus-ring" style={{ display: rightView === "notifications" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden", outline: "none" }}>
-          {isMobile && visitedViews.has("notifications") && <NotificationList />}
         </div>
         <div id="workspace-file-panel-worktrees" role="tabpanel" aria-label={t("tabBar.worktrees")} style={{ display: rightView === "worktrees" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {/* Keyed by repository so a draft branch or pending confirmation never carries over to another repo. */}

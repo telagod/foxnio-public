@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, isWebRpcError, webRpcErrorStatus } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, resolveSpawnCwdResult, isWebRpcError, webRpcErrorStatus, WebRpcError } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 import { parseAdvisorChoice } from "@/lib/advisor-default";
+import { isFoxToolPolicy, isFoxWorkspacePath } from "@/lib/fox";
 
 // Commands that ride whatever child is alive and never spawn or replace one:
 // keystroke predictions, and the side-question reads/cancel omp-web sends in
@@ -72,18 +73,28 @@ export async function POST(
     // get it with a later request. Only an omp without that command needs a
     // respawn, and only to turn the advisor on (the --advisor flag).
     const existing = getRpcSession(id);
+    // FOX is a coordinator and must not keep a legacy full-tool child: a live
+    // child bypasses startRpcSession's tool override, and its system prompt is
+    // already loaded. Replace it before the next command, even when the old
+    // child is still finishing a direct project edit.
+    const foxPolicyMismatch = existing?.isAlive()
+      && isFoxWorkspacePath(existing.cwd)
+      && !isFoxToolPolicy(existing.toolNames);
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
-    if (existing?.isAlive()) {
+    if (existing?.isAlive() && !foxPolicyMismatch) {
       const reuse = noSpawn || liveOnly || existing.isRunning() || existing.isEditingHistory()
         || await existing.applyAdvisorChoice(advisor)
         // `off` has no spawn flag, so a respawn could not apply it either.
         || advisor !== "on";
       if (reuse) {
+        if (getRpcSession(id) !== existing) throw new WebRpcError("The requested conversation changed before the command was sent", "session_busy");
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }
       await existing.destroyAndWait();
+    } else if (existing?.isAlive()) {
+      await existing.destroyAndWait("fox-tool-policy");
     }
     if (noSpawn) return NextResponse.json({ success: true, data: NO_SPAWN_REPLIES[body.type] });
     if (liveOnly) {
@@ -120,6 +131,7 @@ export async function POST(
         : undefined;
 
     const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd, undefined, spawnModel);
+    if (getRpcSession(id) !== session) throw new WebRpcError("The requested conversation changed while it was starting", "session_busy");
     if (spawnModel) {
       // Try the normal RPC first: when it succeeds it also records the new
       // model in the session, so later spawns restore it without an override.

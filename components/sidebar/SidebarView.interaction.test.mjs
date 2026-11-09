@@ -289,21 +289,19 @@ test("placeholder buttons call retry, add workspace and stop", () => {
   assert.deepEqual(calls, [["retry"], ["addWorkspace"], ["stopSearch"]]);
 });
 
-test("header, new-session and footer callbacks", () => {
+test("header and footer callbacks", () => {
   const events = [];
   mount({
     navigation: { canBack: true, canForward: true, onBack: () => events.push("back"), onForward: () => events.push("forward"), backShortcut: "", forwardShortcut: "" },
     onClose: () => events.push("close"),
-    newSession: { disabled: false, onClick: () => events.push("new") },
     onOpenSettings: () => events.push("settings"),
     archivedCount: 2,
   });
   fireEvent.click(screen.getByRole("button", { name: "Navigate back" }));
   fireEvent.click(screen.getByRole("button", { name: "Navigate forward" }));
   fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
-  fireEvent.click(screen.getByRole("button", { name: /New Session/ }));
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  assert.deepEqual(events, ["back", "forward", "close", "new", "settings"]);
+  assert.deepEqual(events, ["back", "forward", "close", "settings"]);
 });
 
 test("a long list stays windowed and keyboard focus reaches rows that were not mounted", () => {

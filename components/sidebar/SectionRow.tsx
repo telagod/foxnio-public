@@ -8,7 +8,6 @@ import { IconButton, RowFrame, frameLayout, rowPropsEqual, type RowBaseProps } f
 import type { WorkspaceToolbarState } from "./types";
 
 const LABEL_KEYS: Record<SidebarSectionId, string> = {
-  active: "sidebar.section.active",
   pinned: "sidebar.section.pinned",
   workspaces: "projects.heading",
 };

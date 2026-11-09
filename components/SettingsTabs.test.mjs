@@ -8,7 +8,12 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { SettingsTabs, SETTINGS_CATEGORIES } = await jiti.import("./SettingsTabs.tsx");
+const { SettingsTabs, SETTINGS_CATEGORIES, getNormalizedActive } = await jiti.import("./SettingsTabs.tsx");
+
+test("legacy notifications settings route resolves to general and is not a category", () => {
+  assert.equal(getNormalizedActive("notifications"), "general");
+  assert.equal(SETTINGS_CATEGORIES.some((category) => category.id === "notifications"), false);
+});
 
 test("horizontal settings tabs expose every category description", () => {
   const html = renderToStaticMarkup(React.createElement(SettingsTabs, {

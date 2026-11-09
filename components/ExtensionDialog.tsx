@@ -255,7 +255,8 @@ export function ExtensionDialog({
       return question.multi || selected.length > 0 || (otherChosen && other.trim() !== "");
     })
     : request.method !== "select" || selectedOption !== null;
-  const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
+  const foxDispatch = request.method === "confirm" && request.title === "FOX · Confirm dispatch";
+  const title = request.method === "ask" ? t("chatWindow.askTitle") : foxDispatch ? t("fox.native.confirmTitle") : request.title;
 
   // Answering removes the panel. Release its text field first, in the same
   // task, so the phone keyboard closes once instead of flashing as the
@@ -645,7 +646,7 @@ export function ExtensionDialog({
             onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg)"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
-            {t("chatWindow.cancel")}
+            {t(foxDispatch ? "fox.native.deny" : "chatWindow.cancel")}
           </button>
           {request.method === "confirm" ? (
             <button
@@ -663,7 +664,7 @@ export function ExtensionDialog({
               onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.12)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
             >
-              {t("chatWindow.confirm")}
+              {t(foxDispatch ? "fox.native.allowOnce" : "chatWindow.confirm")}
             </button>
           ) : (request.method === "select" && attached) || request.method === "ask" ? (
             <button

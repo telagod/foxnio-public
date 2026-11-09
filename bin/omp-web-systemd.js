@@ -63,6 +63,10 @@ Options:
 For LAN access, install with:
   OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='change-me' foxnio-systemd install
   (the plaintext password is hashed before it is written to the env file)
+
+Without a password only loopback Host names are accepted. For a reverse proxy,
+tunnel or Tailscale name, also pass its hostname:
+  OMP_WEB_ALLOWED_HOSTS='box.tailnet.ts.net' foxnio-systemd install
 `);
 }
 
@@ -333,6 +337,7 @@ function install(options = {}) {
     ...(process.env.OMP_WEB_NAME ? { OMP_WEB_NAME: process.env.OMP_WEB_NAME } : {}),
     ...(passwordHash ? { OMP_WEB_PASSWORD_HASH: passwordHash } : {}),
     ...(process.env.OMP_WEB_TRUSTED_HEADER_SHA256 ? { OMP_WEB_TRUSTED_HEADER_SHA256: process.env.OMP_WEB_TRUSTED_HEADER_SHA256 } : {}),
+    ...(process.env.OMP_WEB_ALLOWED_HOSTS ? { OMP_WEB_ALLOWED_HOSTS: process.env.OMP_WEB_ALLOWED_HOSTS } : {}),
     ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
     ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
   }, envPath);

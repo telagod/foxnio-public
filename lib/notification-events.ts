@@ -138,7 +138,14 @@ type Detect = (frame: Record<string, unknown>, session: { sessionId: string; ses
  *
  * "completed" fires on `session_settled` (the run and any background work it
  * started are done), unless the last prompt in that stretch failed or was
- * aborted. Errors fire on the failing `prompt_result` itself.
+ * aborted. A failed `response` (prompt_error) is held until `prompt_result`
+ * decides when it arrives mid-stream: omp may report that same prompt as
+ * completed after an internal stream-stall retry, so the error is only
+ * announced when the prompt result really failed (or the child exits, or the
+ * run settles without a result). A failed response outside a stream
+ * (`terminal: true`, e.g. a bad API key before the agent starts) has nothing
+ * left to retry and is reported immediately.
+ * Errors fire on the failing `prompt_result` itself.
  *
  * omp announces a retry fallback (`retry_fallback_applied`) before the
  * `auto_retry_start` carrying the error that caused it, so a fallback without
@@ -149,6 +156,8 @@ export function createNotificationDetector(): Detect {
   let heldFallback: NotificationEvent | null = null;
   /** omp-web already reported this run's failure (from a failed `response`); its `prompt_result` must not repeat it. */
   let failureReported = false;
+  /** A failed `response` waiting for `prompt_result` to confirm the run really failed. */
+  let heldFailure: NotificationEvent | null = null;
 
   const releaseFallback = (detail?: string): NotificationEvent[] => {
     const held = heldFallback;
@@ -156,18 +165,36 @@ export function createNotificationDetector(): Detect {
     return held ? [{ ...held, detail }] : [];
   };
 
+  const releaseFailure = (): NotificationEvent[] => {
+    const held = heldFailure;
+    heldFailure = null;
+    return held ? [held] : [];
+  };
+
   return (frame, { sessionId, sessionName }) => {
     const base = { sessionId, sessionName };
     switch (frame.type) {
       case "agent_start":
         failureReported = false;
-        return [];
+        return [...releaseFallback(), ...releaseFailure()];
       // omp-web's own frames: an async prompt failure (`response` with
       // success: false) and the omp child exiting mid-run.
-      case "prompt_error":
+      case "prompt_error": {
+        const events = releaseFallback();
+        lastOutcome = "error";
+        if (failureReported) return events;
+        failureReported = true;
+        const failure: NotificationEvent = { ...base, type: "error", detail: str(frame.errorMessage) ?? str(frame.detail) };
+        // Not mid-stream: nothing will retry or complete this prompt, so report it now.
+        if (frame.terminal === true) return [...events, failure];
+        heldFailure = failure;
+        return events;
+      }
       case "process_exit": {
         const events = releaseFallback();
         lastOutcome = "error";
+        const held = releaseFailure();
+        if (held.length > 0) return [...events, ...held];
         if (failureReported) return events;
         failureReported = true;
         return [...events, { ...base, type: "error", detail: str(frame.errorMessage) ?? str(frame.detail) }];
@@ -195,17 +222,26 @@ export function createNotificationDetector(): Detect {
         const events = releaseFallback();
         if (frame.agentInvoked !== true) return events;
         lastOutcome = str(frame.status) ?? null;
-        if (lastOutcome !== "error" || failureReported) return events;
-        failureReported = true;
-        return [...events, { ...base, type: "error", detail: isRecord(frame.error) ? str(frame.error.message) : undefined }];
+        if (lastOutcome === "error") {
+          const held = releaseFailure();
+          if (held.length > 0) return [...events, ...held];
+          if (failureReported) return events;
+          failureReported = true;
+          return [...events, { ...base, type: "error", detail: isRecord(frame.error) ? str(frame.error.message) : undefined }];
+        }
+        heldFailure = null;
+        failureReported = false;
+        return events;
       }
       case "auto_retry_end":
         return releaseFallback();
       case "session_settled": {
         const events = releaseFallback();
+        const held = releaseFailure();
         const outcome = lastOutcome;
         lastOutcome = null;
         failureReported = false;
+        if (held.length > 0) return [...events, ...held];
         if (outcome === "error" || outcome === "aborted") return events;
         return [...events, { ...base, type: "completed" }];
       }

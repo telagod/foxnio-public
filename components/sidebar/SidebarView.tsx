@@ -4,8 +4,8 @@ import { useEffect, useMemo, type ReactNode, type Ref } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { ProjectSortMode } from "@/lib/project-ordering";
 import type { SidebarDensity, SidebarRow } from "@/lib/sidebar-types";
-import { NewSessionButton } from "./NewSessionButton";
 import { SidebarFooter } from "./SidebarFooter";
+import { FoxCard } from "./FoxCard";
 import { SidebarHeader } from "./SidebarHeader";
 import { SidebarList, type SidebarListHandle } from "./SidebarList";
 import { SidebarMenuHost } from "./SidebarMenuHost";
@@ -34,12 +34,10 @@ export interface SidebarViewProps {
   /** Collapse (desktop) or close (drawer) control in the header. */
   readonly onClose?: () => void;
 
-  readonly newSession: {
-    readonly disabled: boolean;
-    readonly title?: string;
-    readonly shortcutHint?: string;
-    readonly onClick: () => void;
-  };
+  /** FOX workspace is the active main view. */
+  readonly foxOpen?: boolean;
+  /** Opens the FOX workspace; the card lives above the workspace tree. */
+  readonly onOpenFox?: () => void;
 
   readonly archivedCount?: number;
   /** Rendered between the archive row and settings, e.g. `<ProviderUsageBar />`. */
@@ -66,7 +64,8 @@ export function SidebarView({
   filters,
   navigation,
   onClose,
-  newSession,
+  foxOpen = false,
+  onOpenFox,
   archivedCount,
   usage,
   settingsOpen = false,
@@ -109,9 +108,7 @@ export function SidebarView({
         overflowOpen={openToolbarMenu === "overflow"}
         onOpenOverflow={(anchor) => ui.openToolbarMenu("overflow", anchor)}
       />
-      <div className="sb-primary">
-        <NewSessionButton {...newSession} shortcutHint={touch ? undefined : newSession.shortcutHint} />
-      </div>
+      {onOpenFox && <FoxCard active={foxOpen} onOpen={onOpenFox} />}
       <SidebarSearchBox
         value={search.query}
         searching={search.searching}

@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { allowFileRoot } from "@/lib/file-access";
+import { foxWorkspaceDir } from "@/lib/fox-workspace";
 import {
   hideProject,
   isReservedLaunchArg,
@@ -50,10 +51,15 @@ export async function GET() {
   try {
     const registry = loadProjectRegistry();
     const sessions = await listAllSessions();
+    // FOX's cwd is a runtime home, not a user project. Excluding it here keeps
+    // every client (sidebar, pickers, command palette) from discovering a
+    // phantom "fox" workspace after the first resident chat.
+    const foxCwd = comparableProjectPath(foxWorkspaceDir());
     const discovered = sessions
       .map((s) => s.projectRoot ?? s.cwd)
-      .filter((path): path is string => Boolean(path));
-    const projects = mergeProjects(registry, discovered);
+      .filter((path): path is string => Boolean(path) && comparableProjectPath(path) !== foxCwd);
+    const projects = mergeProjects(registry, discovered)
+      .filter((project) => comparableProjectPath(project.path) !== foxCwd);
     // Keep the in-memory browse allowlist warm for registered projects that
     // have no sessions (the in-memory list does not survive restarts, and an
     // empty managed project derives no root from sessions).

@@ -29,6 +29,8 @@ npm run desktop:dist
 
 安装包不包含测试文件（`*.test.*`）。
 
+Chromium 只保留 UI 实际提供的语言包（`en-US`、`ja`、`zh-CN`），而不是全部 55 个。`.next` 已经编译进静态 bundle 的包源码（`mermaid`、`katex`、`lucide-react`、`@base-ui`、`react-syntax-highlighter`、`cytoscape`、`es-toolkit` 等）和仅构建期使用的 SWC 二进制也被排除：服务端运行时真正加载的恰好是 `.next/server/**/*.nft.json` 列出的 external 模块，而 `bin/omp-web.js` 用 `--experimental-next-config-strip-types` 启动 Next，由 Node ≥24 自己剥离 `next.config.ts` 的类型，不需要加载 SWC。去掉这个参数后，缺少 `@next/swc-*` 的包会在首次启动时把它下载到 `~/.cache/next-swc`，离线环境下直接失败——改动服务启动方式时务必保留该参数。Linux x64 的 AppImage 从 194 MB 降到 148 MB，解包后的应用从 758 MB 降到 554 MB。
+
 ## 运行时行为
 
 - 应用会在 `127.0.0.1:30177` 启动自己的本地服务。固定端口可以让浏览器存储（界面偏好）保持在同一个 origin。该端口被占用（例如被 CLI 或服务实例占用）时，应用改用下一个空闲端口（最多到 30196）并写入日志。通过 `OMP_WEB_DESKTOP_PORT`（或 `PORT`）指定的端口按原样使用，被占用时应用拒绝启动。如果服务进程在响应之前退出，应用会报错退出，而不会连接到该端口上的其他服务。

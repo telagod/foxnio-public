@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Bell, Folder, GitBranch, GitFork, X } from "lucide-react";
+import { Folder, GitBranch, GitFork, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import FoxLogo from "./FoxLogo";
 import { getFileIcon } from "./FileIcons";
 
 export interface Tab {
@@ -17,7 +18,7 @@ interface Props {
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
-  /** Pinned Explorer tab rendered after Notifications, before the file tabs (right-panel tab redesign). */
+  /** Pinned Explorer tab rendered before the file tabs. */
   explorerSelected?: boolean;
   onSelectExplorer?: () => void;
   /** Changed-file count badge on the Explorer tab. */
@@ -27,14 +28,12 @@ interface Props {
   onSelectGit?: () => void;
   /** Changed-file count badge on the Git tab. */
   gitBadge?: number;
-  /** Pinned Notifications tab rendered first. */
-  notificationsSelected?: boolean;
-  onSelectNotifications?: () => void;
-  /** Unread-notification count badge on the Notifications tab. */
-  notificationsBadge?: number;
   /** Pinned Worktrees tab rendered after Git. */
   worktreesSelected?: boolean;
   onSelectWorktrees?: () => void;
+  /** Pinned FOX status tab, rendered first while the FOX workspace is open. */
+  foxSelected?: boolean;
+  onSelectFox?: () => void;
 }
 const badgeStyle = (color: string) => ({
   display: "inline-flex",
@@ -49,7 +48,7 @@ const badgeStyle = (color: string) => ({
   fontWeight: 700,
 });
 
-/** Notifications / Explorer / Git: fixed tabs before the file tabs. */
+/** Fixed tabs before the file tabs. */
 function PinnedTab({ id, panelId, label, title, icon, selected, badge, badgeColor, onSelect, onKeyDown }: {
   id: string;
   panelId: string;
@@ -123,12 +122,12 @@ function PinnedTab({ id, panelId, label, title, icon, selected, badge, badgeColo
   );
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0, notificationsSelected = false, onSelectNotifications, notificationsBadge = 0, worktreesSelected = false, onSelectWorktrees }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0, worktreesSelected = false, onSelectWorktrees, foxSelected = false, onSelectFox }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const orderedTabIds = [
-    ...(onSelectNotifications ? ["notifications"] : []),
+    ...(onSelectFox ? ["fox"] : []),
     ...(onSelectExplorer ? ["explorer"] : []),
     ...(onSelectGit ? ["git"] : []),
     ...(onSelectWorktrees ? ["worktrees"] : []),
@@ -136,9 +135,9 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
   ];
 
   const selectTabById = (id: string) => {
-    if (id === "explorer") onSelectExplorer?.();
+    if (id === "fox") onSelectFox?.();
+    else if (id === "explorer") onSelectExplorer?.();
     else if (id === "git") onSelectGit?.();
-    else if (id === "notifications") onSelectNotifications?.();
     else if (id === "worktrees") onSelectWorktrees?.();
     else {
       const tab = tabs.find((item) => item.id === id);
@@ -211,17 +210,17 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
         height: "var(--tab-height)",
       }}
     >
-      {onSelectNotifications && (
+      {onSelectFox && (
         <PinnedTab
-          id="notifications"
-          panelId="workspace-file-panel-notifications"
-          label={t("appShell.notifications")}
-          title={notificationsBadge > 0 ? t("appShell.notificationsUnreadCount", { count: notificationsBadge }) : t("appShell.notifications")}
-          icon={<Bell size={13} strokeWidth={2} aria-hidden="true" />}
-          selected={notificationsSelected}
-          badge={notificationsBadge}
+          id="fox"
+          panelId="workspace-file-panel-fox"
+          label={t("tabBar.fox")}
+          title={t("fox.panel.title")}
+          icon={<FoxLogo size={13} />}
+          selected={foxSelected}
+          badge={0}
           badgeColor="var(--accent)"
-          onSelect={onSelectNotifications}
+          onSelect={onSelectFox}
           onKeyDown={handleTabKeyDown}
         />
       )}

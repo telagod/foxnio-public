@@ -1,4 +1,5 @@
 import type { HostToolDefinition } from "./pi-types";
+import { isFoxWorkspacePath } from "./fox";
 import { isRecord } from "./type-guards";
 
 /**
@@ -23,12 +24,14 @@ export const AGENT_TOOL_NAMES = new Set(["list_sessions", "new_session", "send_t
 export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   {
     name: "list_sessions",
+    loadMode: "essential",
     description:
-      "List foxnio sessions (ID, name, working directory, running or idle) so send_to_session can address one without the user copying IDs.",
+      "List foxnio sessions (ID, name, working directory, running or idle). For FOX, isFoxWorker identifies its own native workers, including OMP continuation copies; originSessionId identifies a continued conversation, not a new task. Use the exact worker ID and cwd for send_to_session.",
     parameters: { type: "object", properties: {} },
   },
   {
     name: "new_session",
+    loadMode: "essential",
     description:
       "Start a new foxnio session. The new session appears in the foxnio sidebar like any other session. Returns its session ID.",
     parameters: {
@@ -45,12 +48,18 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
   },
   {
     name: "send_to_session",
+    loadMode: "essential",
     description:
       "Send a message to another foxnio session by ID. If the target is not running it is resumed first, as when a user opens it. The delivered message is prefixed with the sending session's ID so the target transcript shows where it came from.",
     parameters: {
       type: "object",
       properties: {
         sessionId: { type: "string", description: "Target session ID (see list_sessions)." },
+        cwd: {
+          type: "string",
+          description:
+            "FOX follow-ups require the worker's exact working directory from list_sessions. The host verifies it against the target session before delivery.",
+        },
         message: { type: "string", description: "Message to deliver to the target session." },
         delivery: {
           type: "string",
@@ -88,10 +97,13 @@ export interface AgentToolSessionSummary {
   name?: string;
   cwd?: string;
   running: boolean;
+  parentSessionId?: string;
+  sessionFile?: string;
 }
 
 export interface AgentToolCreateSessionInput {
   cwd: string;
+  parentSessionId?: string;
   /** Already sender-attributed by executeAgentTool, or null for an idle session. */
   prompt: string | null;
   provider?: string;
@@ -131,6 +143,13 @@ export interface AgentToolContext {
   /** The off-by-default Settings gate (lib/web-settings agentToolsEnabled). */
   enabled: boolean;
   guard: AgentToolGuard;
+  /**
+   * Optional target policy for `send_to_session`. Returning false rejects the
+   * call before delivery. FOX uses it to bind a follow-up to the native parent
+   * and worker session created by `new_session`, never an arbitrary session that
+   * happens to share a project cwd.
+   */
+  allowSendTarget?: (sessionId: string, cwd?: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -308,6 +327,7 @@ export async function executeAgentTool(
     if (name && name.length > 200) throw new Error("Agent tool argument \"name\" exceeds 200 characters.");
     const created = await ops.createSession({
       cwd,
+      ...(isFoxWorkspacePath(ctx.sourceCwd) ? { parentSessionId: ctx.sourceSessionId } : {}),
       prompt: prompt ? formatAttributedMessage(ctx.sourceSessionId, prompt) : null,
       provider,
       modelId,
@@ -322,6 +342,10 @@ export async function executeAgentTool(
   const sessionId = parseSessionId(requiredString(record, "sessionId"));
   if (sessionId === ctx.sourceSessionId) {
     throw new Error("Agent tool \"send_to_session\" cannot target the calling session itself.");
+  }
+  const cwd = optionalString(record, "cwd");
+  if (ctx.allowSendTarget && !await ctx.allowSendTarget(sessionId, cwd)) {
+    throw new Error("This session is not a direct worker of the current FOX conversation, or its cwd does not match. Use new_session for new work.");
   }
   const message = requiredString(record, "message");
   checkMessageLength(message, "message");

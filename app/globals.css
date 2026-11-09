@@ -1884,6 +1884,11 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   max-width: fit-content;
   min-width: 24px !important;
 }
+.composer-model-control > button {
+  /* WebKit can centre flex content inside a full-width button unless the
+     justification is explicit; the model name belongs next to the +. */
+  justify-content: flex-start;
+}
 .composer-model-control > button > span {
   max-width: 96px;
 }
@@ -3455,6 +3460,12 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   position: absolute;
   top: 0;
   bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  container-type: inline-size;
+  container-name: breadcrumb;
   /* Equal insets center the content-sized pill between the control clusters. */
   left: var(--topbar-side);
   right: var(--topbar-side);
@@ -3462,6 +3473,10 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
 }
 .shell-topbar-center > .shell-topbar-breadcrumb {
   pointer-events: auto;
+}
+
+@container breadcrumb (max-width: 240px) {
+  .shell-fox-role { display: none; }
 }
 
 /* Hide only the breadcrumb when the sidebars leave too little title space. */
@@ -4653,14 +4668,66 @@ html[data-touch-targets="accessible"] .extension-dialog-footer > button {
     min-height: 44px !important;
   }
 }
-/* Phones: six 44 px controls do not fit beside the model name, so the toolbar
-   takes two rows: plus + model name, then the icon controls and Send. */
+/* Phones: keep the composer controls on one row. The composer alone uses
+   36 px controls (the user's configured touch-target size still applies
+   elsewhere); the model selector takes the remaining width and the primary
+   action is icon-only, so even a 320 px viewport fits every control. */
 @media (max-width: 640px) and (hover: none), (max-width: 640px) and (pointer: coarse) {
   html:not([data-touch-targets="compact"]) .composer-toolbar {
-    flex-wrap: wrap;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start;
+    gap: 2px;
   }
-  html:not([data-touch-targets="compact"]) .composer-toolbar > .composer-model-control {
-    flex: 1 0 calc(100% - 52px);
+  html:not([data-touch-targets="compact"]) .composer-toolbar-spacer {
+    display: none;
+  }
+  html:not([data-touch-targets="compact"]) .composer-toolbar > button,
+  html:not([data-touch-targets="compact"]) .composer-toolbar > div:first-child > button {
+    width: 36px !important;
+    min-width: 36px !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0 !important;
+  }
+  html:not([data-touch-targets="compact"]) .composer-model-control {
+    flex: 1 1 auto;
+    min-width: 0;
     max-width: none;
+  }
+  html:not([data-touch-targets="compact"]) .composer-model-control > button {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 36px !important;
+  }
+  html:not([data-touch-targets="compact"]) .composer-thinking-control {
+    flex: 0 0 36px;
+    max-width: 36px;
+  }
+  html:not([data-touch-targets="compact"]) .composer-thinking-control > button {
+    height: 36px !important;
+    justify-content: center;
+  }
+  html:not([data-touch-targets="compact"]) .composer-fast-control {
+    justify-content: center;
+  }
+  html:not([data-touch-targets="compact"]) .composer-primary-action {
+    flex: 0 0 36px;
+    width: 36px !important;
+    min-width: 36px !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    padding: 0;
+    gap: 0;
+  }
+  html:not([data-touch-targets="compact"]) .composer-primary-label {
+    display: none;
+  }
+}
+
+/* At the narrowest phones the localized placeholder wraps; grow the compact
+   textarea to two lines so the second one is not clipped by the toolbar. */
+@media (max-width: 340px) {
+  html:not([data-touch-targets="compact"]) .composer-textarea:not([data-composer-expanded] *) {
+    min-height: 68px !important;
   }
 }

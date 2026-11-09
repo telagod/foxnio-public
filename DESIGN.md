@@ -218,6 +218,50 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
 - Expensive rendering is deferred until needed; responsiveness and initial
   bundle size are part of the product contract.
 
+## Native-first FOX boundary
+
+FOX is an ordinary OMP conversation coordinating work across projects:
+understand the goal, maintain the plan, delegate implementation, inspect
+results and ask for decisions. The conversation is the primary surface.
+Native todo appears through `ComposerPanels`, native questions and execution
+confirmation through `ExtensionDialog`, preferences through OMP memory, and
+the transcript is the audit trail. Optional memory tools are supplied by OMP
+when a supported backend is configured, not forced into the CLI tool list.
+
+Cross-project `new_session` and `send_to_session` remain host bridges because
+native task subagents share their parent's cwd. A new worker receives native
+`parentSession` before its first prompt. Follow-ups are authorized only for a
+direct child of the current FOX conversation, with its exact cwd and session
+ID. Briefing workers come from that lineage and live session state, never a
+dispatch ledger. Idle or new activity does not prove task completion.
+
+The native `tool_call` hook enforces coordinator tool scope and project policy:
+`observe` blocks execution, `confirm` opens native confirmation, and `auto`
+permits delegation. The host still requires a process-scoped, single-use native
+receipt bound to the source session, tool call, exact arguments and resolved
+project path. Policy is checked again before execution. Proactive observation
+blocks dispatch and blocking questions regardless of project policy.
+
+foxnio keeps only the FOX workspace/persona, read-only `BRIEFING.md` projection,
+`session.json` pointer/reset epoch, `service.json` observation/dispatch policy,
+and dedupe/daily-budget metadata in `service-state.json`. One 60s wake loop
+coalesces native attention and worker activity, respects quiet hours and daily
+limits, and wakes the current conversation. Pending retries stay in memory;
+unreported signals are reconstructed after restart. The observer never edits
+OMP todos or reads worker transcripts; FOX reviews the evidence itself.
+
+Historical `chief.db`, `dispatches.json` and preference files remain untouched.
+A one-time read-only migration copies only autonomy policy; old tickets and
+approvals do not become executable state. Retired `/api/chief/*` routes return
+410. Historical code remains dormant for rollback, not part of new workflows.
+
+The scheduler may only call existing RPC/session operations and existing
+file/Git APIs. It must not add a browser-triggered host execution path.
+
+See `docs/specs/2026-11-08-native-first-fox-design.md` for the original migration
+proposal and its implementation notes. The older resident-Chief proposal is
+historical; it is not authority for recreating its control plane.
+
 ## Upstream and release strategy
 
 `agegr/pi-web` is the historical source and a useful source of UI ideas,

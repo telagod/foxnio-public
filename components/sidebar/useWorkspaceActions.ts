@@ -61,6 +61,8 @@ export interface WorkspaceActionsOptions {
   readonly update: SidebarUiUpdate;
   readonly setAddProjectOpen: (open: boolean) => void;
   readonly onNewSession?: (sessionId: string, cwd: string) => void;
+  /** Clicking a workspace toggles it instead of selecting it (FOX view). */
+  readonly forceToggleGroups?: boolean;
 }
 
 export interface WorkspaceActionsResult {
@@ -154,8 +156,8 @@ export function useWorkspaceActions(options: WorkspaceActionsOptions): Workspace
       toggleGroup(projectKey) {
         const group = groupOf(projectKey);
         if (!group) return;
-        const { selectCwd, update } = live.current.options;
-        if (planGroupClick(group) === "toggle") {
+        const { selectCwd, update, forceToggleGroups } = live.current.options;
+        if (forceToggleGroups || planGroupClick(group) === "toggle") {
           update((state) => toggleProject(state, projectKey, group.expanded));
           return;
         }

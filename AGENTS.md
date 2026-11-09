@@ -13,10 +13,70 @@ Lint: `npm run lint`
 The dev server needs the `omp` binary installed (on `PATH`, or set `OMP_WEB_OMP_BIN`).
 All live-agent features go through it; session browsing works without it.
 
+FOX UI checks: `node --experimental-strip-types --test lib/fox-native-work.test.mjs components/FoxActivity.test.mjs`.
+For browser checks with mocked APIs, isolate both `HOME` and `PI_CODING_AGENT_DIR`
+in a temporary directory and set `OMP_WEB_OMP_BIN=/bin/false`. The resident FOX
+service starts automatically, so a verification server must not share the running
+installation's FOX state or credentials.
+
 Native omp tests (opt-in; they run the real `omp` from `OMP_WEB_OMP_BIN` or `PATH`,
 isolated from your credentials and config by `tests/omp-native-env.mjs`):
 `OMP_WEB_TEST_NATIVE_COMPAT=1 node --experimental-strip-types --test lib/omp/omp-compat.native.test.mjs`,
 and `OMP_WEB_TEST_NATIVE_EDIT=1` for `lib/omp/session-edit.native.test.mjs`. See "Tracking omp releases".
+
+Native FOX integration: `OMP_WEB_TEST_NATIVE_FOX=1 node --experimental-strip-types --test lib/omp/fox-native.native.test.mjs`.
+It uses the real OMP process against an isolated local fixture provider to check
+confirmation/denial, observation-only turns, native worker lineage, follow-ups,
+unrelated-target rejection, and todo persistence. No production sessions or
+provider credentials are used.
+
+FOX is conversation-first. `FoxActivity` projects native session state; plans
+and questions use `ComposerPanels` and `ExtensionDialog`. Do not reintroduce a
+task/approval store. `fox-native-extension.mjs` enforces coordinator tool scope
+and dispatch consent before execution; `rpc-manager.ts` consumes a single-use
+receipt bound to the source, tool call, arguments and resolved project path.
+New workers get native `parentSession` before their first prompt. Only direct
+children may receive FOX follow-ups. Memory tools are optional: OMP adds them
+for supported configured backends; forcing them into `--tools` breaks startup
+when memory is unavailable.
+
+Project workers report through `report_to_parent` and native lifecycle hooks.
+Reports remain in the worker's native outbox and the original coordinator's
+native receipt/message; never create a parallel progress database. An idle worker
+or a delivered report does not prove task completion. Receipt delivery is a
+metadata operation: it must not start a model turn. Automatic commentary still
+obeys the FOX service configuration. Busy coordinators retain pending reports;
+restart recovery scans the native journals and deduplicates receipts.
+
+Native copy-on-write continuations may encode both `parentSession` and
+`continuationOf` as the previous session ID. Resolve that exact ID only among
+sibling session headers, reject ambiguity and mismatched cwd, and retain support
+for absolute references. A parent reference without `continuationOf` is an
+independent branch. Keep the original FOX recipient across moves and resets.
+
+FOX empty-session promotion must keep the chat component and event connection
+mounted through the first prompt. Only an explicit new-conversation reset should
+remount it; late pointer polling or registration must not replace an in-flight
+first send. Registration/reset operations use the persisted reset epoch.
+
+The real browser fixture is `node tests/fox-workflow-server.mjs`; it uses port
+30178 with isolated HOME/agent state and a local canned provider. Stop it after
+verification, and never share the production agent directory.
+
+FOX layout uses a shared empty-content/composer width (`--chat-empty-max-width`).
+Empty columns use auto block margins so short windows can scroll from the top;
+do not center an overflowing flex child with `justify-content: center`.
+The activity panel docks only when the FOX workspace has at least 880 CSS px,
+measured with `clientWidth` (not zoomed bounding rectangles). Dialog viewport
+dimensions divide by `--ui-scale`. Verify both pane headers align, the top-bar
+breadcrumb is centered, drafts survive panel/width changes, and the expanded
+composer still covers the viewport.
+
+Legacy `chief.db`, preferences and dispatch records are preserved as history.
+The one-time policy migration reads only legacy autonomy rows, read-only.
+`/api/chief/*` returns 410; no old approval may execute. The wake loop persists
+dedupe and daily-budget metadata only; pending retries stay in memory and are
+reconstructed from current native signals after restart.
 
 ---
 
@@ -73,9 +133,9 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
-  notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
-  notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
-  notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
+  notifications/devices/route.ts  GET/PUT retired (410)
+  notifications/presence/route.ts POST retired (410)
+  notifications/test/route.ts     POST retired (410)
   notifications/history/route.ts  GET entries | PATCH { ids } mark read | DELETE ?id= remove one, ?all=1 clear
   auth/**                         provider list, login/logout, API keys (via RPC)
   cwd/validate/route.ts           POST validate/select a cwd
@@ -173,8 +233,6 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
-  NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -191,7 +249,7 @@ components/
 hooks/
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
   useAudio.ts              completion sound + browser AudioContext unlock
-  useNotifications.ts      presence reports, toast/system delivery, notification clicks
+  useSessionSignals.ts     internal session signals and session-open navigation
   useDragDrop.ts           shared drag/drop state
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
@@ -577,28 +635,29 @@ during the wait.
 - `GET /api/projects` re-authorizes registered roots with `allowFileRoot()` —
   the in-memory browse allowlist does not survive restarts, and empty managed
   projects derive no root from sessions.
-- By default (sort "None") the client orders the merged list manually
-  (`sortOrder`, set by drag/Move up/down), then most-recently-added, then by
-  path (`lib/project-ordering.ts`), so rows never jump while sessions refresh.
+- By default the client sorts the merged list by **Last updated**: each
+  project's newest session (`lastMessageAt` from the session tail scan, else
+  the file mtime) first (`lib/project-ordering.ts`), so active workspaces rise.
   The header sort button (`omp-web:project-sort` in `localStorage`, per
-  browser) switches to Alphabetical (label A→Z) or Last updated (newest last
-  message first: `lastMessageAt` from the session tail scan, else the file
-  mtime) — the latter deliberately reorders on activity. While a
-  sort is active, rows get a pin toggle: pinned projects (`pinOrder` in the
+  browser; only non-default modes are stored) switches to Alphabetical
+  (label A→Z) or None (manual `sortOrder`, set by drag/Move up/down, then
+  most-recently-added, then by path). While alphabetical or last-updated
+  sorting is active, rows get a pin toggle: pinned projects (`pinOrder` in the
   registry, pinned to the end of the group) lead in their own manual order and
   alone keep Move up/down and drag; pins are ignored under "None".
-  Expanded and explicitly collapsed project paths live in `localStorage`
-  (`omp-web:expanded-projects`, `omp-web:collapsed-projects`); the selected workspace is
-  open unless the user collapsed it, and stale keys are pruned against the
-  current project list (only after the first project fetch — an empty
-  still-loading list must never wipe storage). Rows show no worktree/branch
-  selector (see the Worktrees tab).
+  Only explicitly collapsed project paths live in `localStorage`
+  (`omp-web:collapsed-projects`); expansion is derived from the selected
+  workspace and live session states, so it is not persisted. Stale keys are
+  pruned against the current project list (only after the first project
+  fetch — an empty still-loading list must never wipe storage). Rows show no
+  worktree/branch selector (see the Worktrees tab).
 
 ### Sidebar v2 (`components/sidebar/`, `lib/sidebar-*.ts`, `lib/session-store.ts`)
 - Layers: `lib/session-store.ts` (data) → `lib/sidebar-model.ts` (pure rows) → `components/sidebar/SidebarView.tsx` (presentation, virtualized) ← `components/sidebar/Sidebar.tsx` (container: store, UI state, search, actions, dialogs, worktrees, `?session=` restore). Contract: `lib/sidebar-types.ts`. Props are the old `SessionSidebar` props minus `refreshKey` (call `store.refresh()`) plus `mobile`.
 - Rows are flat (`section | group | session | more | placeholder`) with one fixed height per kind and density (`SIDEBAR_ROW_HEIGHTS`; `compact` / `comfortable` / `touch`; touch for `(hover: none), (pointer: coarse)` or the "accessible" touch-target setting — headless Chromium reports `hover: none`, so patch `matchMedia` to see desktop density). `VirtualList` mounts the visible window + 240 px overscan + the focused / menu-open / renaming rows; keep per-row work independent of the total number of sessions.
-- Sections: **Active** (waiting / running / exited / unread across workspaces, hidden when empty), **Pinned** (server-side pins), **Workspaces**. "Waiting" is derived from the notification history (`sessionIdsWaitingForInput`). A session can appear in several sections (distinct row keys).
-- Watermark (from dsh): an open workspace shows its first 5 roots (fork children count as rows), raised so every running / waiting / unread / exited / selected session within the first 50 roots stays visible; "Show 20 more" adds rows (`ui.extraRows`, not persisted). Workspaces do not reorder on activity unless the sort is "Last updated"; `orderFrozen` freezes order while a new session is pending; a workspace you navigate away from stays open for the page's life (`stickyOpenProjects`, not persisted).
+- Sections: **Pinned** (server-side pins) and **Workspaces**; there is no separate Active section, activity is expressed by the default sort. A session can appear in both sections (distinct row keys).
+- "Waiting for input" comes from unread `input` notifications (`sessionIdsWaitingForInput`), not from live dialog state. `lib/rpc-manager.ts` must settle the `<sessionId>:input` history entry (`markHistoryRead`) whenever the last pending dialog ends — answer, timeout, cancel, auto-approval or restart — and the client does the same when a session is opened or a dialog is answered. Otherwise the sidebar and tabs advertise a question that no longer exists.
+- Watermark (from dsh): an open workspace shows its first 5 roots (fork children count as rows), raised so every running / waiting / unread / exited / selected session within the first 50 roots stays visible; "Show 20 more" adds rows (`ui.extraRows`, not persisted). Workspaces reorder on activity by default; only the "None" sort keeps them still. Only the selected workspace and ones with live attention (running, waiting, unread) expand by themselves; every other workspace stays folded, and a manual expansion lasts for the page's life instead of being persisted. `orderFrozen` freezes order while a new session is pending; a workspace you navigate away from stays open for the page's life (`stickyOpenProjects`, not persisted).
 - UI state: `lib/sidebar-ui-state.ts` (writes debounced 250 ms, flushed on `pagehide`; corrupt storage falls back to defaults).
 - Search: `lib/sidebar-search.ts`: instant local scoring (title, first message, workspace alias/label), then a 250 ms-debounced streaming `/api/sessions/search` (NDJSON `{ scores }`), aborted by every new query; total score is `max(local, server)`; at most 200 hits kept; per-session search fields are cached by id + modified + name + firstMessage. The route returns scores only, so rows have no snippet today.
 - Keyboard: `role="tree"` with roving tabindex (`lib/sidebar-keyboard.ts`): arrows, Home/End, Enter, F2, Delete, `p`, Shift+F10 / ContextMenu; `/` focuses search; `Mod+B` toggles the sidebar (drawer on mobile). Menus are popovers on pointer devices and bottom sheets on touch (long-press 500 ms). The sheet opens under the finger, so the click some browsers send when the finger lifts lands on its backdrop and would dismiss it; `SidebarList` swallows that one click at `window` capture (`consumeFired`) and any later press clears the exemption.
@@ -791,61 +850,25 @@ during the wait.
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
-### Notifications (`lib/notification-*.ts`, `public/sw.js`, Settings → Notifications)
-- Detection runs on the server in `AgentSessionWrapper.handleFrame` (and
-  `handleProcessExit` for crashes), so sessions no tab watches still notify.
-  `createNotificationDetector()` only inspects top-level frames; subagent
-  activity is wrapped in `subagent_*` frames and never notifies. "Completed"
-  fires on `session_settled` (not `prompt_result`), so background work started
-  by the prompt is done too; a failed or aborted last prompt suppresses it.
-  Auto-approved tool confirmations return before the hook and never notify.
-  omp sends `retry_fallback_applied` before the `auto_retry_start` of the same
-  failure, so the detector holds a reason-less fallback until that frame.
-  Failures also arrive as foxnio's own `prompt_error` (failed `response`) and
-  `process_exit` frames; the detector reports one failure per run.
-- A session omp moved to a new file keeps its old ids as `aliases` on the
-  event, so a tab still showing an old id counts as viewing it.
-- Presence and streams are separate on purpose. Presence: each tab reports
-  `{clientId, deviceId, visible, sessionId}` to `/api/notifications/presence`
-  (visibility/session change, input after idling, every 30 s while present;
-  expires 60 s after receipt). `visible` means visible AND input within 3 min.
-  `sessionId` is null while full-page Settings hides the chat. Streams: the
-  tab's open SSE connections (`attachNotificationClient`), which reconnect and
-  overlap independently of presence. `clientId` is per page load, `deviceId`
-  per browser (`localStorage`). Reports carry a per-page `seq`; the server
-  drops one older than the stored report (requests can arrive out of order).
-  Prefs PUTs run one at a time and read the prefs when sent, for the same reason.
-- Routing (`routeNotification`, unit-tested): a visible tab on the session
-  drops the event everywhere (presence only, so a reconnecting stream cannot
-  leak it); else if a visible tab with an open stream exists, `whenActive:
-  "toast"` devices get a toast on their active tabs only; else push (subscribed
-  devices) or in-page `showNotification` (tabs with an open stream).
-- The server decides before pushing: iOS revokes push permission for pushes
-  that display nothing, so `public/sw.js` always shows what it receives.
-- Notifications have their own `notifications` channel (`clientId` = the
-  tab's notification client id), opened by `useNotifications` in `AppShell`,
-  so a tab stays reachable on every view, Settings included. A tab on
-  Settings is visible, so it also counts as active.
-- Prefs and push subscriptions are per device, in `localStorage` and mirrored to
-  the SQLite notification store in foxnio's data dir
-  (`lib/notification-store.ts`, server-only; mode 0600 because it also holds
-  the VAPID private key; WAL with a busy timeout). It also keeps the
-  notification history. An installed server and `npm run dev` sharing the agent
-  dir share it safely; the first open imports and deletes the old
-  `notifications.json`. Push text is
-  rendered server-side in the device's locale. Browsers with saved settings (enabled or not) sync on load; never-configured browsers do not.
-- A crash notifies "Run failed" while a run is live or while background work
-  started by it has not settled yet (`unsettled`, cleared by `session_settled`).
-- The Settings test button pushes through the server for subscribed devices
-  (502 with a generic status message on failure; details go to the server log) and shows a local
-  notification otherwise, or a toast where none are allowed.
-- Push subscriptions: https, port 443, no credentials, hostname on the push-service allow-list (FCM, Mozilla, Apple, Windows; extend with `OMP_WEB_PUSH_ALLOWED_HOSTS`); anything else is rejected at registration and dropped on read.
-- `/sw.js`, `/badge-96.png`, the browser icons and `/_next/static/` are exempt from the password gate (`proxy.ts` matcher, anchored):
-  browsers re-fetch the worker for updates without the session cookie.
-- Notification clicks survive an expired sign-in: `proxy.ts` sends `/?session=…`
-  to `/login?next=/?session=…`, and `LoginForm` returns there (only `/?…`
-  targets are accepted). The worker navigates non-app windows to the session
-  URL; the app falls back to that URL when `/api/sessions` cannot be read.
+### FOX session signals
+
+The standalone Project Briefing and Notifications interfaces are retired. FOX's
+native conversation, activity panel and native questions are the coordination UI.
+`publishNotification` records native lifecycle events regardless of device prefs
+and broadcasts only internal `signal` frames. The existing history supports FOX
+review and navigation status; it is not a second task or approval ledger.
+`useSessionSignals` maintains that history and session-open navigation without
+presence polling, push registration, toast delivery or browser notifications.
+Terminal completed/error signals resolve older input signals, including moved
+session aliases. FOX review still obeys its existing enable, quiet-hour and budget
+settings; receiving an event is not proof of task completion.
+
+The legacy notification devices, presence and test APIs return 410. The service
+worker cleans up old subscriptions and preserves legacy notification-click links;
+it no longer handles pushes. The browser host `notify` tool is neither registered
+nor executable. Keep native ask/confirm dialogs, inline runtime notices and normal
+operation feedback. Project reports must still open the exact worker session via
+OPEN_SESSION_EVENT.
 
 ## Tracking omp releases
 
@@ -970,7 +993,7 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
-# This is NOT the Next.js you know
+## This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 

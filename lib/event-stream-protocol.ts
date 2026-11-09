@@ -29,7 +29,8 @@ export type EventStreamChannel =
   | { kind: "session"; sessionId: string }
   | { kind: "file"; path: string; sessionId: string | null }
   /** Host tool calls (open_url, notify, open_file) from sessions no tab is watching. */
-  | { kind: "host-tools" };
+  | { kind: "host-tools" }
+  | { kind: "fox-reports" };
 
 export type MuxControlFrame =
   | { type: "hello"; connectionId: string }
@@ -57,6 +58,8 @@ export function parseEventStreamChannel(value: unknown): EventStreamChannel | nu
       return isValidNotificationId(channel.clientId) ? { kind: "notifications", clientId: channel.clientId } : null;
     case "host-tools":
       return { kind: "host-tools" };
+    case "fox-reports":
+      return { kind: "fox-reports" };
     case "session":
       return isBoundedString(channel.sessionId, MAX_ID_LENGTH) ? { kind: "session", sessionId: channel.sessionId } : null;
     case "file": {

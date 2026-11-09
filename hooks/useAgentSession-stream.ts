@@ -393,25 +393,8 @@ export async function runHostTool(
       if (!isSafeOpenUrl(raw)) return { text: "Unsafe or invalid URL not opened", isError: !!raw };
       return { text: handlers.openUrl(raw), isError: false };
     }
-    case "notify": {
-      const title = str(args.title) ?? "OMP";
-      const message = str(args.message) ?? "";
-      if (typeof Notification !== "undefined") {
-        try {
-          const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
-          if (permission === "granted") {
-            const options = { body: message, icon: "/icon-192.png", badge: "/badge-96.png" };
-            // Chrome on Android only allows notifications through a service worker.
-            const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
-            if (registration) await registration.showNotification(title, options);
-            else new Notification(title, options);
-          }
-        } catch {
-          // Notification API blocked — the result still succeeds.
-        }
-      }
-      return { text: "Notification shown", isError: false };
-    }
+    case "notify":
+      return { text: "Direct notifications are managed by FOX. Report relevant information in your response; FOX workers should use report_to_parent.", isError: true };
     case "open_file": {
       const path = str(args.path) ?? "";
       if (!path) return { text: "No path provided", isError: true };

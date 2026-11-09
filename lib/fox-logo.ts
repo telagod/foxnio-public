@@ -1,0 +1,6 @@
+// Shared geometry for the user-supplied fox mark. The source SVG has large
+// margins; `FOX_LOGO_VIEWBOX` trims them so the mark fills its icon box.
+export const FOX_LOGO_VIEWBOX = "192 223 804 951";
+
+export const FOX_LOGO_PATH =
+  "M 819.5 223 L 823 225.5 L 996 634.5 L 594.5 1174 L 592 1173 L 192 632.5 L 360 236.5 L 364.5 231 L 371 229 L 480 592.5 L 494.5 634 L 693.5 634 L 696 633 L 819.5 223 Z M 297 671 L 295 673 L 592 772 L 597 772 L 894 673 L 893 671 L 297 671 Z M 544 797 L 590 1080 L 592 1084 L 592 1092 L 595 1098 L 643 803 L 645 799 L 644 797 L 544 797 Z ";

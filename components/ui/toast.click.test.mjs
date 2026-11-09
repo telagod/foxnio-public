@@ -6,11 +6,12 @@ import { act, cleanup, render, renderHook } from "@testing-library/react/pure.js
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
-// Same specifiers as useNotifications' own imports: on Windows a relative path
+// Same specifiers as the hook's own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
 const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
-const { useNotifications } = await jiti.import("@/hooks/useNotifications");
+const { useSessionSignals } = await jiti.import("@/hooks/useSessionSignals");
 const { notificationHistory } = await jiti.import("@/lib/notification-history");
+const { OPEN_SESSION_EVENT } = await jiti.import("@/lib/notification-client");
 
 /** The tab side of the shared event-stream worker (lib/event-stream.ts), so a
  * test can deliver frames on the notifications channel the hook opened. */
@@ -25,7 +26,7 @@ const eventWorker = {
 };
 function deliverNotification(message) {
   const id = [...eventStreams].findLast(([, channel]) => channel.kind === "notifications")?.[0];
-  assert.ok(id, "useNotifications must hold a notifications channel");
+  assert.ok(id, "useSessionSignals must hold a notifications channel");
   eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify({ type: "notification", ...message }) } });
 }
 
@@ -101,77 +102,81 @@ test("a toast without an action keeps the default cursor", () => {
   assert.equal(document.querySelector(".toast-card").style.cursor, "");
 });
 
-test("a session notification toast opens its session from a card click; one without a session does not", () => {
-  const sessions = [];
-  render(React.createElement(ToastProvider, null));
-  renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: (id) => sessions.push(id) }));
-  // Toasts closed by earlier tests can still be leaving the shared manager, so
-  // each card is found by its own title (the session name).
-  const deliver = (sessionId, sessionName) => {
-    act(() => {
-      deliverNotification({ kind: "toast", event: { type: "completed", sessionId, sessionName } });
-    });
-    return Array.from(document.querySelectorAll(".toast-card")).find((card) => card.querySelector(".display-serif")?.textContent === sessionName);
+test("signals update history without alerts; legacy alert frames are ignored", async () => {
+  let calls = 0;
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requests.push(String(url));
+    return { ok: true, json: async () => ({ entries: [] }) };
   };
-  const withSession = deliver("s1", "Fix bug");
-  // The card is the only way in: no separate Open link.
-  assert.equal(withSession.querySelectorAll("button:not(.toast-close-button), a").length, 0);
-  act(() => withSession.querySelector(".display-serif").click());
-  assert.deepEqual(sessions, ["s1"]);
-  // Session notifications are listed; opening one from its toast reads it.
-  assert.deepEqual(notificationHistory.get().filter((e) => e.id === "s1:completed").map((e) => e.read), [true]);
-  const withoutSession = deliver("", "No session");
-  assert.equal(withoutSession.style.cursor, "");
-  act(() => withoutSession.querySelector(".display-serif").click());
-  assert.deepEqual(sessions, ["s1"]);
-});
-
-test("a notification the OS showed is listed in history", async () => {
-  const created = [];
-  // Bare `Notification` in the code under test resolves to the global, not window.
-  globalThis.Notification = window.Notification = class { static permission = "granted"; constructor(title) { created.push(title); } };
+  globalThis.Notification = window.Notification = class { static requestPermission() { calls++; throw new Error("permission"); } constructor() { calls++; throw new Error("alert"); } };
   try {
-    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
-    await act(async () => {
-      deliverNotification({ kind: "os", event: { type: "error", sessionId: "s9", sessionName: "Shown by OS", detail: "boom" } });
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    render(React.createElement(ToastProvider, null));
+    const view = renderHook(() => useSessionSignals({ sessionId: null, onOpenSession: () => {} }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      deliverNotification({ kind: "toast", event: { type: "error", sessionId: "toast", sessionName: "Toast" } });
+      deliverNotification({ kind: "os", event: { type: "error", sessionId: "os", sessionName: "OS" } });
+      deliverNotification({ kind: "signal", event: { type: "error", sessionId: "s9", sessionName: "Signal", detail: "boom" } });
     });
-    assert.deepEqual(created, ["Shown by OS"]);
-    assert.deepEqual(notificationHistory.get().filter((e) => e.id === "s9:error").map((e) => [e.event.sessionName, e.read]), [["Shown by OS", false]]);
+    assert.deepEqual(notificationHistory.get().map((e) => e.id), ["s9:error"]);
+    assert.equal([...document.querySelectorAll(".toast-card")].some((card) => ["Signal", "Toast", "OS"].includes(card.querySelector(".display-serif")?.textContent)), false);
+    assert.equal(calls, 0);
+    assert.ok(requests.every((url) => url === "/api/notifications/history"));
+    view.unmount();
+    assert.equal([...eventStreams.values()].filter((c) => c.kind === "notifications").length, 0);
   } finally {
+    globalThis.fetch = previousFetch;
     delete window.Notification;
     delete globalThis.Notification;
-    act(() => notificationHistory.clear());
   }
 });
 
-test("a push the service worker showed reloads the list from the server; other messages are ignored", async () => {
+test("session open events and legacy worker clicks navigate and detach on cleanup", async () => {
   const worker = new window.EventTarget();
+  worker.getRegistration = async () => undefined;
   Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: worker });
-  const requests = [];
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => {
-    requests.push([init.method ?? "GET", String(url)]);
-    const entries = [{ id: "s7:error", event: { type: "error", sessionId: "s7", sessionName: "Pushed" }, at: 1, read: false }];
-    return { ok: true, json: async () => ({ entries }) };
-  };
+  const opened = [];
   try {
-    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    requests.length = 0;
-    const post = (data) => act(async () => {
-      worker.dispatchEvent(new window.MessageEvent("message", { data }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    const view = renderHook(() => useSessionSignals({ sessionId: null, onOpenSession: (id) => opened.push(id) }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      window.dispatchEvent(new CustomEvent(OPEN_SESSION_EVENT, { detail: "report-worker" }));
+      worker.dispatchEvent(new window.MessageEvent("message", { data: { type: "omp-open-session", sessionId: "legacy-worker" } }));
+      worker.dispatchEvent(new window.MessageEvent("message", { data: { type: "omp-open-session", sessionId: "" } }));
     });
-    await post("junk");
-    await post({ type: "something-else" });
-    assert.deepEqual(requests, []);
-    await post({ type: "omp-notification-shown", notification: { type: "error", title: "Pushed", body: "Run failed", tag: "s7:error", sessionId: "s7" } });
-    assert.deepEqual(requests, [["GET", "/api/notifications/history"]]);
-    assert.deepEqual(notificationHistory.get().map((e) => e.id), ["s7:error"]);
+    assert.deepEqual(opened, ["report-worker", "legacy-worker"]);
+    view.unmount();
+    act(() => window.dispatchEvent(new CustomEvent(OPEN_SESSION_EVENT, { detail: "after" })));
+    assert.deepEqual(opened, ["report-worker", "legacy-worker"]);
   } finally {
-    globalThis.fetch = previousFetch;
     delete window.navigator.serviceWorker;
-    act(() => notificationHistory.clear());
+  }
+});
+
+test("legacy service worker cleanup leaves unrelated registrations alone", async () => {
+  const worker = new window.EventTarget();
+  const calls = [];
+  const registration = {
+    active: { scriptURL: "http://localhost/sw.js" },
+    update: async () => calls.push("update"),
+    pushManager: { getSubscription: async () => ({ unsubscribe: async () => calls.push("unsubscribe") }) },
+    getNotifications: async () => [{ close: () => calls.push("close") }],
+  };
+  worker.getRegistration = async () => registration;
+  Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: worker });
+  try {
+    const first = renderHook(() => useSessionSignals({ sessionId: null, onOpenSession: () => {} }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.deepEqual(calls, ["update", "unsubscribe", "close"]);
+    first.unmount();
+    calls.length = 0;
+    registration.active.scriptURL = "http://localhost/unrelated-sw.js";
+    renderHook(() => useSessionSignals({ sessionId: null, onOpenSession: () => {} }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.deepEqual(calls, []);
+  } finally {
+    delete window.navigator.serviceWorker;
   }
 });

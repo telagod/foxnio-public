@@ -3,6 +3,11 @@ productName: foxnio
 executableName: foxnio
 asar: false
 compression: maximum
+# The UI ships en, ja and zh-CN only; the rest of Chromium's 55 locale packs are dead weight.
+electronLanguages:
+  - en-US
+  - ja
+  - zh-CN
 directories:
   output: dist-desktop
   buildResources: desktop
@@ -23,6 +28,27 @@ files:
   - next.config.ts
   - "!node_modules/**/*.map"
   - "!**/*.test.*"
+  # Client-only libraries are already compiled into .next/static, and the
+  # server's runtime imports are exactly the externals listed in
+  # .next/server/**/*.nft.json (next, react, react-dom, sharp, undici, ...).
+  # Everything below is either build-time only or reached exclusively through
+  # the static bundle, so shipping its sources only inflates the installer.
+  - "!node_modules/@next/swc-*/**/*"
+  - "!node_modules/@next/eslint-plugin-next/**/*"
+  - "!node_modules/@mermaid-js/**/*"
+  - "!node_modules/mermaid/**/*"
+  - "!node_modules/lucide-react/**/*"
+  - "!node_modules/@base-ui/**/*"
+  - "!node_modules/es-toolkit/**/*"
+  - "!node_modules/cytoscape/**/*"
+  - "!node_modules/cytoscape-fcose/**/*"
+  - "!node_modules/react-syntax-highlighter/**/*"
+  - "!node_modules/katex/**/*"
+  - "!node_modules/caniuse-lite/**/*"
+  - "!node_modules/prismjs/**/*"
+  - "!node_modules/mammoth/**/*"
+  - "!node_modules/jiti/**/*"
+  - "!node_modules/yaml/**/*"
   - package.json
 extraResources:
   - from: desktop/runtime/node

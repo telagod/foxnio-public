@@ -277,40 +277,33 @@ const ICON_DIR = path.join(os.homedir(), ".local", "share", "icons", "hicolor", 
 const POLL_INTERVAL_MS = 5000;
 
 // ---------------------------------------------------------------------------
-// Fox head tray icons. One set of flat polygons (design coordinates, same
-// artwork as public/omp-web-logo.svg without the tile) drives both the hicolor
-// SVG files and the pure-JS rasterizer below.
+// New angular FOX mark. One even-odd path (design coordinates, same artwork
+// as public/omp-web-logo.svg without the tile) drives both the hicolor SVG
+// files and the pure-JS rasterizer below.
 // ---------------------------------------------------------------------------
 
-// Painter's order: head, cheeks, inner ears, dark details (eyes + nose).
-const FOX_LAYERS = [
-  { color: "head", polygons: [[[9, 8], [26, 21], [38, 21], [55, 8], [57, 34], [32, 58], [7, 34]]] },
-  { color: "cheek", polygons: [[[7, 34], [22, 36], [32, 47], [42, 36], [57, 34], [32, 58]]] },
-  { color: "ear", polygons: [[[14, 17], [21, 23], [13, 28]], [[50, 17], [43, 23], [51, 28]]] },
-  {
-    color: "detail",
-    polygons: [[[16, 28], [24, 30], [18, 34]], [[48, 28], [40, 30], [46, 34]], [[28, 52], [36, 52], [32, 58]]],
-  },
+const FOX_MARK_PATH = "M 819.5 223 L 823 225.5 L 996 634.5 L 594.5 1174 L 592 1173 L 192 632.5 L 360 236.5 L 364.5 231 L 371 229 L 480 592.5 L 494.5 634 L 693.5 634 L 696 633 L 819.5 223 Z M 297 671 L 295 673 L 592 772 L 597 772 L 894 673 L 893 671 L 297 671 Z M 544 797 L 590 1080 L 592 1084 L 592 1092 L 595 1098 L 643 803 L 645 799 L 644 797 L 544 797 Z ";
+
+const FOX_MARK_POLYGONS = [
+  [[819.5, 223], [823, 225.5], [996, 634.5], [594.5, 1174], [592, 1173], [192, 632.5], [360, 236.5], [364.5, 231], [371, 229], [480, 592.5], [494.5, 634], [693.5, 634], [696, 633]],
+  [[297, 671], [295, 673], [592, 772], [597, 772], [894, 673], [893, 671]],
+  [[544, 797], [590, 1080], [592, 1084], [592, 1092], [595, 1098], [643, 803], [645, 799], [644, 797]],
 ];
 
-// Visible fox bounds inside the 64×64 design space (square, centered on the head).
-const FOX_VIEWBOX = { x: 3, y: 4, size: 58 };
+// Square viewBox centered on the 804×951 mark.
+const FOX_VIEWBOX = { x: 118.5, y: 223, size: 951 };
 
 const TRAY_COLORS = {
-  running: { head: [242, 128, 46], cheek: [255, 241, 226], ear: [90, 42, 16], detail: [36, 24, 16] },
-  stopped: { head: [141, 133, 120], cheek: [245, 241, 234], ear: [95, 89, 80], detail: [58, 54, 47] },
+  running: [242, 128, 46],
+  stopped: [141, 133, 120],
 };
 
 const rgbHex = ([r, g, b]) => `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 
 function buildTrayIconSvg(running) {
-  const colors = TRAY_COLORS[running ? "running" : "stopped"];
-  const paths = FOX_LAYERS.map(({ color, polygons }) => {
-    const d = polygons.map((poly) => `M${poly.map(([x, y]) => `${x} ${y}`).join(" L")} Z`).join(" ");
-    return `  <path fill="${rgbHex(colors[color])}" d="${d}"/>`;
-  });
+  const fill = rgbHex(TRAY_COLORS[running ? "running" : "stopped"]);
   const { x, y, size } = FOX_VIEWBOX;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="${x} ${y} ${size} ${size}">\n${paths.join("\n")}\n</svg>\n`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="${x} ${y} ${size} ${size}">\n  <path fill="${fill}" fill-rule="evenodd" d="${FOX_MARK_PATH}"/>\n</svg>\n`;
 }
 
 // Installed into the user hicolor icon dir.
@@ -320,7 +313,7 @@ const ICON_STOPPED = buildTrayIconSvg(false);
 // ---------------------------------------------------------------------------
 // Pure-JS tray icon rasterizer (SNI IconPixmap, ARGB32 big-endian = [A,R,G,B])
 //
-// Fills the same polygons with 4×4 supersampling. Rasterized at process start
+// Fills the even-odd mark with 4×4 supersampling. Rasterized at process start
 // so the panel icon renders even when the theme cannot resolve IconName.
 // ---------------------------------------------------------------------------
 
@@ -339,18 +332,18 @@ function pointInPolygon(px, py, poly) {
   return inside;
 }
 
-// Color of the topmost layer covering a design-space point, or null.
-function foxColorAt(px, py, colors) {
-  for (let i = FOX_LAYERS.length - 1; i >= 0; i -= 1) {
-    const { color, polygons } = FOX_LAYERS[i];
-    if (polygons.some((poly) => pointInPolygon(px, py, poly))) return colors[color];
+// Even-odd coverage of the single FOX mark, or null.
+function foxColorAt(px, py, color) {
+  let inside = false;
+  for (const poly of FOX_MARK_POLYGONS) {
+    if (pointInPolygon(px, py, poly)) inside = !inside;
   }
-  return null;
+  return inside ? color : null;
 }
 
 // Rasterize the tray icon; returns an ARGB32 byte buffer ([A,R,G,B] per pixel).
 function buildTrayIconPixels(size, running) {
-  const colors = TRAY_COLORS[running ? "running" : "stopped"];
+  const color = TRAY_COLORS[running ? "running" : "stopped"];
   const scale = FOX_VIEWBOX.size / size;
   const total = TRAY_SAMPLES * TRAY_SAMPLES;
   const buffer = Buffer.alloc(size * size * 4);
@@ -365,7 +358,7 @@ function buildTrayIconPixels(size, running) {
         for (let sx = 0; sx < TRAY_SAMPLES; sx += 1) {
           const dx = FOX_VIEWBOX.x + (x + (sx + 0.5) / TRAY_SAMPLES) * scale;
           const dy = FOX_VIEWBOX.y + (y + (sy + 0.5) / TRAY_SAMPLES) * scale;
-          const c = foxColorAt(dx, dy, colors);
+          const c = foxColorAt(dx, dy, color);
           if (c) {
             covered += 1;
             r += c[0];

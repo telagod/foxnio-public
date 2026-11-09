@@ -24,17 +24,6 @@ import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
 import { useRecentRunsLimit, type RecentRunsLimitPreset } from "@/hooks/useRecentRunsLimit";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
-import { useNotificationPrefs } from "@/hooks/useNotifications";
-import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
-import {
-  ensurePushSubscription,
-  getNotificationDeviceId,
-  getNotificationPrefs,
-  getNotificationSupport,
-  showSystemNotification,
-  updateNotificationPrefs,
-  type NotificationSupport,
-} from "@/lib/notification-client";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
@@ -227,13 +216,6 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
-  // Notifications
-  { id: "notifications-enable", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.enable", descKey: "notifications.enableDesc", fallbackSection: "Notifications", fallbackLabel: "Enable notifications", fallbackDesc: "Asks the browser for permission to show notifications.", scope: "UI" },
-  { id: "notifications-completed", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeCompleted", descKey: "notifications.typeCompletedDesc", fallbackSection: "Notifications", fallbackLabel: "Task finished", fallbackDesc: "A prompt and the background work it started are done. Subagents never notify.", scope: "UI" },
-  { id: "notifications-input", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeInput", descKey: "notifications.typeInputDesc", fallbackSection: "Notifications", fallbackLabel: "Waiting for input", fallbackDesc: "The agent asks a question or needs an approval.", scope: "UI" },
-  { id: "notifications-error", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeError", descKey: "notifications.typeErrorDesc", fallbackSection: "Notifications", fallbackLabel: "Run failed", fallbackDesc: "A run stops with an error after retries and fallbacks, or the omp process exits.", scope: "UI" },
-  { id: "notifications-modelSwitch", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeModelSwitch", descKey: "notifications.typeModelSwitchDesc", fallbackSection: "Notifications", fallbackLabel: "Model switched automatically", fallbackDesc: "omp switches models on its own: a fallback after a refusal, rate limit, or usage limit, or a prewalk / plan hand-off.", scope: "UI" },
-  { id: "notifications-when-active", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.whenActive", descKey: "notifications.whenActiveDesc", fallbackSection: "Notifications", fallbackLabel: "When I'm using omp-web in another tab", fallbackDesc: "Nothing is shown for the session you are viewing.", scope: "UI" },
 ];
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
@@ -520,144 +502,6 @@ function AgentEnvSetting() {
         </div>
       </div>
     </NativeSetting>
-  );
-}
-
-const NOTIFICATION_TYPE_LABELS: Record<NotificationType, { label: string; desc: string }> = {
-  completed: { label: "notifications.typeCompleted", desc: "notifications.typeCompletedDesc" },
-  input: { label: "notifications.typeInput", desc: "notifications.typeInputDesc" },
-  error: { label: "notifications.typeError", desc: "notifications.typeErrorDesc" },
-  modelSwitch: { label: "notifications.typeModelSwitch", desc: "notifications.typeModelSwitchDesc" },
-};
-
-const NOTIFICATION_STATUS_KEYS: Record<Exclude<NotificationSupport, "push" | "no-push">, string> = {
-  insecure: "notifications.statusInsecure",
-  "ios-install": "notifications.statusIosInstall",
-  unsupported: "notifications.statusUnsupported",
-  denied: "notifications.statusDenied",
-};
-
-/** Per-device notification prefs (lib/notification-client.ts), mirrored to the server. */
-function NotificationSettingsPanel() {
-  const { t, locale } = useI18n();
-  const prefs = useNotificationPrefs();
-  const [support, setSupport] = useState<NotificationSupport | null>(null);
-  const [pushActive, setPushActive] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    setSupport(getNotificationSupport());
-    // Enabled: join (or redo) the app's startup repair, which is single-flight,
-    // so the status reflects the subscription after any repair, not before it.
-    const pushState: Promise<boolean> = getNotificationPrefs().enabled
-      ? ensurePushSubscription()
-      : fetch(`/api/notifications/devices?deviceId=${encodeURIComponent(getNotificationDeviceId())}`)
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data: { subscribed?: boolean } | null) => data?.subscribed === true);
-    pushState.then((active) => { if (alive) setPushActive(active); }).catch(() => {});
-    return () => { alive = false; };
-  }, []);
-
-  const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
-  const save = (patch: Parameters<typeof updateNotificationPrefs>[0]) => {
-    void updateNotificationPrefs(patch).catch((error: unknown) => toast.error(t("notifications.saveFailed"), errorText(error)));
-  };
-
-  const setEnabled = async (enabled: boolean) => {
-    setBusy(true);
-    try {
-      // First await inside the click: Safari only prompts during the user gesture.
-      if (enabled && "Notification" in window && Notification.permission === "default") await Notification.requestPermission();
-      await updateNotificationPrefs({ enabled, locale });
-      if (enabled) setPushActive(await ensurePushSubscription());
-    } catch (error) {
-      toast.error(t("notifications.enableFailed", { error: errorText(error) }));
-    } finally {
-      setSupport(getNotificationSupport());
-      setBusy(false);
-    }
-  };
-
-  // With push, the server sends a real push; otherwise this tab shows one itself.
-  const sendTest = async () => {
-    const testNotification = renderNotification({ type: "test", sessionId: "", sessionName: "foxnio" }, t);
-    try {
-      if (pushActive) {
-        const res = await fetch("/api/notifications/test", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ deviceId: getNotificationDeviceId() }),
-        });
-        if (!res.ok) {
-          const body: unknown = await res.json().catch(() => null);
-          // The server drops a subscription the push service reports gone;
-          // resubscribe so the next test (and real pushes) can reach this device.
-          setPushActive(await ensurePushSubscription().catch(() => false));
-          throw new Error(isRecord(body) && typeof body.error === "string" ? body.error : `HTTP ${res.status}`);
-        }
-      } else if (!(await showSystemNotification(testNotification))) {
-        // No system notifications here (plain HTTP, permission missing): in-app toasts are what this browser gets.
-        toast.info(testNotification.title, testNotification.body);
-        return;
-      }
-      toast.success(t("notifications.testSent"));
-    } catch (error) {
-      toast.error(t("notifications.testFailed"), errorText(error));
-    }
-  };
-
-  let status: string | null = null;
-  if (support && support !== "push" && support !== "no-push") status = t(NOTIFICATION_STATUS_KEYS[support]);
-  else if (support && prefs.enabled) {
-    if (Notification.permission !== "granted") status = t("notifications.statusPermission");
-    else status = t(pushActive ? "notifications.statusPush" : "notifications.statusInPage");
-  }
-
-  return (
-    <>
-      <NativeSetting searchId="notifications-enable" scope="UI" label={t("notifications.enable")} description={t("notifications.enableDesc")}>
-        <ToggleSwitch checked={prefs.enabled} disabled={busy} onChange={(next) => void setEnabled(next)} />
-      </NativeSetting>
-      {status && <Alert variant={support === "push" || support === "no-push" ? "info" : "warning"} description={status} />}
-      {NOTIFICATION_TYPES.map((type) => (
-        <NativeSetting key={type} searchId={`notifications-${type}`} scope="UI" disabled={!prefs.enabled} label={t(NOTIFICATION_TYPE_LABELS[type].label)} description={t(NOTIFICATION_TYPE_LABELS[type].desc)}>
-          <ToggleSwitch checked={prefs.types[type]} disabled={!prefs.enabled} onChange={(next) => save({ types: { ...prefs.types, [type]: next } })} />
-        </NativeSetting>
-      ))}
-      <NativeSetting searchId="notifications-when-active" scope="UI" disabled={!prefs.enabled} label={t("notifications.whenActive")} description={t("notifications.whenActiveDesc")}>
-        <select
-          style={nativeSelectStyle}
-          value={prefs.whenActive}
-          disabled={!prefs.enabled}
-          onChange={(event) => save({ whenActive: event.target.value === "system" ? "system" : "toast" })}
-        >
-          <option value="toast" style={nativeOptionStyle}>{t("notifications.whenActiveToast")}</option>
-          <option value="system" style={nativeOptionStyle}>{t("notifications.whenActiveSystem")}</option>
-        </select>
-      </NativeSetting>
-      <div>
-        <button
-          type="button"
-          onClick={() => void sendTest()}
-          disabled={!prefs.enabled}
-          style={{
-            padding: "6px 14px",
-            border: "1px solid var(--accent-strong)",
-            borderRadius: "var(--radius-control)",
-            background: "var(--accent-strong)",
-            color: "var(--on-accent)",
-            cursor: prefs.enabled ? "pointer" : "not-allowed",
-            fontSize: 12,
-            fontWeight: 600,
-            opacity: prefs.enabled ? 1 : 0.6,
-          }}
-        >
-          {t("notifications.test")}
-        </button>
-      </div>
-    </>
   );
 }
 
@@ -1830,19 +1674,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </p>
                 </div>
                 <AgentsConfig cwd={cwd} />
-              </div>
-            )}
-
-            {/* NOTIFICATIONS TAB */}
-            {currentTab === "notifications" && (
-              <div role="tabpanel" id="settings-panel-notifications" aria-labelledby="settings-tab-notifications" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
-                <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("notifications.title")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("notifications.subtitle")}</p>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NotificationSettingsPanel />
-                </div>
               </div>
             )}
 

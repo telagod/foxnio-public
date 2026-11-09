@@ -16,6 +16,9 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { HubResultPanel } from "./MessageView-hub-panel";
+import { FoxWorkerReport } from "./FoxWorkerReport";
+import { FOX_REPORT_MESSAGE, parseFoxReport } from "@/lib/omp/fox-reports.mjs";
+import type { FoxWorkerReport as WorkerReport } from "@/lib/fox-report-types";
 import { isMessageOverflowing } from "@/lib/message-overflow";
 import { hiddenPreviewLines, userMessagePreviewMaxHeight } from "@/lib/user-message-preview";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
@@ -233,6 +236,11 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     }
     if (custom.display === false) {
       return <HiddenExtensionView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
+    }
+    if (custom.customType === FOX_REPORT_MESSAGE) {
+      const details = custom.details as { report?: unknown } | undefined;
+      const report = parseFoxReport(details?.report) as WorkerReport | null;
+      if (report) return <FoxWorkerReport report={report} onOpenFile={onOpenFile} />;
     }
     return <CustomMessageView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
   }

@@ -208,6 +208,7 @@ async function fetchStub(url, init = {}) {
 let visibilityState = "hidden";
 const overrides = [
   [globalThis, "SharedWorker", { value: FakeSharedWorker }],
+  [globalThis, "KeyboardEvent", { value: window.KeyboardEvent }],
   [globalThis, "fetch", { value: fetchStub }],
   [globalThis, "ResizeObserver", { value: class { observe() {} disconnect() {} } }],
   [window.HTMLElement.prototype, "scrollIntoView", { value() {} }],
@@ -295,6 +296,7 @@ const { toast, toastCalls } = await jiti.import("@/components/ui/toast");
 const { MessageView } = await jiti.import("@/components/MessageView");
 const { translate } = await jiti.import("@/lib/i18n");
 const { ChatWindow } = await jiti.import("@/components/ChatWindow");
+const { FoxPage } = await jiti.import("@/components/FoxPage");
 const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await jiti.import("@/lib/omp/session-edit-extension.mjs");
 
 // ---------------------------------------------------------------------------
@@ -2174,11 +2176,22 @@ test("a btw follow-up asks in its topic; a refused ask keeps the composer text a
   assert.deepEqual(toastCalls, []);
 });
 
-test("the notify host tool stays out of the Notifications tab, which lists only pushable notification types", async () => {
-  toastCalls.length = 0;
-  const result = await runHostTool("notify", { title: "Build done", message: "All green" }, { openUrl: () => "" });
-  assert.deepEqual(result, { text: "Notification shown", isError: false });
-  assert.deepEqual(toastCalls, []);
+test("the notify host tool is rejected without calling browser notification APIs", async () => {
+  const previous = globalThis.Notification;
+  globalThis.Notification = class {
+    static requestPermission() { throw new Error("unexpected permission request"); }
+    constructor() { throw new Error("unexpected notification"); }
+  };
+  try {
+    toastCalls.length = 0;
+    const result = await runHostTool("notify", { title: "Build done", message: "All green" }, { openUrl: () => "" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /FOX/);
+    assert.deepEqual(toastCalls, []);
+  } finally {
+    if (previous === undefined) delete globalThis.Notification;
+    else globalThis.Notification = previous;
+  }
 });
 
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
@@ -5425,6 +5438,84 @@ test("a first prompt rejected after promotion identifies the real-session recove
   assert.deepEqual(promoted, [sid]);
   assert.deepEqual(receipt, { status: "rejected", recoveryKey: sid });
   assert.equal(w.latest.agentRunning, false);
+});
+
+test("FOX first send keeps its event connection through new-session promotion", async () => {
+  resetWorld();
+  const sid = "fox-first-native";
+  primeSession(sid, []);
+  for (const [url, value] of [
+    ["/api/fox/workspace", { cwd: "/workspace" }],
+    ["/api/fox/session", { sessionId: null, resetAt: "2026-01-01T00:00:00.000Z" }],
+    ["/api/fox/session", { sessionId: null, resetAt: "2026-01-01T00:00:00.000Z" }],
+  ]) world.holds.push({
+    match: (method, target) => method === "GET" && target === url,
+    produce: async () => ({ value }),
+  });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: sid } }),
+  });
+  const view = ownRoot(render(React.createElement(TestRoot, null, React.createElement(FoxPage, {
+    onClose() {}, onOpenSession() {},
+  }))));
+  await settle();
+  const textarea = view.container.querySelector("textarea");
+  assert.ok(textarea);
+  fireEvent.change(textarea, { target: { value: "First FOX question" } });
+  fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+  await settle();
+  const stream = world.esInstances.find((entry) => entry.channel.sessionId === sid);
+  if (stream) await act(async () => { stream.open(); await sleep(60); });
+  await settle(3100);
+  assert.ok(stream && !stream.closedByCaller, "promotion must not unmount the sending hook");
+  const prompts = callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "prompt");
+  assert.equal(prompts.length, 1, "the first click sends exactly one prompt");
+  assert.equal(prompts[0].body.message, "First FOX question");
+});
+
+test("a late FOX pointer poll cannot replace a first send still creating its native session", async () => {
+  resetWorld();
+  const sid = "fox-pending-first-send";
+  primeSession(sid, []);
+  world.holds.push({
+    match: (method, target) => method === "GET" && target === "/api/fox/workspace",
+    produce: async () => ({ value: { cwd: "/workspace" } }),
+  });
+  world.holds.push({
+    match: (method, target) => method === "GET" && target === "/api/fox/session",
+    produce: async () => ({ value: { sessionId: null, resetAt: null } }),
+  });
+  let releasePoll;
+  world.holds.push({
+    match: (method, target) => method === "GET" && target === "/api/fox/session",
+    produce: () => new Promise((resolve) => { releasePoll = resolve; }),
+  });
+  let releaseCreate;
+  world.holds.push({
+    match: (method, target) => method === "POST" && target === "/api/agent/new",
+    produce: () => new Promise((resolve) => { releaseCreate = resolve; }),
+  });
+  const view = ownRoot(render(React.createElement(TestRoot, null, React.createElement(FoxPage, { onClose() {}, onOpenSession() {} }))));
+  await settle();
+  const textarea = view.container.querySelector("textarea");
+  fireEvent.change(textarea, { target: { value: "Preserve this first question" } });
+  fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+  await settle();
+  assert.ok(releasePoll && releaseCreate);
+  await act(async () => {
+    releasePoll({ value: { sessionId: "another-fox-session", resetAt: null } });
+    await sleep(30);
+    releaseCreate({ value: { sessionId: sid } });
+    await sleep(30);
+  });
+  const stream = world.esInstances.find((entry) => entry.channel.sessionId === sid);
+  assert.ok(stream);
+  await act(async () => { stream.open(); await sleep(60); });
+  assert.equal(stream.closedByCaller, false);
+  const prompts = callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "prompt");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].body.message, "Preserve this first question");
 });
 
 test("a failed HTTP response overtaken by a completed turn and newer send is superseded, not rejected", async (t) => {

@@ -3,10 +3,8 @@ import type { NotificationEvent, NotificationHistoryEntry } from "./notification
 import { isRecord } from "./type-guards";
 
 /**
- * Browser mirror of the server's notification history (Notifications tab).
- * The server records every notification; this list shows them, updates at
- * once on read/remove/clear, and reloads from the server when a change
- * request fails or the tab becomes visible.
+ * Browser mirror of server-side session signals used by navigation state.
+ * Local changes apply immediately; failed writes and visibility changes reload.
  */
 
 const HISTORY_URL = "/api/notifications/history";
@@ -81,7 +79,10 @@ export const notificationHistory = {
   /** A notification delivered to this tab, already recorded by the server. */
   add(event: NotificationEvent) {
     const id = `${event.sessionId}:${event.type}`;
-    change([{ id, event, at: Date.now(), read: false }, ...entries.filter((entry) => entry.id !== id)].slice(0, LIMIT));
+    const resolved = new Set([event.sessionId, ...(event.aliases ?? [])]);
+    const terminal = event.type === "completed" || event.type === "error";
+    const previous = entries.filter((entry) => entry.id !== id).map((entry) => terminal && entry.event.type === "input" && resolved.has(entry.event.sessionId) ? { ...entry, read: true } : entry);
+    change([{ id, event, at: Date.now(), read: false }, ...previous].slice(0, LIMIT));
   },
   markRead(id: string) {
     if (!entries.some((entry) => entry.id === id && !entry.read)) return;
@@ -94,6 +95,17 @@ export const notificationHistory = {
     if (unread.length === 0) return;
     change(entries.map((entry) => (entry.read ? entry : { ...entry, read: true })));
     markRead(unread);
+  },
+  /**
+   * Mark the session's "input" notification read: the user answered the dialog
+   * or is looking at the session, so it no longer waits on them. A stale entry
+   * would otherwise keep the sidebar on "waiting for input" forever.
+   */
+  markSessionInputRead(sessionId: string) {
+    const id = `${sessionId}:input`;
+    const next = entries.map((entry) => (entry.id === id && !entry.read ? { ...entry, read: true } : entry));
+    if (next.some((entry, index) => entry !== entries[index])) change(next);
+    markRead([id]);
   },
   remove(id: string) {
     change(entries.filter((entry) => entry.id !== id));

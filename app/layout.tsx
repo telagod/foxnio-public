@@ -8,6 +8,9 @@ import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import { getInstallName } from "@/lib/install-name";
 import "./globals.css";
 import "./sidebar.css";
+import "./fox.css";
+import "./fox-workbench.css";
+import "./fox-native.css";
 
 const geist = Geist({
   subsets: ["latin"],

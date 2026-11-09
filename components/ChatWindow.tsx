@@ -9,7 +9,6 @@ import { collectToolResults, foldCompletedTurn, formatTurnDuration, isGroupAncho
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
-import { ToolPresetStatus } from "./ToolPresetStatus";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -45,6 +44,15 @@ interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   newSessionWorkspace?: ReactNode;
+  /** Optional Fox-style brand row shown on the empty-session screen. */
+  emptyHeader?: ReactNode;
+  /** Optional Fox-style intro shown on the empty-session screen. */
+  emptyIntro?: ReactNode;
+  overviewContent?: ReactNode;
+  overviewActive?: boolean;
+  composerContext?: ReactNode;
+  promptPrefix?: string;
+  onPromptSubmit?: () => void;
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
   hideToolActivity?: boolean;
@@ -494,7 +502,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, foldCompletedTurns = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, initialScrollAnchor, onScrollAnchorChange }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, emptyHeader, emptyIntro, overviewContent, overviewActive = false, composerContext, promptPrefix, onPromptSubmit, toolCallsDefaultCollapsed = true, hideToolActivity = true, foldCompletedTurns = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, initialScrollAnchor, onScrollAnchorChange }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -539,7 +547,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
     externalRunActive,
     toolPreset,
-    activeToolset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
@@ -1129,25 +1136,37 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // the minimized pill bar (which keeps composerStatusText below), the
   // bar stays so the status is never hidden.
   const hasStatusHostRow = todoPhases.length > 0 || subagents.length > 0;
+  const handleComposerSend = useCallback((...args: Parameters<typeof handleSend>) => {
+    onPromptSubmit?.();
+    return handleSend(promptPrefix ? `${promptPrefix}\n\n${args[0]}` : args[0], args[1]);
+  }, [handleSend, onPromptSubmit, promptPrefix]);
+  const handleComposerSteer = useCallback((...args: Parameters<typeof handleSteer>) => {
+    onPromptSubmit?.();
+    if (promptPrefix) args[0] = `${promptPrefix}\n\n${args[0]}`;
+    return handleSteer(...args);
+  }, [handleSteer, onPromptSubmit, promptPrefix]);
+  const handleComposerFollowUp = useCallback((...args: Parameters<typeof handleFollowUp>) => {
+    onPromptSubmit?.();
+    if (promptPrefix) args[0] = `${promptPrefix}\n\n${args[0]}`;
+    return handleFollowUp(...args);
+  }, [handleFollowUp, onPromptSubmit, promptPrefix]);
+  const handleComposerStreamingPrompt = useCallback((...args: Parameters<typeof handlePromptWithStreamingBehavior>) => {
+    onPromptSubmit?.();
+    if (promptPrefix) args[0] = `${promptPrefix}\n\n${args[0]}`;
+    return handlePromptWithStreamingBehavior(...args);
+  }, [handlePromptWithStreamingBehavior, onPromptSubmit, promptPrefix]);
   const chatInputElement = (
-    <>
-      <ToolPresetStatus
-        selectedPreset={toolPreset}
-        activeToolset={activeToolset}
-        hasSession={Boolean(session || activeToolset)}
-        onChange={handleToolPresetChange}
-      />
     <ChatInput
       draftIdentityMove={composerIdentityMove}
       ref={composerRef}
       sessionInfoContainer={sessionInfoContainer}
-      onSend={handleSend}
+      onSend={handleComposerSend}
       onPredictWord={handlePredictWord}
       onPredictWordFeedback={handlePredictWordFeedback}
       onAbort={handleAbort}
-      onSteer={agentRunning ? handleSteer : undefined}
-      onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      onSteer={agentRunning ? handleComposerSteer : undefined}
+      onFollowUp={agentRunning ? handleComposerFollowUp : undefined}
+      onPromptWithStreamingBehavior={agentRunning ? handleComposerStreamingPrompt : undefined}
       isStreaming={sessionBusy}
       submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
@@ -1208,18 +1227,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       statusText={hasStatusHostRow ? null : composerStatusText}
       onOpenProviders={onOpenProviders}
     />
-    </>
   );
 
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
   if (loading) {
-    return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
+    return overviewActive && overviewContent ? <div className="flex h-full flex-col">{overviewContent}<div role="status" className="fox-chat-load-notice">{t("chatWindow.loadingSession")}</div></div> : <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
   if (error) {
     return (
+      <div className="flex h-full flex-col">
+      {overviewActive && overviewContent}
+      <div className={overviewActive ? "fox-chat-load-notice" : "flex-1"}>
       <WorkspaceState
         kind="error"
         title={error}
@@ -1234,6 +1255,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
           </button>
         )}
       />
+      </div>
+      </div>
     );
   }
   return (
@@ -1303,10 +1326,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         />
       )}
 
-      {isEmptyNew ? (
+      {isEmptyNew && !overviewContent ? (
         <div className="relative flex flex-1 flex-col overflow-hidden">
-          <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto py-8" style={{ minHeight: 0, paddingInline: CHAT_COLUMN_PADDING }}>
-          <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
+          <div className="chat-empty-scroller flex flex-1 flex-col items-center overflow-y-auto py-8" style={{ minHeight: 0, paddingInline: CHAT_COLUMN_PADDING }}>
+          <div className="chat-empty-column my-auto w-full shrink-0" style={{ maxWidth: `var(--chat-empty-max-width, ${CHAT_COLUMN_MAX_WIDTH}px)` }}>
             <div
                className="mb-3 empty-chat-brand"
               style={{
@@ -1319,21 +1342,27 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <OmpWebLogo size={26} />
-                <span className="omp-wordmark" style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>foxnio</span>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <OmpRuntimeVersion />
-              </div>
+              {emptyHeader ?? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
+                    <OmpWebLogo size={26} />
+                    <span className="omp-wordmark" style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>foxnio</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
+                    </span>
+                    <OmpRuntimeVersion />
+                  </div>
+                </>
+              )}
             </div>
-            <div className="empty-session-intro">
-              <h1 className="display-serif">{t("appShell.newSessionTitle")}</h1>
-              <p>{t("appShell.newSessionDescription")}</p>
-            </div>
+            {emptyIntro ?? (
+              <div className="empty-session-intro">
+                <h1 className="display-serif">{t("appShell.newSessionTitle")}</h1>
+                <p>{t("appShell.newSessionDescription")}</p>
+              </div>
+            )}
             {newSessionWorkspace}
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             <SkillDiagnosticsNotice snapshot={skillDiagnostics} onDisable={() => setSkillStartupDiagnostics(false)} />
@@ -1346,7 +1375,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         </div>
       ) : (
       <>
-      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+      {overviewContent && <div className="flex flex-1 overflow-hidden" hidden={!overviewActive} style={{ minHeight: 0, display: overviewActive ? "flex" : "none" }}>{overviewContent}</div>}
+      <div className="relative flex flex-1 overflow-hidden" hidden={overviewActive} style={{ minHeight: 0, display: overviewActive ? "none" : undefined }}>
         <div
           style={{
             position: "absolute",
@@ -1370,6 +1400,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
+              {isEmptyNew && <div className="fox-conversation-intro">{emptyIntro}</div>}
 
             {conversationMeta.hasCompaction && (
               <div
@@ -1577,7 +1608,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         {/* An open ask is answered (or cancelled) in its panel; hiding the
             composer leaves no doubt where to type. Kept mounted so the
             draft, attachments and a recording survive. */}
-        <div ref={hiddenComposerRef} style={{ display: askOpen ? "none" : "contents" }}>{chatInputElement}</div>
+        <div ref={hiddenComposerRef} style={{ display: askOpen ? "none" : "contents" }}>{composerContext}{chatInputElement}</div>
       </div>
       </>
       )}

@@ -88,7 +88,6 @@ export const viewProps = (overrides = {}) => {
     selectedRowIndex: null,
     search: { query: "", searching: false },
     filters: { sortMode: "none", runningOnly: false, recentRunsLimit: 10 },
-    newSession: { disabled: false, onClick: () => {} },
     onOpenSettings: () => {},
     ...overrides,
   };

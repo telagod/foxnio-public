@@ -98,7 +98,7 @@ test("the fold-completed-turns preference reaches the chat, on unless stored as 
   assert.match(appShell, /window\.localStorage\.setItem\(FOLD_COMPLETED_TURNS_STORAGE_KEY, String\(fold\)\)/);
   // A missing prop would leave the setting inert, so both consumers must receive it.
   assert.match(appShell, /foldCompletedTurns=\{foldCompletedTurns\}\s+onFoldCompletedTurnsChange=\{handleFoldCompletedTurnsChange\}/);
-  assert.equal(appShell.match(/foldCompletedTurns=\{foldCompletedTurns\}/g)?.length, 2, "Settings and ChatWindow");
+  assert.equal(appShell.match(/foldCompletedTurns=\{foldCompletedTurns\}/g)?.length, 3, "Settings, ChatWindow, and FoxPage");
   assert.match(chatWindow, /foldCompletedTurns=\{foldCompletedTurns\}/);
   assert.match(settings, /id: "fold-completed-turns", tab: "general"/);
   assert.match(settings, /<ToggleSwitch checked=\{foldCompletedTurns\} onChange=\{onFoldCompletedTurnsChange\} \/>/);

@@ -181,7 +181,7 @@ test("probeServer resolves true for a live listener and false for a closed port"
   assert.equal(await probeServer("127.0.0.1", port), false);
 });
 
-test("buildTrayIconPixels renders the fox head on a transparent background", () => {
+test("buildTrayIconPixels renders the new fox mark on a transparent background", () => {
   const buffer = buildTrayIconPixels(64, true);
   assert.equal(buffer.length, 64 * 64 * 4);
 
@@ -189,19 +189,17 @@ test("buildTrayIconPixels renders the fox head on a transparent background", () 
     const offset = (y * 64 + x) * 4;
     return [buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3]];
   };
-  // Corners are outside the head → fully transparent.
+  // Corners are outside the mark → fully transparent.
   for (const [x, y] of [[0, 0], [63, 0], [0, 63], [63, 63]]) {
     assert.equal(pixel(x, y)[0], 0, `corner ${x},${y} must be transparent`);
   }
-  // Forehead (design ~ (32, 28)) is opaque orange #f2802e.
-  const [a, r, g] = pixel(32, 27);
+  // Lower face (design ~ (601, 1122)) is opaque orange #f2802e.
+  const [a, r, g] = pixel(32, 60);
   assert.equal(a, 255);
-  assert.ok(Math.abs(r - 242) <= 2, `head red must be ~242, got ${r}`);
-  assert.ok(Math.abs(g - 128) <= 2, `head green must be ~128, got ${g}`);
-  // Chin cheeks (design ~ (32, 52)) are cream #fff1e2.
-  const [aCheek, rCheek, gCheek] = pixel(24, 48);
-  assert.equal(aCheek, 255);
-  assert.ok(Math.abs(rCheek - 255) <= 2 && Math.abs(gCheek - 241) <= 2, `cheek must be cream, got ${rCheek},${gCheek}`);
+  assert.ok(Math.abs(r - 242) <= 2, `mark red must be ~242, got ${r}`);
+  assert.ok(Math.abs(g - 128) <= 2, `mark green must be ~128, got ${g}`);
+  // The nose cut-out stays transparent.
+  assert.equal(pixel(32, 52)[0], 0, "nose cut-out must be transparent");
 });
 
 test("buildIconPixmap returns sized structs with matching byte counts", () => {

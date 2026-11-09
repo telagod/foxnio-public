@@ -245,7 +245,10 @@ if (passwordHash !== undefined) {
 const passwordEnabled = passwordHash !== undefined;
 
 
-const nextArgs = ["start", "-p", port, "-H", hostname];
+// Node >= 24 strips the types of next.config.ts itself, so `next start` never
+// needs the native SWC binary. Desktop packages leave that 97 MB out; without
+// this flag they would download it on first run (or fail offline).
+const nextArgs = ["start", "-p", port, "-H", hostname, "--experimental-next-config-strip-types"];
 const browserUrl = getBrowserUrl(hostname, port);
 let browserOpened = false;
 let currentChild = null;

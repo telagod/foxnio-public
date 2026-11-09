@@ -7,7 +7,6 @@ import { ProviderUsageBar } from "@/components/ProviderUsageBar";
 import { getSessionStore, useSessionStoreSelector } from "@/hooks/useSessionStore";
 import { useSidebarSearch } from "@/hooks/useSidebarSearch";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { useI18n } from "@/lib/i18n";
 import { useNotificationHistory } from "@/lib/notification-history";
 import { selectSession, shallowEqualSet, type SessionStoreSnapshot } from "@/lib/session-store";
 import { sessionIdsWaitingForInput } from "@/lib/session-tabs";
@@ -16,7 +15,6 @@ import type { ManagedProject, SessionInfo } from "@/lib/types";
 import type { WorktreeContext } from "@/lib/worktree-context";
 import { setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { shouldFocusSearch } from "./global-keys";
-import { newSessionId } from "./session-requests";
 import { SidebarView } from "./SidebarView";
 import type { SidebarNavigation } from "./types";
 import { useInitialSessionRestore } from "./useInitialSessionRestore";
@@ -67,9 +65,11 @@ export interface SidebarProps {
   onClose?: () => void;
   /** Drawer layout: no back/forward in the header, touch interaction. */
   mobile?: boolean;
+  /** FOX workspace is the active main view. */
+  foxOpen?: boolean;
+  /** Opens the FOX workspace from the pinned sidebar card. */
+  onOpenFox?: () => void;
 }
-
-const NEW_SESSION_SHORTCUT = "Ctrl+Alt+N";
 
 function ignore(): void {}
 
@@ -101,8 +101,9 @@ export const Sidebar = memo(function Sidebar({
   settingsOpen = false,
   onClose,
   mobile = false,
+  foxOpen = false,
+  onOpenFox,
 }: SidebarProps) {
-  const { t } = useI18n();
   const store = getSessionStore();
   const data = useSidebarData();
   const { ui, update } = useSidebarUi();
@@ -148,6 +149,9 @@ export const Sidebar = memo(function Sidebar({
     pending: data.unlistedLive || Boolean(optimisticSession),
   });
   const projectOrder = useStable(model.projectOrder, sameItems);
+
+  // Opening FOX keeps the workspace tree stable. The selected workspace and
+  // manually expanded groups retain their positions and expansion.
 
   // ---- Restore and default selection -------------------------------------------
   const selectCwd = selection.select;
@@ -275,15 +279,6 @@ export const Sidebar = memo(function Sidebar({
     [ui.sortMode, ui.runningOnly, ui.recentRunsLimit],
   );
   const searchState = useMemo(() => ({ query, searching: search?.searching ?? false }), [query, search?.searching]);
-  const cwd = selection.cwd;
-  const newSession = useMemo(() => ({
-    disabled: !cwd,
-    title: cwd ? t("sessionSidebar.newSessionIn", { cwd }) : t("sessionSidebar.selectProjectFirst"),
-    shortcutHint: NEW_SESSION_SHORTCUT,
-    onClick: () => {
-      if (cwd) onNewSession?.(newSessionId(), cwd);
-    },
-  }), [cwd, onNewSession, t]);
   const usage = useMemo(() => (usageVisible ? <ProviderUsageBar /> : undefined), [usageVisible]);
   const { addDialog, launchConfigDialog } = workspace;
 
@@ -300,7 +295,8 @@ export const Sidebar = memo(function Sidebar({
         filters={filters}
         navigation={navigation}
         onClose={onClose}
-        newSession={newSession}
+        foxOpen={foxOpen}
+        onOpenFox={onOpenFox}
         usage={usage}
         settingsOpen={settingsOpen}
         updateAvailable={updateAvailable}

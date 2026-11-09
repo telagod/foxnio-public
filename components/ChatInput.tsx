@@ -3703,6 +3703,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 }}
                 disabled={submissionBlocked || isTranscribing}
                 title={t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
+                aria-label={t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3718,7 +3719,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {primaryActionMode === "steer"
                   ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
                   : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
-                {t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
+                <span className="composer-primary-label">{t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}</span>
               </button>
             ) : isStreaming ? (
               <button
@@ -3726,6 +3727,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 className="composer-primary-action"
                 onClick={isCompacting ? onAbortCompaction : onAbort}
                 title={t("chatInput.stopAgent")}
+                aria-label={t("chatInput.stopAgent")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3741,7 +3743,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
                   <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
                 </svg>
-                {t("chatInput.stop")}
+                <span className="composer-primary-label">{t("chatInput.stop")}</span>
               </button>
             ) : (
               <button
@@ -3750,6 +3752,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
                 disabled={submissionBlocked || isTranscribing || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length)}
                 title={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
+                aria-label={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
@@ -3771,7 +3774,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <polyline points="7.5 3 12 7 7.5 11" />
                   </svg>
                 )}
-                {t("chatInput.send")}
+                <span className="composer-primary-label">{t("chatInput.send")}</span>
               </button>
             )}
           </div>
