@@ -1894,7 +1894,7 @@
   "modelsConfig.pathScopedNotice": "OMP path-scoped registry entries are configured. Edit config.yml directly to preserve their path rules.",
   "modelsConfig.loadingRoles": "Loading roles...",
   "modelsConfig.modelRolesTitle": "OMP Model Roles",
-  "modelsConfig.modelRolesDesc": "Saved natively in ~/.omp/agent/config.yml. Choose an OMP model and its supported reasoning level for each role.",
+  "modelsConfig.modelRolesDesc": "Saved natively in ~/.omp/agent/config.yml. Choose an OMP model and its supported reasoning level for each role. Only models visible in the composer picker are offered.",
   "modelsConfig.noOverride": "No override",
   "modelsConfig.modelDefault": "Model default",
   "modelsConfig.saveRoles": "Save OMP roles",

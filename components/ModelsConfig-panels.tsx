@@ -194,7 +194,7 @@ export function NativeRegistryDetail({ models, connectedProviders, onChanged }: 
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
   </div>;
 }
-export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
+export function ModelRolesDetail({ models, visibleModelKeys }: { models: RuntimeModelEntry[]; visibleModelKeys: Set<string> | null }) {
   const { t } = useI18n();
   const [roles, setRoles] = useState<Record<string, string>>({});
   // Roles edited since the last load or save. Only these are sent, so a role
@@ -287,7 +287,14 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
             <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
               <option value="">{t("modelsConfig.noOverride")}</option>
               {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
-              {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
+              {models.map((item) => {
+                const value = `${item.provider}/${item.id}`;
+                const hidden = visibleModelKeys !== null && !visibleModelKeys.has(`${item.provider}:${item.id}`);
+                // Follow the composer picker's exposure; the role's current model
+                // stays listed so an assigned value never renders blank.
+                if (hidden && value !== selectedModel) return null;
+                return <option key={`${item.provider}:${item.id}`} value={value}>{item.name || item.id} ({value}){hidden ? " (hidden in composer)" : ""}</option>;
+              })}
             </select>
             <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
               <option value="">{t("modelsConfig.modelDefault")}</option>

@@ -1377,7 +1377,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       if (!p) return null;
       return <ApiKeyDetail key={p.id} provider={p} />;
     }
-    if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
+    if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} visibleModelKeys={visibleModelKeys} />;
     if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} />;
     if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} />;
     if (selection.type === "picker") {

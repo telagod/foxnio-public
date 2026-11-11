@@ -1853,7 +1853,7 @@
   "modelsConfig.pathScopedNotice": "已配置 OMP 路径作用域注册表项。请直接编辑 config.yml 以保留路径规则。",
   "modelsConfig.loadingRoles": "正在加载角色…",
   "modelsConfig.modelRolesTitle": "OMP 模型角色",
-  "modelsConfig.modelRolesDesc": "原生保存于 ~/.omp/agent/config.yml。为每个角色选择 OMP 模型及其支持的思考等级。",
+  "modelsConfig.modelRolesDesc": "原生保存于 ~/.omp/agent/config.yml。为每个角色选择 OMP 模型及其支持的思考等级。仅提供输入框模型选择器中可见的模型。",
   "modelsConfig.noOverride": "无覆盖（默认）",
   "modelsConfig.modelDefault": "模型默认",
   "modelsConfig.saveRoles": "保存 OMP 角色",
