@@ -4,9 +4,11 @@ import type { NotificationEvent } from "@/lib/notification-events";
 import { notificationHistory } from "@/lib/notification-history";
 import { notificationClientId, OPEN_SESSION_EVENT } from "@/lib/notification-client";
 import { isRecord } from "@/lib/type-guards";
+import { toast } from "@/components/ui/toast";
 
 export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: string | null; onOpenSession: (sessionId: string) => void }) {
   const openRef = useRef(onOpenSession);
+  const seenGoalNotices = useRef(new Set<string>());
   useEffect(() => { openRef.current = onOpenSession; }, [onOpenSession]);
   useEffect(() => {
     const visible = () => { if (document.visibilityState === "visible") void notificationHistory.load(); };
@@ -27,8 +29,21 @@ export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: str
     const stop = openResilientEventStream({ kind: "notifications", clientId: notificationClientId }, (data) => {
       try {
         const frame: unknown = JSON.parse(data);
-        if (!isRecord(frame) || frame.type !== "notification" || frame.kind !== "signal" || !isRecord(frame.event)) return;
-        notificationHistory.add(frame.event as unknown as NotificationEvent);
+        if (!isRecord(frame) || frame.type !== "notification") return;
+        if (frame.kind === "goal-notice" && typeof frame.sessionId === "string" && isRecord(frame.notice)) {
+          const notice = frame.notice;
+          if (typeof notice.key !== "string" || typeof notice.title !== "string" || typeof notice.detail !== "string"
+            || !["completed", "input", "error"].includes(String(notice.kind)) || seenGoalNotices.current.has(notice.key)) return;
+          seenGoalNotices.current.add(notice.key);
+          if (seenGoalNotices.current.size > 200) seenGoalNotices.current.delete(seenGoalNotices.current.values().next().value!);
+          const ownerSessionId = frame.sessionId;
+          toast.info(notice.title, notice.detail, {
+            id: notice.key,
+            onClick: () => { openRef.current(ownerSessionId); },
+          });
+        } else if (frame.kind === "signal" && isRecord(frame.event)) {
+          notificationHistory.add(frame.event as unknown as NotificationEvent);
+        }
       } catch {}
     }, {
       // OPEN means the subscription is installed, including after reconnect.

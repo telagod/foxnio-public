@@ -5,9 +5,12 @@ import { AlertCircle, ArrowUpRight, CircleDot, MessageCircleQuestion, RefreshCw,
 import type { BriefingState } from "@/hooks/useBriefing";
 import type { FoxWorkerBrief } from "@/lib/briefing";
 import { useI18n } from "@/lib/i18n";
+import { FoxGoalPanel } from "@/components/FoxGoalPanel";
+import type { FoxGoalState } from "@/hooks/useFoxGoal";
 
-export function FoxActivity({ state, onOpenSession, onDiscuss, onClose }: {
+export function FoxActivity({ state, goal, onOpenSession, onDiscuss, onClose }: {
   state: BriefingState;
+  goal: FoxGoalState;
   onOpenSession: (sessionId: string) => void;
   onDiscuss: (prompt: string) => void;
   onClose?: () => void;
@@ -19,6 +22,7 @@ export function FoxActivity({ state, onOpenSession, onDiscuss, onClose }: {
   const historical = state.briefing?.historicalWorkers ?? [];
   const attention = state.briefing?.needsYou ?? [];
   const incomplete = Boolean(state.error || state.briefing?.warnings?.length);
+  const linkedWorkers = new Set(goal.snapshot?.assignments.flatMap((assignment) => assignment.workerSessionId ? [assignment.workerSessionId] : []) ?? []);
   const renderWorker = (worker: FoxWorkerBrief, previous = false) => (
     <div key={worker.sessionId}>
       <button type="button" className="fox-native-work-row" onClick={() => onOpenSession(worker.sessionId)} title={worker.cwd}>
@@ -26,6 +30,8 @@ export function FoxActivity({ state, onOpenSession, onDiscuss, onClose }: {
         <span className="fox-native-work-copy">
           <strong>{worker.title}</strong>
           <small>{worker.projectName}<span>·</span>{worker.state !== "idle" || !worker.report ? t(`fox.native.worker.${worker.state}`) : t(`fox.report.status.${worker.report.status}`)}</small>
+          {!previous && <small>{t(goal.snapshot ? linkedWorkers.has(worker.sessionId) ? "fox.goal.linkedWorker" : "fox.goal.unlinkedWorker" : "fox.goal.linkUnknown")}</small>}
+          {worker.report?.status === "needs_input" && <small>{t(worker.report.source === "native" || worker.report.audience !== "coordinator" ? "fox.goal.audience.human" : "fox.goal.audience.coordinator")}</small>}
           {worker.report ? <span className="fox-native-work-detail">{worker.report.summary}</span> : <span className="fox-native-work-detail">{t("fox.report.missing")}</span>}
           {worker.report && worker.reportDelivery === "pending" && <small>{t("fox.report.pending")}</small>}
           {worker.reportError && <small className="fox-native-report-warning" title={worker.reportError}>{t("fox.report.unavailable")}</small>}
@@ -41,11 +47,12 @@ export function FoxActivity({ state, onOpenSession, onDiscuss, onClose }: {
       <div className="fox-native-activity-header">
         <h2>{t("fox.native.activity")}</h2>
         <div>
-          <button type="button" className="fox-native-icon" onClick={() => void state.refresh()} disabled={state.refreshing} aria-label={t("fox.refresh")}><RefreshCw size={16} className={state.refreshing ? "icon-spin" : ""} /></button>
+          <button type="button" className="fox-native-icon" onClick={() => { void state.refresh(); void goal.refresh(); }} disabled={state.refreshing || goal.refreshing} aria-label={t("fox.refresh")}><RefreshCw size={16} className={state.refreshing || goal.refreshing ? "icon-spin" : ""} /></button>
           {onClose && <button type="button" className="fox-native-icon" onClick={onClose} aria-label={t("fox.detail.close")}><X size={16} /></button>}
         </div>
       </div>
       <div className="fox-native-activity-body">
+        <FoxGoalPanel state={goal} onOpenSession={onOpenSession} onDiscuss={onDiscuss} />
         {state.loading && !state.briefing && <p role="status">{t("fox.overview.loading")}</p>}
         {incomplete && <p className="fox-native-source-warning" role="status"><AlertCircle size={15} />{t("fox.overview.partial")}</p>}
         {attention.length > 0 && <section className="fox-native-attention">
@@ -66,6 +73,7 @@ export function FoxActivity({ state, onOpenSession, onDiscuss, onClose }: {
         </section>}
         {workers.length > 0 && <section>
           <h3>{t("fox.native.workers")}<span>{workers.length}</span></h3>
+          <p className="fox-goal-note">{t("fox.goal.unlinkedHint")}</p>
           {(showAll ? workers : workers.slice(0, 6)).map((worker) => renderWorker(worker))}
           {workers.length > 6 && <button type="button" className="fox-native-text-button" aria-expanded={showAll} onClick={() => setShowAll(!showAll)}>{t(showAll ? "fox.native.showLess" : "fox.native.showAll", { count: workers.length })}</button>}
         </section>}

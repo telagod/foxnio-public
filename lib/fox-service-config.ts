@@ -21,6 +21,8 @@ export interface FoxServiceConfig {
   quietEnd: string;
   /** Proactive FOX turns per local day. */
   maxDailyMessages: number;
+  /** Unsolicited goal outcome/decision notifications; never gates execution. */
+  maxDailyGoalNotifications: number;
   dispatchPolicies?: Record<string, FoxDispatchPolicy>;
   nativePolicyVersion?: 1;
 }
@@ -30,6 +32,7 @@ export const DEFAULT_FOX_SERVICE_CONFIG: FoxServiceConfig = {
   quietStart: "22:00",
   quietEnd: "08:00",
   maxDailyMessages: 3,
+  maxDailyGoalNotifications: 10,
 };
 
 const FILE = "service.json";
@@ -49,11 +52,15 @@ export function normalizeFoxServiceConfig(value: unknown): FoxServiceConfig {
   const max = typeof raw.maxDailyMessages === "number" && Number.isFinite(raw.maxDailyMessages)
     ? Math.min(10, Math.max(1, Math.trunc(raw.maxDailyMessages)))
     : DEFAULT_FOX_SERVICE_CONFIG.maxDailyMessages;
+  const goalMax = typeof raw.maxDailyGoalNotifications === "number" && Number.isFinite(raw.maxDailyGoalNotifications)
+    ? Math.min(100, Math.max(1, Math.trunc(raw.maxDailyGoalNotifications)))
+    : DEFAULT_FOX_SERVICE_CONFIG.maxDailyGoalNotifications;
   return {
     enabled: raw.enabled === true,
     quietStart: validTime(raw.quietStart) ? raw.quietStart : DEFAULT_FOX_SERVICE_CONFIG.quietStart,
     quietEnd: validTime(raw.quietEnd) ? raw.quietEnd : DEFAULT_FOX_SERVICE_CONFIG.quietEnd,
     maxDailyMessages: max,
+    maxDailyGoalNotifications: goalMax,
     ...(raw.dispatchPolicies && typeof raw.dispatchPolicies === "object" && !Array.isArray(raw.dispatchPolicies)
       ? { dispatchPolicies: Object.fromEntries(Object.entries(raw.dispatchPolicies).map(([key, value]) => [
         key, value === "auto" || value === "confirm" ? value : "observe",

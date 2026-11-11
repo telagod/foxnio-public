@@ -13,6 +13,11 @@ const state = {
   briefing: { needsYou: [], workers: [], warnings: [] },
   loading: false, refreshing: false, error: null, refresh: async () => {},
 };
+const goal = {
+  snapshot: { supported: true, goal: null, grant: null, assignments: [], reviews: [], reports: [], dispatchesUsed: 0, todoPhases: [], recovery: "waiting", updatedAt: null },
+  loading: false, refreshing: false, error: null, controlError: null, pending: null,
+  refresh: async () => {}, control: async () => true,
+};
 const worker = (id, extra = {}) => ({
   sessionId: id, parentSessionId: "fox", title: `Worker ${id}`, cwd: "/projects/app",
   projectName: "App", projectKey: "/projects/app", state: "idle", at: "2026-11-08T10:00:00Z",
@@ -23,6 +28,7 @@ afterEach(cleanup);
 test("native workers open their exact session, and idle never means completed", () => {
   const opened = [];
   render(React.createElement(FoxActivity, {
+    goal,
     state: { ...state, briefing: { ...state.briefing, workers: [worker("one")], dispatches: [{ task: "Legacy ticket" }] } },
     onOpenSession: (id) => opened.push(id), onDiscuss: noop,
   }));
@@ -35,6 +41,7 @@ test("native workers open their exact session, and idle never means completed", 
 test("every waiting conversation is reachable without a separate approval panel", () => {
   const opened = [];
   render(React.createElement(FoxActivity, {
+    goal,
     state: { ...state, briefing: { ...state.briefing, needsYou: Array.from({ length: 9 }, (_, index) => ({
       id: `ask-${index}`, sessionId: `worker-${index}`, sessionName: `Question ${index}`,
       kind: "input", detail: `Choose the scope ${index}`, projectName: "App",
@@ -48,6 +55,7 @@ test("every waiting conversation is reachable without a separate approval panel"
 
 test("worker history can be expanded and collapsed", () => {
   render(React.createElement(FoxActivity, {
+    goal,
     state: { ...state, briefing: { ...state.briefing, workers: Array.from({ length: 9 }, (_, id) => worker(String(id))) } },
     onOpenSession: noop, onDiscuss: noop,
   }));
@@ -59,14 +67,14 @@ test("worker history can be expanded and collapsed", () => {
 });
 
 test("failed sources show uncertainty, not an empty all-clear", () => {
-  render(React.createElement(FoxActivity, { state: { ...state, error: "offline" }, onOpenSession: noop, onDiscuss: noop }));
+  render(React.createElement(FoxActivity, { goal, state: { ...state, error: "offline" }, onOpenSession: noop, onDiscuss: noop }));
   assert.match(screen.getByRole("status").textContent, /not an all-clear/);
   assert.equal(screen.queryByText("A place to follow the work"), null);
 });
 
 test("progress is discussed in the existing FOX conversation", () => {
   const prompts = [];
-  render(React.createElement(FoxActivity, { state, onOpenSession: noop, onDiscuss: (prompt) => prompts.push(prompt) }));
+  render(React.createElement(FoxActivity, { goal, state, onOpenSession: noop, onDiscuss: (prompt) => prompts.push(prompt) }));
   fireEvent.click(screen.getByRole("button", { name: "Ask FOX for an update" }));
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /evidence/);
@@ -74,6 +82,7 @@ test("progress is discussed in the existing FOX conversation", () => {
 
 test("agent reports show evidence separately from transport and missing reports remain uncertain", () => {
   render(React.createElement(FoxActivity, {
+    goal,
     state: { ...state, briefing: { ...state.briefing, workers: [
       worker("reported", { report: { status: "result", summary: "Regression passed; deployment not checked." }, reportDelivery: "pending" }),
       worker("missing"),
@@ -88,6 +97,7 @@ test("agent reports show evidence separately from transport and missing reports 
 test("late reports can be followed back to the exact original coordinator", () => {
   const opened = [];
   render(React.createElement(FoxActivity, {
+    goal,
     state: { ...state, briefing: { ...state.briefing, historicalWorkers: [worker("older", { parentSessionId: "original-fox" })] } },
     onOpenSession: (id) => opened.push(id), onDiscuss: noop,
   }));

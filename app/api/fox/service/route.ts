@@ -12,6 +12,7 @@ import {
   type FoxServiceConfig,
 } from "@/lib/fox-service-config";
 import { isRecord } from "@/lib/type-guards";
+import { getFoxGoalSnapshot, invalidateFoxGoalPolicy } from "@/lib/fox-goal-service";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,7 @@ export async function PATCH(request: NextRequest) {
     quietStart: typeof body.quietStart === "string" ? body.quietStart : current.quietStart,
     quietEnd: typeof body.quietEnd === "string" ? body.quietEnd : current.quietEnd,
     maxDailyMessages: typeof body.maxDailyMessages === "number" ? body.maxDailyMessages : current.maxDailyMessages,
+    maxDailyGoalNotifications: typeof body.maxDailyGoalNotifications === "number" ? body.maxDailyGoalNotifications : current.maxDailyGoalNotifications,
   };
   if (body.dispatchPolicies !== undefined) {
     if (!isRecord(body.dispatchPolicies) || Object.entries(body.dispatchPolicies).some(([path, policy]) => !isAbsolute(path) || !["observe", "confirm", "auto"].includes(String(policy)))) {
@@ -56,6 +58,19 @@ export async function PATCH(request: NextRequest) {
     next.dispatchPolicies = { ...current.dispatchPolicies };
     for (const [path, policy] of Object.entries(body.dispatchPolicies)) {
       next.dispatchPolicies[foxDispatchProjectKey(path)] = policy as "observe" | "confirm" | "auto";
+    }
+  }
+  const changedProjects = Object.entries(next.dispatchPolicies ?? {}).filter(([path, policy]) =>
+    policy !== (current.dispatchPolicies?.[path] ?? "confirm")).map(([path]) => path);
+  if (changedProjects.length) {
+    const snapshot = await getFoxGoalSnapshot();
+    if (!snapshot.supported) return NextResponse.json({ error: snapshot.reason || "FOX authorization could not be checked", code: "fox_policy_unavailable" }, { status: 503 });
+    const affected = changedProjects.filter((path) => snapshot.grant?.terms.projects.includes(path) && !snapshot.grant.revoked);
+    if (affected.length) {
+      try { await invalidateFoxGoalPolicy(affected); }
+      catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : String(error), code: "fox_policy_invalidation_failed" }, { status: 503 });
+      }
     }
   }
   writeFoxServiceConfig(next);

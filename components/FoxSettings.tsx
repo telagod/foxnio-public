@@ -44,6 +44,7 @@ export function FoxSettings({ service, projects, onClose }: {
               quietStart: String(data.get("quietStart")),
               quietEnd: String(data.get("quietEnd")),
               maxDailyMessages: Number(data.get("maxDailyMessages")),
+              maxDailyGoalNotifications: Number(data.get("maxDailyGoalNotifications")),
             };
             const patch = Object.fromEntries(Object.entries(values).filter(([name]) => changed.current.has(name)));
             const ok = Object.keys(patch).length === 0 || await service.update(patch);
@@ -59,8 +60,10 @@ export function FoxSettings({ service, projects, onClose }: {
                 <label>{t("fox.settings.quietStart")}<input name="quietStart" type="time" required defaultValue={service.status.config.quietStart} /></label>
                 <label>{t("fox.settings.quietEnd")}<input name="quietEnd" type="time" required defaultValue={service.status.config.quietEnd} /></label>
                 <label>{t("fox.settings.dailyCap")}<input name="maxDailyMessages" type="number" min={1} max={10} required defaultValue={service.status.config.maxDailyMessages} /></label>
+                <label>{t("fox.goal.notificationCap")}<input name="maxDailyGoalNotifications" type="number" min={1} max={100} required defaultValue={service.status.config.maxDailyGoalNotifications ?? 10} /></label>
               </div>
               <p className="fox-settings-help">{t("fox.settings.timezone")}</p>
+              <p className="fox-settings-help">{t("fox.goal.notificationHint")}</p>
               <div className="fox-settings-save">
                 <button type="submit" className="fox-button fox-button-primary">{t(service.saving ? "fox.settings.saving" : "fox.settings.save")}</button>
                 {saved && <span role="status"><Check size={14} />{t("fox.settings.saved")}</span>}

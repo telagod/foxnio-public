@@ -322,16 +322,23 @@ function AgentToolsSetting() {
   const change = async (next: boolean) => {
     const previous = enabled;
     setEnabled(next);
+    let persisted: boolean | null = null;
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agentToolsEnabled: next }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: unknown = await res.json();
+      if (isRecord(data)) {
+        const actual = res.ok ? data : isRecord(data.settings) ? data.settings : null;
+        if (actual && typeof actual.agentToolsEnabled === "boolean") persisted = actual.agentToolsEnabled;
+      }
+      if (!res.ok) throw new Error(isRecord(data) && typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
+      if (persisted !== null) setEnabled(persisted);
     } catch (error) {
-      setEnabled(previous);
-      toast.error(t("settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
+      setEnabled(persisted ?? previous);
+      toast.error(t(persisted !== null ? "fox.goal.controlFailed" : "settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
     }
   };
   return (

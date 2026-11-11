@@ -1,7 +1,9 @@
 import type { NotificationEvent } from "./notification-events";
 import { markHistoryRead, recordHistory } from "./notification-store";
+import type { FoxGoalNotice } from "./fox-goal-notifications";
 
-export type NotificationMessage = { kind: "signal"; event: NotificationEvent };
+export type NotificationMessage = { kind: "signal"; event: NotificationEvent }
+  | { kind: "goal-notice"; sessionId: string; notice: FoxGoalNotice };
 type Send = (message: NotificationMessage) => void;
 interface HubState { streams: Map<string, Set<Send>>; }
 declare global { var __ompNotificationHub: HubState | undefined; }
@@ -33,4 +35,18 @@ export function publishNotification(event: NotificationEvent): void {
       try { send({ kind: "signal", event }); } catch {}
     }
   }
+}
+
+/** Dedicated goal alerts never replace raw history signals or input state. */
+export function publishFoxGoalNotice(sessionId: string, notice: FoxGoalNotice): boolean {
+  let delivered = false;
+  for (const callbacks of hub().streams.values()) {
+    for (const send of callbacks) {
+      try {
+        send({ kind: "goal-notice", sessionId, notice });
+        delivered = true;
+      } catch {}
+    }
+  }
+  return delivered;
 }

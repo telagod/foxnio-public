@@ -233,6 +233,7 @@ export async function acceptFoxReport(workerFile: string, value: unknown): Promi
     throw new Error("OMP has not durably recorded this worker report");
   }
   await recoverFoxWorkerReports(workerFile);
+  wakeFoxReportDelivery(report.parentSessionId);
   return report;
 }
 
@@ -286,9 +287,10 @@ export async function flushFoxReports(): Promise<void> {
             changed();
             continue;
           }
-          const attempts = (state.retry.get(parentId)?.attempts ?? 0) + 1;
-          state.retry.set(parentId, { attempts, at: Date.now() + Math.min(30_000, 500 * 2 ** Math.min(attempts, 6)) });
-          if (!(error instanceof Error && /busy|settle|pending/i.test(error.message))) {
+          const busy = error instanceof Error && /busy|settle|pending/i.test(error.message);
+          const attempts = busy ? 0 : (state.retry.get(parentId)?.attempts ?? 0) + 1;
+          state.retry.set(parentId, { attempts, at: Date.now() + (busy ? 250 : Math.min(30_000, 500 * 2 ** Math.min(attempts, 6))) });
+          if (!busy) {
             state.errors.set(parentId, error instanceof Error ? error.message : String(error));
             changed();
           }

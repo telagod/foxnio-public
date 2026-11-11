@@ -17,12 +17,13 @@ function parseTodoPhases(value: unknown): TodoPhase[] | null {
       if (!isRecord(task) || typeof task.content !== "string" || typeof task.status !== "string" || !statuses.has(task.status)) return null;
       if (task.blocker !== undefined && typeof task.blocker !== "string") return null;
       tasks.push({
+        ...(typeof task.id === "string" ? { id: task.id } : {}),
         content: task.content,
         status: task.status as TodoPhase["tasks"][number]["status"],
         ...(typeof task.blocker === "string" ? { blocker: task.blocker } : {}),
       });
     }
-    phases.push({ name: phase.name, tasks });
+    phases.push({ ...(typeof phase.id === "string" ? { id: phase.id } : {}), name: phase.name, tasks });
   }
   return phases;
 }

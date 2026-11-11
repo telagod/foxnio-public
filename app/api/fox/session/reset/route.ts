@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { clearFoxSessionId, readFoxSessionRecord } from "@/lib/fox-session";
 import { isRecord } from "@/lib/type-guards";
+import { controlFoxGoal } from "@/lib/fox-goal-service";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,11 @@ export async function POST(request: Request) {
     const current = readFoxSessionRecord();
     if (expected.sessionId !== current.sessionId || expected.resetAt !== current.resetAt) {
       return NextResponse.json({ error: "FOX changed conversations before reset", code: "fox_session_superseded" }, { status: 409 });
+    }
+    await controlFoxGoal("reset");
+    const after = readFoxSessionRecord();
+    if (after.sessionId !== current.sessionId || after.resetAt !== current.resetAt) {
+      return NextResponse.json({ error: "FOX changed conversations during reset", code: "fox_session_superseded" }, { status: 409 });
     }
     const record = clearFoxSessionId();
     return NextResponse.json({ sessionId: null, resetAt: record.resetAt });

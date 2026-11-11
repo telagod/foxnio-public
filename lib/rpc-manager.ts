@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync, statSync } from "fs";
+import { existsSync, realpathSync, statSync, mkdtempSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
+import { tmpdir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
@@ -59,6 +60,20 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 import type { AdvisorChoice } from "./advisor-default";
+import type { FoxGoalSnapshot, FoxGoalCoordination, NativeGoal, NativeGoalModeState } from "./fox-goal-types";
+import { FOX_GOAL_TOOL, FOX_GOAL_TOOL_DEFINITION, FOX_GOAL_COMMAND, FOX_GOAL_REPLY_PREFIX, FOX_GOAL_EVENT_PREFIX, parseFoxGoalCoordination, validateFoxGoalDispatch } from "./omp/fox-goals.mjs";
+import { readFoxGoalJournal } from "./fox-goal-journal";
+
+interface FoxHostAdmission {
+  coordination: FoxGoalCoordination;
+  admissionId: string;
+  projectKey: string;
+  input: Record<string, unknown>;
+  toolName: string;
+  sessionId: string;
+  toolCallId: string;
+  effectStarted?: boolean;
+}
 
 // ============================================================================
 // Types
@@ -84,6 +99,14 @@ interface CompactionResultLike {
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const FOX_NATIVE_EXTENSION_PATH = join(process.cwd(), "lib", "omp", "fox-native-extension.mjs");
 const FOX_REPORT_EXTENSION_PATH = join(process.cwd(), "lib", "omp", "fox-report-extension.mjs");
+const FOX_GOAL_EXTENSION_PATH = join(process.cwd(), "lib", "omp", "fox-goal-extension.mjs");
+
+function foxGoalOverlay(enabled: boolean): { args: string[]; cleanup: () => void } {
+  const directory = mkdtempSync(join(tmpdir(), "foxnio-goal-"));
+  const file = join(directory, "config.yml");
+  writeFileSync(file, `goal:\n  continuationModes: ${enabled ? "[rpc]" : "[]"}\n`, { mode: 0o600 });
+  return { args: ["--config", file], cleanup: () => rmSync(directory, { recursive: true, force: true }) };
+}
 /**
  * How long a session may sit with **no web UI attached** before its omp child is
  * torn down. IDLE_DESTROY_MS (10min) is the backstop for a session that keeps
@@ -354,6 +377,20 @@ export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private foxDispatchReceipts = new FoxDispatchReceipts();
   private foxReportingAvailable = false;
+  private foxGoalAvailable = false;
+  private foxGoalAdmissionClosed = false;
+  private foxGoalControlVersion = 0;
+  private foxGoalDurableControlVersion = 0;
+  private foxGoalContinuation = false;
+  private foxGoalActivationPending = false;
+  private foxGoalActivation: Promise<boolean> | null = null;
+  private foxGoalInternalCommands = 0;
+  private foxGoalExclusive = false;
+  private foxGoalEffects: Promise<unknown> = Promise.resolve();
+  private foxMetadataQueue: Promise<unknown> = Promise.resolve();
+  private foxGoalEvents = new Map<string, { sessionId: string; op: string; snapshot: FoxGoalSnapshot; consentEntryId?: string; hostControlVersion: number }>();
+  private foxGoalWaiters = new Set<(error: Error) => void>();
+  private nativeGoalState: NativeGoalModeState | null = null;
   readonly createdAt = Date.now();
   private unpersistedFoxWorkerId: string | null = null;
   private foxReportCalls = new Map<string, Promise<FoxWorkerReport>>();
@@ -491,6 +528,9 @@ export class AgentSessionWrapper {
   isAlive(): boolean {
     return this._alive && this.proc.isAlive;
   }
+
+  /** Process replacement retains exclusive ownership of this conversation. */
+  isRestarting(): boolean { return this.restarting; }
 
   isRunning(): boolean {
     // A human/host response can outlive the current streaming turn. Reaping it
@@ -661,6 +701,7 @@ export class AgentSessionWrapper {
       this.applyIdentity(state);
       const catalog = await this.proc.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS).catch(() => null);
       this.foxReportingAvailable ||= Boolean(Array.isArray(catalog?.commands) && catalog.commands.some((command) => command.name === FOX_REPORT_COMMAND && command.source === "extension"));
+      this.foxGoalAvailable = Boolean(catalog?.commands?.some((command) => command.name === FOX_GOAL_COMMAND && command.source === "extension"));
     } finally {
       this.handshaking = false;
       // The handshake is real activity, so the reap clock restarts from here
@@ -676,6 +717,14 @@ export class AgentSessionWrapper {
     // write (`session-persistence` notice). The conversation continues, so the
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
+    if (identityChanged && !moved && this._sessionFile) {
+      for (const reject of this.foxGoalWaiters) reject(new Error("Native goal conversation identity changed"));
+      this.foxGoalEvents.clear();
+      this.foxDispatchReceipts.clear();
+      this.foxGoalAdmissionClosed = true;
+      this.foxGoalActivationPending = false;
+      this.nativeGoalState = null;
+    }
     if (identityChanged && !moved) {
       this.resetStream();
       this.promptRunning = false;
@@ -864,6 +913,31 @@ export class AgentSessionWrapper {
     if (isSessionEditReply(frame) || isFoxReportReply(frame)) return;
     if (isFoxWorkspacePath(this.cwd) && this.foxDispatchReceipts.capture(frame)) return;
     if (frame.type === "extension_ui_request" && frame.method === "notify" && typeof frame.message === "string") {
+      if (frame.message.startsWith(FOX_GOAL_REPLY_PREFIX)) return;
+      if (frame.message.startsWith(FOX_GOAL_EVENT_PREFIX)) {
+        try {
+          const value = JSON.parse(frame.message.slice(FOX_GOAL_EVENT_PREFIX.length));
+          if (isFoxWorkspacePath(this.cwd) && value.sessionId === this.sessionId && value.op === "pause-required"
+            && value.reason === "handoff-uncertain" && typeof value.grantEntryId === "string"
+            && typeof value.nativeGoalId === "string" && typeof value.handoffEntryId === "string") {
+            void this.pauseFoxGoalHandoff(value.grantEntryId, value.nativeGoalId, value.handoffEntryId)
+              .catch((error) => this.emit({ type: "notice", level: "warning", message: `FOX handoff pause failed: ${String(error)}` }));
+            return;
+          }
+          if (isFoxWorkspacePath(this.cwd) && value.sessionId === this.sessionId && value.op === "pause-required"
+            && typeof value.grantEntryId === "string" && typeof value.nativeGoalId === "string"
+            && ["expired", "dispatch-limit", "rework-limit", "agent-tools-disabled"].includes(value.reason)) {
+            void this.pauseFoxGoalResource(value.grantEntryId, value.nativeGoalId, value.reason)
+              .catch((error) => this.emit({ type: "notice", level: "warning", message: `FOX resource pause failed: ${String(error)}` }));
+            return;
+          }
+          if (isFoxWorkspacePath(this.cwd) && typeof value.sessionId === "string" && typeof value.toolCallId === "string" && value.snapshot) {
+            if (this.foxGoalEvents.size >= 64) this.foxGoalEvents.delete(this.foxGoalEvents.keys().next().value!);
+            this.foxGoalEvents.set(value.toolCallId, { ...value, hostControlVersion: this.foxGoalControlVersion });
+          }
+        } catch {}
+        return;
+      }
       if (frame.message.startsWith(FOX_REPORT_READY_PREFIX)) {
         this.foxReportingAvailable = true;
         return;
@@ -880,11 +954,14 @@ export class AgentSessionWrapper {
     }
     this.resetIdleTimer();
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
-      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND && command.name !== FOX_REPORT_COMMAND) }
+      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND && command.name !== FOX_REPORT_COMMAND && command.name !== FOX_GOAL_COMMAND) }
       : frame;
     let refreshSessionList = false;
 
     switch (event.type) {
+      case "goal_updated":
+        this.nativeGoalState = isRecord(event.state) ? event.state as unknown as NativeGoalModeState : null;
+        break;
       case "command_output": {
         // `/mcp list` is a local OMP command. Capture its authoritative text for
         // Settings instead of adding an invisible command to the chat stream.
@@ -945,8 +1022,13 @@ export class AgentSessionWrapper {
       case "session_settled":
         this.unsettled = false;
         if (isFoxWorkspacePath(this.cwd)) wakeFoxReportDelivery(this.sessionId);
+        if (this.foxGoalActivationPending && !this.foxGoalExclusive && this.foxGoalInternalCommands === 0 && !this.isRunning()) queueMicrotask(() => {
+          void this.activateFoxGoal().catch((error) => this.emit({ type: "notice", level: "warning", message: `FOX goal remains paused: ${error instanceof Error ? error.message : String(error)}` }));
+        });
         break;
       case "prompt_result":
+        if (this.unsettled && this.streaming) return;
+        if (this.foxGoalInternalCommands > 0) return;
         // Local-only prompt (builtin/extension slash command) — no agent run.
         this.promptRunning = false;
         this.awaitingAgentStart = false;
@@ -1021,8 +1103,8 @@ export class AgentSessionWrapper {
         // Server-side agent tools (#275) are answered here, before any
         // browser routing, so they work with no tab open. A disabled gate
         // is an explicit error, not a silent hang and not a browser call.
-        if (id && toolName && (AGENT_TOOL_NAMES.has(toolName) || toolName === FOX_REPORT_TOOL)) {
-          if (toolName === FOX_REPORT_TOOL || loadWebServerSettings().agentToolsEnabled) {
+        if (id && toolName && (AGENT_TOOL_NAMES.has(toolName) || toolName === FOX_REPORT_TOOL || toolName === FOX_GOAL_TOOL)) {
+          if (toolName === FOX_REPORT_TOOL || toolName === FOX_GOAL_TOOL || loadWebServerSettings().agentToolsEnabled) {
             void this.answerServerAgentTool(event);
           } else {
             this.proc.sendFrame({
@@ -1037,6 +1119,11 @@ export class AgentSessionWrapper {
               },
             });
             this.emit({ type: "notice", level: "warning", message: `Rejected disabled agent tool: ${toolName}` });
+            if (isFoxWorkspacePath(this.cwd) && this.nativeGoalState?.goal.status === "active") {
+              this.closeFoxGoalAdmission();
+              void this.nativeGoal("pause").then(() => this.foxGoalCommand("control", { action: "pause" }))
+                .catch((error) => this.emit({ type: "notice", level: "warning", message: `FOX goal capability was disabled; pause persistence failed: ${String(error)}` }));
+            }
           }
           return;
         }
@@ -1524,7 +1611,9 @@ export class AgentSessionWrapper {
     const id = typeof event.id === "string" ? event.id : "";
     const toolName = typeof event.toolName === "string" ? event.toolName : "";
     if (!id) return;
+    const answeringProc = this.proc;
     const sendResult = (text: string, isError = false) => {
+      if (this.proc !== answeringProc || !this.isAlive()) return;
       this.proc.sendFrame({
         type: "host_tool_result",
         id,
@@ -1534,6 +1623,41 @@ export class AgentSessionWrapper {
     };
     try {
       const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      if (toolName === FOX_GOAL_TOOL) {
+        const native = this.foxGoalEvents.get(String(event.toolCallId));
+        this.foxGoalEvents.delete(String(event.toolCallId));
+        if (native && native.sessionId !== this.sessionId) this.applyIdentity(await this.getStateWithTimeout());
+        if (!isFoxWorkspacePath(this.cwd) || !native || native.sessionId !== this.sessionId || native.op !== args.op) throw new Error("The native FOX goal confirmation or mutation event is missing; model arguments cannot authorize a goal.");
+        if (native.op === "authorize") {
+          if (!loadWebServerSettings().agentToolsEnabled) throw new Error("Agent tools are disabled. Enable the existing Agent tools setting before authorizing FOX delivery.");
+          const grant = native.snapshot.grant;
+          if (!grant || grant.id !== native.consentEntryId || grant.goalId || grant.revoked) throw new Error("The confirmed goal scope is not eligible for initial binding");
+          if (native.hostControlVersion !== this.foxGoalControlVersion
+            || this.foxGoalAdmissionClosed && this.foxGoalDurableControlVersion !== this.foxGoalControlVersion) throw new Error("A pending or newer FOX control cancelled this consent");
+          this.foxGoalAdmissionClosed = false;
+          if (this.foxGoalContinuation) {
+            // A queued human request can authorize the next delivery before
+            // the old [rpc] child settles. Create only after a [] restart.
+            this.foxGoalActivationPending = true;
+            sendResult(JSON.stringify(native.snapshot));
+            return;
+          }
+          const bound = await this.withFoxGoalEffect(async () => {
+            const current = await this.nativeGoal("get");
+            if (current.goal && (native.snapshot.inheritedGoalIds?.includes(current.goal.id) || grant.replacesGoalId === current.goal.id)) await this.nativeGoal("drop");
+            else if (current.goal && current.goal.status !== "complete") throw new Error("An existing native goal must be stopped before replacing its scope");
+            const created = await this.nativeGoal("create", { objective: grant.terms.objective, ...(grant.terms.tokenBudget === undefined ? {} : { token_budget: grant.terms.tokenBudget }) });
+            await this.nativeGoal("pause");
+            if (this.foxGoalAdmissionClosed || !created.goal || created.goal.objective !== grant.terms.objective) throw new Error("Native objective does not exactly match confirmed scope; goal remains paused");
+            const snapshot = await this.foxGoalCommand("bind", { grantEntryId: grant.id, goalId: created.goal.id, objective: created.goal.objective });
+            if (snapshot.grant?.goalId !== created.goal.id || snapshot.grant.revoked || this.foxGoalAdmissionClosed) throw new Error("Native grant binding was not persisted or was revoked");
+            this.foxGoalActivationPending = true;
+            return snapshot;
+          });
+          sendResult(JSON.stringify(bound));
+        } else sendResult(JSON.stringify(await this.getFoxGoalSnapshot()));
+        return;
+      }
       if (toolName === FOX_REPORT_TOOL) {
         const callId = typeof event.toolCallId === "string" ? event.toolCallId : "";
         const pending = this.foxReportCalls.get(callId);
@@ -1546,27 +1670,286 @@ export class AgentSessionWrapper {
       if ((toolName === "new_session" || toolName === "send_to_session") && foxWorkerParent(this.sessionFile)) {
         throw new Error("Project workers report through report_to_parent; cross-project delegation belongs to FOX.");
       }
+      let goalAdmission: FoxHostAdmission | undefined;
       if (isFoxWorkspacePath(this.cwd) && (toolName === "new_session" || toolName === "send_to_session")) {
         if (this.foxReportInbox) throw new Error("Receiving a worker report cannot authorize new execution.");
         const projectRef = await this.foxActionProject(toolName, args);
         const policy = foxDispatchPolicy(initializeFoxNativePolicy(), projectRef);
         if (policy === "observe") throw new Error("This project is observation-only. No work was dispatched.");
-        this.consumeFoxDispatchConsent(event, args, projectRef, policy === "confirm");
+        if (args.coordination !== undefined) {
+          const coordination = parseFoxGoalCoordination(args.coordination) as FoxGoalCoordination;
+          const receipt = this.foxDispatchReceipts.takeGrant({ sessionId: this.sessionId, toolCallId: event.toolCallId, toolName, input: args, projectKey: projectRef });
+          if (!receipt || receipt.grantEntryId !== coordination.grantEntryId || receipt.nativeGoalId !== coordination.nativeGoalId) throw new Error("Fresh native goal admission receipt is missing or stale");
+          goalAdmission = { coordination, admissionId: receipt.admissionId, projectKey: projectRef, input: { ...args }, toolName, sessionId: this.sessionId, toolCallId: String(event.toolCallId) };
+        } else {
+          const snapshot = this.foxGoalAvailable ? await this.getFoxGoalSnapshot() : null;
+          if (snapshot?.grant && !snapshot.grant.revoked) throw new Error("Automatic goal dispatch requires explicit coordination metadata");
+          this.consumeFoxDispatchConsent(event, args, projectRef, policy === "confirm");
+        }
         args.cwd = projectRef;
       }
-      const result = await executeAgentTool(toolName, args, createAgentToolOps(this), {
-        sourceSessionId: this.sessionId,
-        sourceCwd: this.cwd,
-        enabled: loadWebServerSettings().agentToolsEnabled,
-        guard: getAgentToolGuard(),
-        allowSendTarget: isFoxWorkspacePath(this.cwd)
-          ? async (target, cwd) => { await this.foxActionProject("send_to_session", { sessionId: target, cwd }); return true; }
-          : undefined,
-      });
+      const execute = async () => {
+        try {
+          const result = await executeAgentTool(toolName, args, createAgentToolOps(this, goalAdmission), {
+            sourceSessionId: this.sessionId, sourceCwd: this.cwd,
+            enabled: loadWebServerSettings().agentToolsEnabled, guard: getAgentToolGuard(),
+            allowSendTarget: isFoxWorkspacePath(this.cwd)
+              ? async (target, cwd) => { await this.foxActionProject("send_to_session", { sessionId: target, cwd }); return true; }
+              : undefined,
+          });
+          if (goalAdmission) await this.foxGoalCommand("settle", { admissionId: goalAdmission.admissionId, state: "running" });
+          return result;
+        } catch (error) {
+          if (goalAdmission) await this.foxGoalCommand("settle", { admissionId: goalAdmission.admissionId, state: goalAdmission.effectStarted ? "uncertain" : "closed" }).catch(() => {});
+          throw error;
+        }
+      };
+      const result = goalAdmission ? await this.withFoxGoalEffect(execute) : await execute();
       sendResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
       sendResult(error instanceof Error ? error.message : String(error), true);
     }
+  }
+
+  closeFoxGoalAdmission(): void {
+    this.foxGoalAdmissionClosed = true;
+    this.foxGoalControlVersion += 1;
+    this.foxGoalActivationPending = false;
+    this.foxDispatchReceipts.clear();
+  }
+
+  async waitFoxGoalEffects(): Promise<void> { await this.foxGoalEffects.catch(() => {}); }
+
+  async pauseFoxGoalResource(grantEntryId: string, goalId: string, reason: string): Promise<void> {
+    if (!["expired", "dispatch-limit", "rework-limit", "agent-tools-disabled"].includes(reason)) throw new Error("Unknown FOX resource pause reason");
+    this.closeFoxGoalAdmission();
+    await this.withFoxGoalEffect(async () => {
+      const snapshot = await this.getFoxGoalSnapshot();
+      if (!snapshot.supported || snapshot.grant?.id !== grantEntryId || snapshot.grant.goalId !== goalId || snapshot.goal?.goal.id !== goalId) throw new Error("Resource pause does not match the current native goal and grant");
+      await this.nativeGoal("pause");
+      await this.foxGoalCommand("control", { action: "pause", grantEntryId });
+      await this.foxGoalCommand("recovery", { recovery: "waiting", obligation: `resource:${reason}`, grantEntryId });
+    });
+  }
+
+  async pauseFoxGoalHandoff(grantEntryId: string, goalId: string, handoffEntryId: string): Promise<void> {
+    await this.withFoxGoalEffect(async () => {
+      const snapshot = await this.getFoxGoalSnapshot();
+      if (!snapshot.supported || snapshot.grant?.id !== grantEntryId || snapshot.grant.goalId !== goalId
+        || snapshot.goal?.goal.id !== goalId || !snapshot.handoffs?.some((handoff) => handoff.id === handoffEntryId && handoff.state === "uncertain")) {
+        throw new Error("Handoff pause does not match the current native goal and uncertain handoff");
+      }
+      // The durable uncertainty already fences dispatch. Do not install a
+      // user/resource pause that would require fresh consent after resolution.
+      await this.nativeGoal("pause");
+    });
+  }
+
+  private async withFoxGoalEffect<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.foxGoalEffects.then(operation, operation);
+    this.foxGoalEffects = result;
+    return result;
+  }
+
+  private withFoxMetadata<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.foxMetadataQueue.then(operation, operation);
+    this.foxMetadataQueue = result;
+    return result;
+  }
+
+  async recheckFoxGoalDispatch(admission: FoxHostAdmission): Promise<FoxGoalSnapshot> {
+    if (this.foxGoalAdmissionClosed || !this.isAlive()) throw new Error("FOX goal admission was closed before the side effect");
+    if (foxDispatchPolicy(initializeFoxNativePolicy(), admission.projectKey) === "observe") throw new Error("The project became observation-only before dispatch");
+    const snapshot = await this.getFoxGoalSnapshot();
+    let workerSessionIds: string[] | undefined;
+    if (admission.toolName === "send_to_session") {
+      const file = await resolveSessionPath(String(admission.input.sessionId));
+      workerSessionIds = file ? nativeSessionLineage(file)?.map((item) => item.header.id) : undefined;
+      if (!workerSessionIds) throw new Error("The native worker continuation cannot be verified");
+    }
+    if (this.foxGoalAdmissionClosed) throw new Error("FOX goal admission was closed before the side effect");
+    if (foxDispatchPolicy(initializeFoxNativePolicy(), admission.projectKey) === "observe") throw new Error("The project became observation-only before dispatch");
+    validateFoxGoalDispatch(snapshot, admission.coordination, { ...admission, workerSessionIds });
+    return snapshot;
+  }
+
+  assertFoxGoalAdmissionOpen(projectKey: string): void {
+    if (this.foxGoalAdmissionClosed || !this.isAlive()) throw new Error("FOX goal admission was closed before the side effect");
+    if (foxDispatchPolicy(initializeFoxNativePolicy(), projectKey) === "observe") throw new Error("The project became observation-only before dispatch");
+  }
+
+  async nativeGoal(op: "get" | "create" | "pause" | "resume" | "drop", args: Record<string, unknown> = {}): Promise<{ goal: NativeGoal | null; state: NativeGoalModeState | null }> {
+    return this.withFoxMetadata(() => this.sendNativeGoal(op, args));
+  }
+
+  private async sendNativeGoal(op: "get" | "create" | "pause" | "resume" | "drop", args: Record<string, unknown> = {}): Promise<{ goal: NativeGoal | null; state: NativeGoalModeState | null }> {
+    if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
+    if (!isFoxWorkspacePath(this.cwd) || !this.isAlive()) throw new Error("Native goal controls require the live FOX conversation");
+    if (op === "create" && this.foxGoalContinuation) throw new Error("Goal setup requires continuation disabled");
+    if ((op === "create" || op === "resume") && this.foxGoalAdmissionClosed) throw new Error("FOX goal admission is closed");
+    const proc = this.proc;
+    const identity = this.sessionId;
+    this.resetIdleTimer();
+    this.pendingCommands += 1;
+    try {
+      const result = await proc.sendCommand<{ goal: NativeGoal | null; state: NativeGoalModeState | null }>({ ...args, type: "goal", op }, GET_STATE_TIMEOUT_MS);
+      if (this.proc !== proc || this.sessionId !== identity) throw new Error("Native goal conversation identity changed");
+      if (!result || !("goal" in result) || !("state" in result)) throw new Error("OMP native goal RPC is unsupported");
+      this.nativeGoalState = result.state;
+      return result;
+    } finally { this.pendingCommands -= 1; }
+  }
+
+  async foxGoalCommand(op: string, args: Record<string, unknown> = {}): Promise<FoxGoalSnapshot> {
+    return this.withFoxMetadata(() => this.sendFoxGoalCommand(op, args));
+  }
+
+  private async sendFoxGoalCommand(op: string, args: Record<string, unknown> = {}): Promise<FoxGoalSnapshot> {
+    if (!["get", "bind", "assignment", "settle", "control", "handoff", "handoff-resolve", "worker-bind", "recovery", "notification"].includes(op)) throw new Error("Unknown internal FOX goal command");
+    if (!this.isAlive() || this.restarting) throw new Error("FOX runtime is unavailable");
+    const exclusive = op === "handoff" || op === "handoff-resolve";
+    if (exclusive && (this.foxGoalAdmissionClosed || this.foxGoalExclusive || this.isRunning() || this.isEditingHistory() || this.historyMutationPendingCount > 0)) throw new WebRpcError("FOX is busy; report handoff remains pending", "session_busy");
+    if (exclusive) this.foxGoalExclusive = true;
+    const proc = this.proc;
+    const sessionId = this.sessionId;
+    const sessionFile = this.sessionFile;
+    const requestId = randomUUID();
+    const commandControlVersion = this.foxGoalControlVersion;
+    let detach = () => {};
+    let rejectPending: ((error: Error) => void) | undefined;
+    let actualSessionId: string | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    this.pendingCommands += 1;
+    this.foxGoalInternalCommands += 1;
+    this.resetIdleTimer();
+    try {
+      if (!this.foxGoalAvailable) {
+        const catalog = await proc.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS);
+        this.foxGoalAvailable = Boolean(catalog?.commands?.some((command) => command.name === FOX_GOAL_COMMAND && command.source === "extension"));
+        if (!this.foxGoalAvailable) throw new Error("Native FOX goals are unavailable; update OMP and restart FOX when idle");
+      }
+      if (exclusive) {
+        const state = await this.getStateWithTimeout();
+        if (state.sessionId !== sessionId || state.isSettled !== true || state.hasPendingAsyncWork || state.isStreaming || state.isCompacting || state.queuedMessageCount > 0 || this.historyMutationPendingCount > 0) throw new WebRpcError("FOX has pending native or user work", "session_busy");
+      }
+      const { promise: reply, resolve, reject } = Promise.withResolvers<FoxGoalSnapshot>();
+      rejectPending = reject;
+      this.foxGoalWaiters.add(reject);
+      timer = setTimeout(() => reject(new RpcCommandTimeoutError(FOX_GOAL_COMMAND, 15_000)), 15_000);
+      timer.unref?.();
+      detach = proc.onFrame((frame) => {
+        if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") reject(new Error(String(frame.message)));
+        if (frame.type !== "extension_ui_request" || frame.method !== "notify" || typeof frame.message !== "string" || !frame.message.startsWith(FOX_GOAL_REPLY_PREFIX)) return;
+        let value;
+        try { value = JSON.parse(frame.message.slice(FOX_GOAL_REPLY_PREFIX.length)); } catch { return; }
+        if (value.requestId !== requestId) return;
+        if (value.sessionId !== sessionId || this.proc !== proc || !this.isAlive()) reject(new Error("Native goal reply conversation identity changed"));
+        else if (typeof value.error === "string") reject(value.code === "session_busy" ? new WebRpcError(value.error, "session_busy") : new Error(value.error));
+        else if (!isRecord(value.data)) reject(new Error("Native goal reply has no snapshot"));
+        else {
+          actualSessionId = typeof value.actualSessionId === "string" ? value.actualSessionId : sessionId;
+          resolve(value.data as unknown as FoxGoalSnapshot);
+        }
+      });
+      void reply.catch(() => {});
+      if (this.proc !== proc || this.sessionId !== sessionId || exclusive && this.foxGoalAdmissionClosed) throw new Error("FOX goal admission or conversation changed before command submission");
+      const ack = await proc.sendCommand<{ agentInvoked?: boolean }>({ type: "prompt", message: `/${FOX_GOAL_COMMAND} ${JSON.stringify({ ...args, requestId, sessionId, op })}` }, 15_000);
+      if (!exclusive && ack?.agentInvoked) throw new Error("OMP invoked the model for an internal goal metadata command");
+      const snapshot = await reply;
+      if (actualSessionId && actualSessionId !== this.sessionId) {
+        const current = await this.getStateWithTimeout();
+        if (current.sessionId !== actualSessionId || !sessionFile || !current.sessionFile || !sameNativeConversation(sessionFile, current.sessionFile)) throw new Error("Native goal reply continuation identity cannot be verified");
+        this.sessionMovePending = true;
+        this.applyIdentity(current);
+      }
+      if (this.sessionId !== sessionId && (!this.movedFromIds.includes(sessionId) || !sessionFile || !sameNativeConversation(sessionFile, this.sessionFile))) throw new Error("Native goal reply conversation identity changed");
+      if (op === "control" && args.action !== "resume" && commandControlVersion === this.foxGoalControlVersion) this.foxGoalDurableControlVersion = commandControlVersion;
+      this.invalidateSessionLists();
+      return snapshot;
+    } finally {
+      if (rejectPending) this.foxGoalWaiters.delete(rejectPending);
+      clearTimeout(timer);
+      detach();
+      this.pendingCommands -= 1;
+      this.foxGoalInternalCommands -= 1;
+      if (exclusive) this.foxGoalExclusive = false;
+    }
+  }
+
+  async getFoxGoalSnapshot(): Promise<FoxGoalSnapshot> {
+    return this.withFoxMetadata(async () => {
+      const native = await this.sendNativeGoal("get");
+      return this.sendFoxGoalCommand("get", { nativeGoal: native.state });
+    });
+  }
+
+  async activateFoxGoal(explicitResume = false): Promise<boolean> {
+    let operation = this.foxGoalActivation;
+    if (!operation) {
+      operation = this.runFoxGoalActivation(explicitResume);
+      this.foxGoalActivation = operation;
+      const clear = () => { if (this.foxGoalActivation === operation) this.foxGoalActivation = null; };
+      void operation.then(clear, clear);
+    }
+    const activated = await operation;
+    if (!activated && explicitResume) throw new WebRpcError("FOX is busy; activation waits for settlement", "session_busy");
+    return activated;
+  }
+
+  private async runFoxGoalActivation(explicitResume: boolean): Promise<boolean> {
+    if (!explicitResume && this.foxGoalAdmissionClosed) return false;
+    // A concurrent user turn/receipt is a deferred automatic obligation, not
+    // an activation failure. Same-wrapper activation callers join above.
+    if (this.foxGoalExclusive || this.isRunning() || this.isEditingHistory() || this.historyMutationPendingCount > 0 || this.pendingHumanRequests()) return false;
+    this.foxGoalExclusive = true;
+    const controlVersion = this.foxGoalControlVersion;
+    try {
+      const state = await this.getStateWithTimeout();
+      if (state.isSettled !== true || state.hasPendingAsyncWork || state.queuedMessageCount > 0 || this.historyMutationPendingCount > 0) return false;
+      let before = await this.getFoxGoalSnapshot();
+      let grant = before.grant;
+      if (before.supported && grant && !grant.goalId && !grant.revoked && !grant.paused && before.recovery === "next") {
+        const consentId = grant.id;
+        if (this.foxGoalContinuation) await this.restart(false);
+        before = await this.getFoxGoalSnapshot();
+        grant = before.grant;
+        if (!grant || grant.id !== consentId || grant.goalId || grant.revoked || grant.paused || controlVersion !== this.foxGoalControlVersion) throw new Error("Confirmed goal scope changed before settled setup");
+        const terms = grant.terms;
+        const inheritedGoalIds = before.inheritedGoalIds ?? [];
+        const replacesGoalId = grant.replacesGoalId;
+        before = await this.withFoxGoalEffect(async () => {
+          const current = await this.nativeGoal("get");
+          if (current.goal && (inheritedGoalIds.includes(current.goal.id) || replacesGoalId === current.goal.id)) await this.nativeGoal("drop");
+          else if (current.goal && current.goal.status !== "complete") throw new Error("An unrelated native goal cannot be replaced by deferred consent");
+          const created = await this.nativeGoal("create", { objective: terms.objective, ...(terms.tokenBudget === undefined ? {} : { token_budget: terms.tokenBudget }) });
+          await this.nativeGoal("pause");
+          if (this.foxGoalAdmissionClosed || controlVersion !== this.foxGoalControlVersion || !created.goal || created.goal.objective !== terms.objective) throw new Error("Confirmed objective changed during settled setup");
+          return this.foxGoalCommand("bind", { grantEntryId: consentId, goalId: created.goal.id, objective: created.goal.objective });
+        });
+        grant = before.grant;
+      }
+      if (!before.supported || !grant?.goalId || grant.revoked || grant.paused || before.assignments.some((a) => a.state === "uncertain") || before.goal?.goal?.id !== grant.goalId || before.goal.goal.objective !== grant.terms.objective) throw new Error("FOX grant cannot safely resume");
+      if (before.resourcePauseReason) throw new Error(`FOX requires fresh resource authorization: ${before.resourcePauseReason}`);
+      if (grant.terms.expiresAt && Date.parse(grant.terms.expiresAt) <= Date.now()
+        || before.goal.reason || before.goal.goal.status === "complete"
+        || before.goal.goal.tokenBudget !== undefined && before.goal.goal.tokensUsed >= before.goal.goal.tokenBudget) throw new Error("Native goal grant expired, completed, or reached its native resource limit");
+      if (controlVersion !== this.foxGoalControlVersion) throw new Error("FOX goal control changed during activation");
+      if (!loadWebServerSettings().agentToolsEnabled) throw new Error("Agent tools are disabled; FOX goal remains paused");
+      if (this.foxGoalContinuation && before.goal.enabled && before.goal.goal.status === "active") {
+        this.foxGoalActivationPending = false;
+        return true;
+      }
+      if (!this.foxGoalContinuation) {
+        await this.restart(true);
+        const after = await this.getFoxGoalSnapshot();
+        if (after.grant?.id !== grant.id || after.grant.revoked || after.grant.paused || after.goal?.goal?.id !== grant.goalId || after.goal.goal.objective !== grant.terms.objective) throw new Error("FOX binding changed during activation; native goal remains paused");
+      }
+      if (controlVersion !== this.foxGoalControlVersion || this.foxGoalAdmissionClosed && !explicitResume) throw new Error("FOX goal control changed during activation");
+      this.foxGoalAdmissionClosed = false;
+      await this.nativeGoal("resume");
+      this.foxGoalActivationPending = false;
+      return true;
+    } finally { this.foxGoalExclusive = false; }
   }
 
   hasFoxReporting(): boolean {
@@ -1587,7 +1970,7 @@ export class AgentSessionWrapper {
   }
 
   async receiveFoxReport(report: FoxWorkerReport, parentFile = this.sessionFile): Promise<void> {
-    if (this.foxReportInbox || this.isRunning() || this.historyMutationPendingCount > 0
+    if (this.foxReportInbox || this.foxGoalExclusive || this.isRunning() || this.historyMutationPendingCount > 0
       || this.historyEditInFlight || this.pendingHumanRequests() > 0 || this.restarting || this.mcpListInFlight) {
       throw new WebRpcError("FOX is busy; its native report inbox will retry after settlement", "session_busy");
     }
@@ -1599,25 +1982,22 @@ export class AgentSessionWrapper {
         if (!this.isAlive() || !isFoxWorkspacePath(this.cwd) || !matches(this.sessionFile)) throw new Error("The original FOX recipient is unavailable");
         const state = await this.getStateWithTimeout();
         if (!state.sessionFile || !matches(state.sessionFile)) throw new Error("The native parent changed identity; the report was not redirected");
-        if (state.isSettled !== true || state.hasPendingAsyncWork || state.isStreaming || state.isCompacting || state.queuedMessageCount > 0) {
-          throw new WebRpcError("FOX has pending work; report delivery waits for native settlement", "session_busy");
+        if (state.isStreaming || state.isCompacting || state.queuedMessageCount > 0) {
+          throw new WebRpcError("FOX has queued or active model work; report delivery waits for native idle", "session_busy");
         }
         await deliverNativeFoxReport(this.proc, report, parentFile);
         const after = await this.getStateWithTimeout();
         if (!after.sessionFile || !matches(after.sessionFile)) throw new Error("The native parent changed during report delivery");
-        if (after.isSettled !== true || after.hasPendingAsyncWork || after.isStreaming || after.isCompacting || after.queuedMessageCount > 0) {
-          throw new FoxReportAgentInvocationError();
-        }
         this.invalidateSessionLists();
         this.emit({ type: "session_history_changed", leafId: null });
       } catch (error) {
-        if (error instanceof FoxReportAgentInvocationError || error instanceof RpcCommandTimeoutError) await this.destroyAndWait();
+        if (error instanceof FoxReportAgentInvocationError) await this.destroyAndWait();
         throw error;
       } finally {
         this.pendingCommands = Math.max(0, this.pendingCommands - 1);
       }
     };
-    const operation = receive();
+    const operation = this.withFoxMetadata(receive);
     this.foxReportInbox = operation;
     try { await operation; } finally {
       if (this.foxReportInbox === operation) this.foxReportInbox = null;
@@ -1907,6 +2287,9 @@ export class AgentSessionWrapper {
       usageLimit: state.usageLimit,
       ...(skillDiagnostics ? { skillDiagnostics } : {}),
       todoPhases: state.todoPhases ?? [],
+      goal: state.goal ?? this.nativeGoalState,
+      isSettled: state.isSettled,
+      hasPendingAsyncWork: state.hasPendingAsyncWork,
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
@@ -2028,8 +2411,9 @@ export class AgentSessionWrapper {
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
-  private async restart(): Promise<void> {
+  private async restart(goalContinuation = this.foxGoalContinuation): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
+    if (isFoxWorkspacePath(this.cwd) && (this.isRunning() || this.pendingHumanRequests() || this.historyEditInFlight || this.promptDispatchPendingCount > 0)) throw new WebRpcError("Wait for FOX to settle before restarting", "session_busy");
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
@@ -2073,17 +2457,21 @@ export class AgentSessionWrapper {
       // A resumed session's preset is unknown (no --tools was passed at the
       // original resume); respawning with identical arguments keeps it unknown.
       const toolPreset = getToolPresetStatus(toolNames, launchConfig?.extraArgs, this._toolNames === null ? null : "full");
+      const overlay = isFoxWorkspacePath(this.cwd) ? foxGoalOverlay(goalContinuation) : null;
       const proc = new RpcProcess({
         cwd: this.cwd,
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", toolNames, this._advisorChoice === "on", launchConfig, undefined, true), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, ...(isFoxWorkspacePath(this.cwd) ? ["--extension", FOX_NATIVE_EXTENSION_PATH] : [])],
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", toolNames, this._advisorChoice === "on", launchConfig, undefined, true), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, "--extension", FOX_GOAL_EXTENSION_PATH, ...(isFoxWorkspacePath(this.cwd) ? ["--extension", FOX_NATIVE_EXTENSION_PATH, ...overlay!.args] : [])],
         onExit: (info) => {
+          overlay?.cleanup();
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
       });
       this.proc = proc;
+      this.foxGoalContinuation = Boolean(overlay && goalContinuation);
+      this.foxGoalAvailable = false;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
@@ -2093,7 +2481,11 @@ export class AgentSessionWrapper {
         await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
         await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+        if (state.sessionFile && state.sessionFile !== sessionFile && sameNativeConversation(sessionFile, state.sessionFile)) this.sessionMovePending = true;
         this.applyIdentity(state);
+        const catalog = await proc.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS).catch(() => null);
+        this.foxGoalAvailable = Boolean(catalog?.commands?.some((command) => command.name === FOX_GOAL_COMMAND && command.source === "extension"));
+        this.foxReportingAvailable ||= Boolean(catalog?.commands?.some((command) => command.name === FOX_REPORT_COMMAND && command.source === "extension"));
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
         // restarts bare, and omp's startup resume handling could land it on the
         // cwd's most recent session. An on-disk session file is the resume
@@ -2103,11 +2495,24 @@ export class AgentSessionWrapper {
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
         await this.applyAdvisorChoiceAfterSpawn();
-        // The replacement child starts with no host registrations. Re-send the
-        // recorded ones so agent tools and UI host tools survive a reload. Like
-        // the initial registration, an omp without host tools may reject this.
+        if (goalContinuation && isFoxWorkspacePath(this.cwd)) {
+          // Reattach captures the startup builtin set before dynamic host tools
+          // exist. An explicit native pause clears that saved pre-goal set;
+          // the later resume must capture the registered FOX tools instead.
+          const paused = await proc.sendCommand<{ goal: NativeGoal | null; state: NativeGoalModeState | null }>({ type: "goal", op: "pause" }, GET_STATE_TIMEOUT_MS);
+          if (!paused?.goal || paused.goal.status !== "paused") throw new Error("Native goal did not pause before restoring FOX host tools");
+          this.nativeGoalState = paused.state;
+        }
+        // Restore registrations before goal resume; a granted FOX runtime must
+        // never swallow this failure and start a turn with a partial catalog.
         if (this.hostToolDefinitions.length > 0) {
-          await proc.sendCommand({ type: "set_host_tools", tools: this.hostToolDefinitions }).catch(() => {});
+          if (isFoxWorkspacePath(this.cwd)) {
+            const registered = await proc.sendCommand<{ toolNames?: string[] }>({ type: "set_host_tools", tools: this.hostToolDefinitions });
+            if (!registered?.toolNames?.includes(FOX_GOAL_TOOL)
+              || loadWebServerSettings().agentToolsEnabled && [...AGENT_TOOL_NAMES].some((name) => !registered.toolNames?.includes(name))) throw new Error("Native FOX host tool registration is incomplete");
+          } else await proc.sendCommand({ type: "set_host_tools", tools: this.hostToolDefinitions }).catch(() => {});
+        } else if (goalContinuation && isFoxWorkspacePath(this.cwd)) {
+          throw new Error("Native FOX host tools were not registered before goal activation");
         }
         if (this.hostUriDefinitions.length > 0) {
           await proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriDefinitions }).catch(() => {});
@@ -2129,6 +2534,22 @@ export class AgentSessionWrapper {
     notifyRunningChange();
   }
 
+  private async prepareFoxGoalUserTurn(): Promise<void> {
+    if (!isFoxWorkspacePath(this.cwd) || !this.foxGoalAdmissionClosed && !this.foxGoalContinuation || this.isRunning() || this.isEditingHistory() || this.historyMutationPendingCount > 0) return;
+    this.foxGoalExclusive = true;
+    const controlVersion = this.foxGoalControlVersion;
+    try {
+      const state = await this.getStateWithTimeout();
+      if (state.isSettled !== true || state.hasPendingAsyncWork || state.queuedMessageCount > 0) return;
+      const snapshot = await this.getFoxGoalSnapshot();
+      if (!snapshot.supported || snapshot.goal?.goal && snapshot.goal.goal.status !== "complete"
+        || snapshot.grant && !snapshot.grant.revoked && snapshot.goal?.goal.status !== "complete") return;
+      if (controlVersion !== this.foxGoalControlVersion) return;
+      if (this.foxGoalContinuation) await this.restart(false);
+      if (controlVersion === this.foxGoalControlVersion && (!this.foxGoalAdmissionClosed || this.foxGoalDurableControlVersion === controlVersion)) this.foxGoalAdmissionClosed = false;
+    } finally { this.foxGoalExclusive = false; }
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
@@ -2138,6 +2559,8 @@ export class AgentSessionWrapper {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
     const mutatesHistory = HISTORY_MUTATING_COMMANDS.has(command.type as string);
+    if (mutatesHistory && this.foxGoalExclusive) throw new WebRpcError("FOX goal control is in progress", "session_busy");
+    if (typeof command.message === "string" && command.message.trimStart().startsWith(`/${FOX_GOAL_COMMAND}`)) throw new Error("Internal FOX goal commands are not a public prompt API");
     const changesIdentity = command.type === "new_session" || command.type === "switch_session" || command.type === "fork";
     if (mutatesHistory && this.sessionTransitionInFlight || changesIdentity && (this.isRunning() || this.historyMutationPendingCount > 0)) {
       throw new WebRpcError("Wait for the current session operation to finish", "session_busy");
@@ -2145,6 +2568,7 @@ export class AgentSessionWrapper {
     if (mutatesHistory && this.historyEditInFlight) {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }
+    if (command.type === "prompt" && isFoxWorkspacePath(this.cwd) && (this.foxGoalAdmissionClosed || this.foxGoalContinuation)) await this.prepareFoxGoalUserTurn();
     if (mutatesHistory) this.historyMutationPendingCount += 1;
     if (changesIdentity) this.sessionTransitionInFlight = true;
     this.resetIdleTimer();
@@ -2155,7 +2579,22 @@ export class AgentSessionWrapper {
     try {
       if (mutatesHistory && this.foxReportInbox) await this.foxReportInbox.catch(() => {});
       if (!this.isAlive()) throw new Error("Session is no longer running");
-      return await this.dispatchCommand(command);
+      if (changesIdentity && isFoxWorkspacePath(this.cwd) && this.foxGoalAvailable) {
+        const snapshot = await this.getFoxGoalSnapshot();
+        if (!snapshot.supported) throw new Error(snapshot.reason ?? "Native goal history cannot be verified");
+        if (snapshot.grant && !snapshot.grant.revoked && (snapshot.goal?.goal.status !== "complete"
+          || snapshot.assignments.some((assignment) => !["settled", "closed"].includes(assignment.state)))) {
+          throw new Error("Stop or reset the authorized FOX goal, or wait for delivery, before changing conversations. Pause does not revoke its scope.");
+        }
+        if (this.foxGoalContinuation) await this.restart(false);
+      }
+      const result = await this.dispatchCommand(command);
+      if (changesIdentity && isFoxWorkspacePath(this.cwd) && this.foxGoalAvailable) {
+        const inherited = await this.getFoxGoalSnapshot();
+        const native = await this.nativeGoal("get");
+        if (native.goal && inherited.inheritedGoalIds?.includes(native.goal.id)) await this.nativeGoal("pause");
+      }
+      return result;
     } finally {
       this.pendingCommands = Math.max(0, this.pendingCommands - 1);
       if (mutatesHistory) this.historyMutationPendingCount -= 1;
@@ -2479,7 +2918,7 @@ export class AgentSessionWrapper {
       case "set_host_tools": {
         const tools = hostRegistrationEntries(command.tools, "tools") as Array<{ name?: unknown; [key: string]: unknown }>;
         const worker = this.foxReportingAvailable && (this.unpersistedFoxWorkerId === this.sessionId || Boolean(foxWorkerParent(this.sessionFile)));
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name && t.name !== "notify" && t.name !== FOX_REPORT_TOOL && (!worker || !AGENT_TOOL_NAMES.has(t.name)));
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name && t.name !== "notify" && t.name !== FOX_REPORT_TOOL && t.name !== FOX_GOAL_TOOL && (!worker || !AGENT_TOOL_NAMES.has(t.name)));
         // Merge the server agent tools (#275) into every registration when
         // the gate is on, so a later UI registration cannot drop them and
         // a no-tab session keeps them after its startup registration.
@@ -2489,6 +2928,7 @@ export class AgentSessionWrapper {
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
         if (worker) merged.push(FOX_REPORT_TOOL_DEFINITION);
+        if (isFoxWorkspacePath(this.cwd)) merged.push(FOX_GOAL_TOOL_DEFINITION);
         this.hostToolNames = new Set(merged.map((t) => t.name as string));
         this.hostToolDefinitions = merged;
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
@@ -2598,6 +3038,8 @@ export class AgentSessionWrapper {
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
     this.foxDispatchReceipts.clear();
+    for (const reject of this.foxGoalWaiters) reject(new Error("FOX runtime closed before native goal acknowledgement"));
+    this.foxGoalWaiters.clear();
     this.streaming = false;
     this.promptRunning = false;
     this.compacting = false;
@@ -2864,6 +3306,10 @@ export async function resumeInterruptedSessions(): Promise<void> {
       if (!filePath) return;
       const header = readSessionHeader(filePath);
       const { cwd } = resolveSpawnCwdResult(header?.cwd);
+      if (isFoxWorkspacePath(cwd) || foxWorkerParent(filePath)) {
+        const journal = await readFoxGoalJournal(filePath);
+        if (journal.entries.some((entry) => entry.customType === "fox-goal" || entry.customType === "fox-goal-worker")) return;
+      }
       const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd);
       await session.send({ type: "prompt", message: RESUME_PROMPT });
       console.log(`[omp-web] resumed interrupted session ${id}`);
@@ -2972,7 +3418,7 @@ export async function deliverToSession(
  * A waited delivery registers its turn-end waiter BEFORE sending, then
  * reads the turn's final text with get_last_assistant_text.
  */
-function createAgentToolOps(source?: AgentSessionWrapper): AgentToolSessionOps {
+function createAgentToolOps(source?: AgentSessionWrapper, admission?: FoxHostAdmission): AgentToolSessionOps {
   return {
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
@@ -2991,6 +3437,8 @@ function createAgentToolOps(source?: AgentSessionWrapper): AgentToolSessionOps {
 
     async createSession(input) {
       if (!existsSync(input.cwd)) throw new Error(`Directory does not exist: ${input.cwd}`);
+      if (admission) await source!.recheckFoxGoalDispatch(admission);
+      if (admission) source!.assertFoxGoalAdmissionOpen(admission.projectKey);
       const tempKey = `__new__${randomUUID()}`;
       const { session } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
       allowFileRoot(input.cwd);
@@ -2999,17 +3447,31 @@ function createAgentToolOps(source?: AgentSessionWrapper): AgentToolSessionOps {
         if (input.parentSessionId) {
           const parent = getRpcSession(input.parentSessionId);
           if (!parent?.isAlive() || !isFoxWorkspacePath(parent.cwd)) throw new Error("The parent FOX conversation is no longer available.");
+          if (admission) await source!.recheckFoxGoalDispatch(admission);
+          if (admission) source!.assertFoxGoalAdmissionOpen(admission.projectKey);
           const result = await session.send({ type: "new_session", parentSession: parent.sessionFile || parent.sessionId }) as { cancelled?: boolean } | undefined;
           if (result?.cancelled) throw new Error("OMP cancelled worker session creation.");
           if (!session.hasFoxReporting() || !parent.hasFoxReporting()) throw new Error("Native worker reporting is unavailable. Restart FOX when idle before delegating.");
           await session.send({ type: "set_host_tools", tools: [] });
           if (!session.hasFoxWorkerReporting()) throw new Error("The native worker parent or reporting tool could not be verified. No project prompt was sent.");
         }
+        if (admission) {
+          await session.foxGoalCommand("get");
+          await session.send({ type: "get_state" });
+          const bound = await source!.foxGoalCommand("assignment", { admissionId: admission.admissionId, workerSessionId: session.sessionId, workerFile: session.sessionFile });
+          const assignment = bound.assignments.find((item) => item.id === admission.admissionId);
+          if (!assignment || !bound.grant || assignment.workerSessionId !== session.sessionId) throw new Error("Native worker assignment was not durably bound");
+          await session.foxGoalCommand("worker-bind", { assignment, terms: bound.grant.terms });
+        }
         if (input.provider && input.modelId) {
           await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
         }
         if (input.name) await session.send({ type: "set_session_name", name: input.name });
-        if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+        if (input.prompt) {
+          if (admission) await source!.recheckFoxGoalDispatch(admission);
+          if (admission) { source!.assertFoxGoalAdmissionOpen(admission.projectKey); admission.effectStarted = true; }
+          await session.send({ type: "prompt", message: input.prompt });
+        }
       } catch (error) {
         await session.destroyAndWait();
         throw error;
@@ -3034,6 +3496,19 @@ function createAgentToolOps(source?: AgentSessionWrapper): AgentToolSessionOps {
       if (source && isFoxWorkspacePath(source.cwd)) {
         const parent = foxWorkerParent(wrapper.sessionFile);
         if (!parent || !sameNativeConversation(parent.parentFile, source.sessionFile)) throw new Error("The worker's original FOX lineage changed during startup. No message was delivered.");
+      }
+      if (admission) {
+        const bound = await source!.foxGoalCommand("assignment", { admissionId: admission.admissionId, workerSessionId: wrapper.sessionId, workerFile: wrapper.sessionFile });
+        const assignment = bound.assignments.find((item) => item.id === admission.admissionId);
+        if (!assignment || !bound.grant) throw new Error("Native follow-up assignment was not persisted");
+        await wrapper.foxGoalCommand("worker-bind", { assignment, terms: bound.grant.terms });
+        await source!.recheckFoxGoalDispatch(admission);
+      }
+      if (admission && input.wait) throw new Error("Automatic goal workers report asynchronously; use wait:false");
+      if (admission) {
+        if (input.delivery === "prompt" && wrapper.isRunning()) throw new Error("Goal worker is busy; no new prompt was submitted");
+        source!.assertFoxGoalAdmissionOpen(admission.projectKey);
+        admission.effectStarted = true;
       }
       return deliverToSession(wrapper, input);
     },
@@ -3082,10 +3557,12 @@ export async function startRpcSession(
   if (fox) initializeFoxNativePolicy();
   const effectiveToolNames = effectiveToolNamesForCwd(cwd, toolNames);
   const existing = registry.get(sessionId);
+  if (existing?.isRestarting()) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
   // A legacy FOX wrapper keeps its old prompt and full toolset even after the
   // persona changed. Replace it before reusing it; project wrappers are left
   // alone. This also aborts a busy legacy FOX that is editing a project.
   if (existing?.isAlive() && needsFoxToolPolicyRestart(existing)) {
+    if (existing.isRunning() || existing.isEditingHistory()) throw new WebRpcError("Wait for FOX to settle before updating its tool policy", "session_busy");
     await existing.destroyAndWait("fox-tool-policy");
   }
   if (existing?.isAlive()) {
@@ -3111,8 +3588,10 @@ export async function startRpcSession(
   // live wrapper that already reports this file (e.g. after it moved files).
   if (sessionFile && !existing) {
     for (const candidate of new Set(registry.values())) {
+      if (candidate.isRestarting() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
       if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
         if (needsFoxToolPolicyRestart(candidate)) {
+          if (candidate.isRunning() || candidate.isEditingHistory()) throw new WebRpcError("Wait for FOX to settle before updating its tool policy", "session_busy");
           await candidate.destroyAndWait("fox-tool-policy");
           continue;
         }
@@ -3129,12 +3608,13 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    const overlay = fox ? foxGoalOverlay(false) : null;
     const proc = new RpcProcess({
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(sessionFile, effectiveToolNames, advisor === "on", launchConfig, spawnModel, fox), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, ...(fox ? ["--extension", FOX_NATIVE_EXTENSION_PATH] : [])],
-      onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
+      extraArgs: [...buildSessionSpawnArgs(sessionFile, effectiveToolNames, advisor === "on", launchConfig, spawnModel, fox), "--extension", SESSION_EDIT_EXTENSION_PATH, "--extension", FOX_REPORT_EXTENSION_PATH, "--extension", FOX_GOAL_EXTENSION_PATH, ...(fox ? ["--extension", FOX_NATIVE_EXTENSION_PATH, ...overlay!.args] : [])],
+      onExit: (info) => { overlay?.cleanup(); holder.wrapper?.handleProcessExit(info, proc); },
     });
     const created = new AgentSessionWrapper(
       proc,
@@ -3169,7 +3649,7 @@ export async function startRpcSession(
       // later UI registration, so this never drops the UI tools. Older omp
       // builds without host tools simply reject the registration; ignore
       // that the way the UI registration does.
-      if (loadWebServerSettings().agentToolsEnabled || foxWorkerParent(created.sessionFile)) {
+      if (fox || loadWebServerSettings().agentToolsEnabled || foxWorkerParent(created.sessionFile)) {
         await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
       if (foxWorkerParent(created.sessionFile)) void recoverFoxWorkerReports(created.sessionFile).catch(() => {});

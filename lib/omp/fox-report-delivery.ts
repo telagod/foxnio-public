@@ -27,17 +27,11 @@ export async function deliverNativeFoxReport(
   }
   const requestId = randomUUID();
   const reply = Promise.withResolvers<void>();
-  const invocation = Promise.withResolvers<never>();
   let persistenceError: Error | null = null;
-  let agentStarted = false;
   const timer = setTimeout(() => reply.reject(new RpcCommandTimeoutError(FOX_REPORT_COMMAND, timeoutMs)), timeoutMs);
   timer.unref?.();
   const unsubscribe = proc.onFrame((frame) => {
-    if (frame.type === "agent_start") {
-      agentStarted = true;
-      invocation.reject(new FoxReportAgentInvocationError());
-      reply.reject(new FoxReportAgentInvocationError());
-    } else if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") {
+    if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") {
       persistenceError = new Error(typeof frame.message === "string" ? frame.message : "OMP could not persist the worker report");
     } else if (isFoxReportReply(frame)) {
       let result;
@@ -49,15 +43,13 @@ export async function deliverNativeFoxReport(
     }
   });
   void reply.promise.catch(() => {});
-  void invocation.promise.catch(() => {});
   try {
-    const ack = await Promise.race([proc.sendCommand<{ agentInvoked?: boolean }>({
+    const ack = await proc.sendCommand<{ agentInvoked?: boolean }>({
       type: "prompt", message: `/${FOX_REPORT_COMMAND} ${JSON.stringify({ requestId, sessionId: report.parentSessionId, parentFile, report })}`,
-    }, timeoutMs), invocation.promise]);
-    if (agentStarted || ack?.agentInvoked === true) throw new FoxReportAgentInvocationError();
+    }, timeoutMs);
+    if (ack?.agentInvoked === true) throw new FoxReportAgentInvocationError();
     await reply.promise;
     if (persistenceError) throw persistenceError;
-    if (agentStarted) throw new FoxReportAgentInvocationError();
   } finally {
     clearTimeout(timer);
     unsubscribe();

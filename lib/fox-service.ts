@@ -19,6 +19,7 @@ import { readNativeSettings } from "./omp/settings-config";
 import { loadWebServerSettings } from "./web-settings";
 import { loadProjectRegistry } from "./project-registry";
 import { reconcileFoxReports, startFoxReportDelivery, stopFoxReportDelivery, subscribeFoxReports } from "./fox-report-store";
+import { foxGoalAllowsObservation, getFoxGoalSnapshot, reconcileFoxGoal } from "./fox-goal-service";
 
 /**
  * The resident FOX service: one 60s observation tick in the existing server
@@ -104,6 +105,8 @@ function isFoxTargetBusy(target: FoxServiceTarget): boolean {
  */
 async function wakeFox(target: FoxServiceTarget | null, message: string): Promise<void> {
   if (!target) throw new Error("No active FOX conversation");
+  const goal = await getFoxGoalSnapshot();
+  if (!await foxGoalAllowsObservation(goal)) throw new Error("Observation turns cannot bypass granted or unverifiable native goal authority");
   const currentTarget = () => {
     const record = readFoxSessionRecord();
     return record.resetAt === target.resetAt && (record.sessionId === target.sessionId
@@ -167,6 +170,9 @@ function getEngine(): FoxServiceEngine {
 
 /** Run one tick now (the API uses this after enabling). */
 export async function requestFoxServiceTick(): Promise<FoxTickPlan | null> {
+  await reconcileFoxGoal();
+  const goal = await getFoxGoalSnapshot();
+  if (!await foxGoalAllowsObservation(goal)) return null;
   return getEngine().tick();
 }
 
@@ -204,7 +210,9 @@ export function startFoxService(): void {
   const engine = createEngine();
   const tick = async () => {
     await reconcileFoxReports(await listAllSessions());
-    await engine.tick();
+    await reconcileFoxGoal();
+    const goal = await getFoxGoalSnapshot();
+    if (await foxGoalAllowsObservation(goal)) await engine.tick();
   };
   const timer = setInterval(() => {
     void tick().catch((error) => log("tick failed", error));
@@ -219,7 +227,7 @@ export function startFoxService(): void {
     if (reportTick) return;
     reportTick = setTimeout(() => {
       reportTick = undefined;
-      void engine.tick().catch((error) => log("report tick failed", error));
+      void requestFoxServiceTick().catch((error) => log("report tick failed", error));
     }, 500);
     reportTick.unref?.();
   });

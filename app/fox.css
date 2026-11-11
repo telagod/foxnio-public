@@ -1586,3 +1586,64 @@
     animation: none;
   }
 }
+
+/* Native goal projection: the conversation remains the editing surface. */
+.fox-goal-panel { min-width: 0; padding-bottom: 20px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.fox-goal-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fox-goal-heading h3 { margin: 0; }
+.fox-goal-panel h4 { margin: 12px 0 6px; color: var(--text); font-size: 12px; font-weight: 600; }
+.fox-goal-objective { margin: 12px 0; color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.6; }
+.fox-goal-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.fox-goal-badges > span, .fox-goal-task-state { display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font-size: 11px; }
+.fox-goal-badges > span[data-state="active"] { color: var(--accent); }
+.fox-goal-badges > span[data-state="complete"], .fox-goal-row-heading > span[data-state="accept"] { color: var(--status-success); }
+.fox-goal-badges > span[data-state="paused"], .fox-goal-badges > span[data-state="unknown"], .fox-goal-note[data-warning="true"], .fox-goal-row-heading > span[data-state="reject"] { color: var(--status-warning); }
+.fox-goal-next { display: flex; flex-direction: column; gap: 5px; padding: 10px 0; margin: 8px 0; }
+.fox-goal-next > strong { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+.fox-goal-next > span { color: var(--text); font-size: 13px; }
+.fox-goal-note, .fox-goal-updated { margin: 8px 0; color: var(--text-muted); font-size: 11px; line-height: 1.7; }
+.fox-goal-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.fox-goal-controls .fox-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; }
+.fox-goal-controls .fox-goal-stop { color: var(--status-error); }
+.fox-goal-controls button:disabled { cursor: default; opacity: .55; }
+.fox-goal-budgets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0 8px; }
+.fox-goal-budgets > div { min-width: 0; }
+.fox-goal-budgets dt { color: var(--text-muted); font-size: 11px; }
+.fox-goal-budgets dd { margin: 4px 0 0; color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
+.fox-goal-details { padding: 8px 0; border-top: 1px solid var(--border); }
+.fox-goal-details > summary { min-height: 36px; padding-block: 8px; color: var(--text); font-weight: 550; cursor: pointer; }
+.fox-goal-panel :is(button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fox-goal-details ul { padding-inline-start: 17px; margin: 8px 0; }
+.fox-goal-panel code, .fox-goal-evidence code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.fox-goal-phase li { margin-block: 10px; }
+.fox-goal-phase li small { display: block; color: var(--text-muted); }
+.fox-goal-task-state { margin-inline-end: 6px; }
+.fox-goal-details :is(.fox-goal-assignment-list, .fox-goal-review-list, .fox-goal-report-list) { padding: 0; list-style: none; }
+.fox-goal-assignment, .fox-goal-review-list > li, .fox-goal-report-list > li { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.fox-goal-assignment > :is(code, small) { display: block; margin-top: 5px; color: var(--text-muted); }
+.fox-goal-assignment[data-state="uncertain"] .fox-goal-row-heading > span { color: var(--status-warning); }
+.fox-goal-row-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; }
+.fox-goal-row-heading > strong { min-width: 0; color: var(--text); font-weight: 550; }
+.fox-goal-row-heading > span { font-size: 11px; color: var(--text-muted); }
+.fox-goal-evidence { display: flex; flex-direction: column; gap: 4px; padding: 10px; margin: 10px 0; border-inline-start: 2px solid var(--border-strong); background: var(--bg); }
+.fox-goal-evidence > p { margin: 2px 0; color: var(--text); }
+.fox-goal-evidence > small { color: var(--text-muted); font-size: 11px; }
+.fox-goal-panel .fox-native-text-button { max-width: 100%; flex-wrap: wrap; text-align: start; }
+.fox-goal-panel .fox-native-text-button > svg { flex: none; }
+.fox-goal-questions { padding: 10px 0; border-top: 1px solid var(--border); }
+.fox-goal-questions > div { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.fox-goal-questions > div > p { margin: 8px 0; }
+.fox-goal-questions small { display: block; color: var(--text-muted); }
+.fox-goal-summary { display: flex; align-items: center; flex: none; gap: 10px; min-width: 0; width: 100%; padding: 10px 20px; border: 0; border-bottom: 1px solid var(--border); background: var(--bg-panel); color: var(--text-muted); text-align: start; cursor: pointer; }
+.fox-goal-summary:hover { background: var(--bg-hover); }
+.fox-goal-summary > svg { flex: none; color: var(--accent); }
+.fox-goal-summary > span { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.fox-goal-summary strong { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 550; }
+.fox-goal-summary small { font-size: 11px; }
+.fox-worker-return-bar { flex: none; padding: 2px 20px; border-bottom: 1px solid var(--border); background: var(--bg-panel); }
+.fox-worker-return-bar .fox-native-text-button { margin-top: 0; }
+@media (max-width: 640px), (pointer: coarse) {
+  .fox-goal-controls .fox-button, .fox-goal-details > summary { min-height: 44px; }
+  .fox-goal-summary { padding-inline: 12px; }
+  .fox-worker-return-bar { padding-inline: 12px; }
+}

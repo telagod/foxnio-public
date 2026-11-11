@@ -27,11 +27,11 @@ export function isFoxWorkspacePath(path: string | null | undefined): boolean {
  * the briefing, but it must not have the tools that edit files or run commands:
  * project work is dispatched through `send_to_session` / `new_session`.
  *
- * OMP's native memory tools are allowed: durable preferences and decisions
- * belong in the active memory backend, not in a second foxnio note store.
+ * OMP's native memory tools own durable preferences. The native goal tool is
+ * installed by OMP goal mode; its lifecycle/evidence gate remains mandatory.
  */
 export const FOX_TOOL_NAMES = ["read", "grep", "glob", "todo", "ask"] as const;
-export const FOX_OPTIONAL_TOOL_NAMES = ["recall", "retain", "reflect", "memory_edit"] as const;
+export const FOX_OPTIONAL_TOOL_NAMES = ["recall", "retain", "reflect", "memory_edit", "goal"] as const;
 
 /** True when the wrapper was started with exactly FOX's resident toolset. */
 export function isFoxToolPolicy(toolNames: readonly string[] | null | undefined): boolean {

@@ -23,7 +23,7 @@ class FakeSharedWorker {
 const originalWorker = globalThis.SharedWorker;
 const originalFetch = globalThis.fetch;
 globalThis.SharedWorker = FakeSharedWorker;
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
+const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { useSessionSignals } = await jiti.import("./useSessionSignals.ts");
 const { notificationHistory, useNotificationHistory } = await jiti.import("../lib/notification-history.ts");
 const entry = (id, detail = id) => ({

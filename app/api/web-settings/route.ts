@@ -4,6 +4,7 @@ import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } f
 import { agentEnvRevision, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
 import { isSensitiveEnvName, isUnresolvedSecretError, maskStringRecord, restoreStringRecord } from "@/lib/secret-mask";
 import { isRecord } from "@/lib/type-guards";
+import { controlFoxGoal, getFoxGoalSnapshot } from "@/lib/fox-goal-service";
 
 export const dynamic = "force-dynamic";
 
@@ -97,5 +98,19 @@ export async function PUT(req: Request) {
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
   if (resumeProvided) syncInterruptibleSessions();
+  if (patch.agentToolsEnabled === false) {
+    try {
+      const goal = await getFoxGoalSnapshot();
+      if (goal.grant && !goal.grant.revoked && goal.goal?.goal.status !== "complete") {
+        await controlFoxGoal("pause");
+      }
+    } catch (error) {
+      return NextResponse.json({
+        error: `Agent tools are disabled, but FOX could not confirm its pause: ${error instanceof Error ? error.message : String(error)}`,
+        code: "fox_pause_failed",
+        settings: publicSettings(settings),
+      }, { status: 503 });
+    }
+  }
   return NextResponse.json(publicSettings(settings));
 }

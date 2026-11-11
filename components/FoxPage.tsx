@@ -11,6 +11,7 @@ import {
   MessageSquarePlus,
   Settings2,
   ListTodo,
+  Target,
 } from "lucide-react";
 import FoxLogo from "@/components/FoxLogo";
 import { ChatWindow } from "@/components/ChatWindow";
@@ -21,6 +22,7 @@ import type { ChatInputHandle } from "@/components/ChatInput";
 import { getSessionStore, useSessionStoreSelector } from "@/hooks/useSessionStore";
 import { useBriefing } from "@/hooks/useBriefing";
 import { useFoxService } from "@/hooks/useFoxService";
+import { useFoxGoal } from "@/hooks/useFoxGoal";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { refreshBriefing } from "@/lib/briefing-events";
 import { comparableProjectPath } from "@/lib/comparable-path";
@@ -81,6 +83,8 @@ export function FoxPage({
   const [workspaceError, setWorkspaceError] = useState(false);
   const [booted, setBooted] = useState(false);
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const goalState = useFoxGoal(session?.id ?? null);
+  const refreshGoal = goalState.refresh;
   const [chatKey, setChatKey] = useState(0);
   const chatKeyRef = useRef(0);
   const aliveRef = useRef(false);
@@ -265,6 +269,8 @@ export function FoxPage({
     return () => window.clearInterval(timer);
   }, [booted, cwd, adoptServerSession]);
 
+  useEffect(() => { void refreshGoal(); }, [briefingState.briefing?.generatedAt, refreshGoal]);
+
   const startNewConversation = useCallback(async () => {
     if (resettingRef.current) return;
     resettingRef.current = true;
@@ -328,7 +334,8 @@ export function FoxPage({
   const handleAgentEnd = useCallback(() => {
     refreshBriefing();
     if (session) void registerSession(session.id);
-  }, [session, registerSession]);
+    void refreshGoal();
+  }, [session, registerSession, refreshGoal]);
 
   const suggest = useCallback((text: string) => {
     if (activityOverlay) setActivityOpen(false);
@@ -369,7 +376,7 @@ export function FoxPage({
     </div>
   );
 
-  const activity = <FoxActivity state={briefingState} onOpenSession={onOpenSession} onDiscuss={suggest} onClose={() => setActivityOpen(false)} />;
+  const activity = <FoxActivity state={briefingState} goal={goalState} onOpenSession={onOpenSession} onDiscuss={suggest} onClose={() => setActivityOpen(false)} />;
 
   return (
     <div ref={workspaceRef} className="fox-native-workspace">
@@ -405,6 +412,11 @@ export function FoxPage({
       {service.health === "error" && <div className="fox-native-capability-note" role="status" data-health="error"><AlertCircle size={15} /><span>{t("notifications.typeError")}: {service.status?.lastRunError}</span></div>}
       {service.status?.capabilities?.agentTools === false && <div className="fox-native-capability-note" role="status"><AlertCircle size={15} />{t("fox.native.toolsDisabled")}</div>}
       {sessionProblem && <div className="fox-native-capability-note" role="status"><AlertCircle size={15} /><span>{t(`fox.session.${sessionProblem}`)}</span><button type="button" className="fox-native-text-button" onClick={() => void loadWorkspace()}>{t("fox.retry")}</button></div>}
+      {(goalState.snapshot?.goal || goalState.error) && <button type="button" className="fox-goal-summary" onClick={() => setActivityOpen(true)} aria-controls="fox-native-context" aria-expanded={activityOpen}>
+        <Target size={16} aria-hidden="true" />
+        <span><strong>{goalState.snapshot?.goal?.goal.objective || t("fox.goal.title")}</strong><small>{goalState.error ? t("fox.goal.unknown") : goalState.snapshot?.goal?.goal.status === "complete" ? t("fox.goal.nativeCompleted") : t(`fox.goal.recovery.${goalState.snapshot?.recovery}`)}</small></span>
+        <ArrowUpRight size={15} aria-hidden="true" />
+      </button>}
         {workspaceError ? (
           <div className="fox-chat-error">
             <AlertCircle size={20} aria-hidden="true" />
@@ -450,10 +462,11 @@ export function FoxPage({
         <DialogContent>
           <DialogTitle>{t("fox.newConversation")}</DialogTitle>
           <p className="fox-detail-explanation">{t("fox.reset.description")}</p>
+          {(!goalState.snapshot || goalState.error || goalState.snapshot.assignments.some((item) => item.state !== "settled" && item.state !== "closed") || ["active", "paused"].includes(goalState.snapshot.goal?.goal.status ?? "") || briefingState.briefing?.workers?.some((worker) => worker.state === "running" || worker.state === "waiting")) && <p className="fox-inline-warning" role="status">{t("fox.goal.resetWarning")}</p>}
           {resetError && <p className="fox-inline-warning" role="alert">{resetError}</p>}
           <div className="fox-decision-buttons">
             <DialogClose className="fox-button" disabled={resetting}>{t("fox.cancel")}</DialogClose>
-            <button type="button" className="fox-button fox-button-primary" disabled={resetting} onClick={() => void startNewConversation()}>{t("fox.newConversation")}</button>
+            <button type="button" className="fox-button fox-button-primary" disabled={resetting || Boolean(goalState.pending)} onClick={() => void startNewConversation()}>{t("fox.newConversation")}</button>
           </div>
         </DialogContent>
       </Dialog>

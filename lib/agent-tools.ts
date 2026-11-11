@@ -1,6 +1,16 @@
 import type { HostToolDefinition } from "./pi-types";
 import { isFoxWorkspacePath } from "./fox";
 import { isRecord } from "./type-guards";
+import { parseFoxGoalCoordination } from "./omp/fox-goals.mjs";
+
+const GOAL_COORDINATION_PARAMETER = {
+  type: "object", description: "Required for every authorized FOX goal dispatch; exact native grant, goal, todo item, purpose and acceptance criterion IDs.",
+  properties: {
+    grantEntryId: { type: "string" }, nativeGoalId: { type: "string" }, planItemRef: { type: "string" },
+    purpose: { type: "string", enum: ["implementation", "verification", "evidence", "rework"] },
+    criterionIds: { type: "array", items: { type: "string" } },
+  }, required: ["grantEntryId", "nativeGoalId", "planItemRef", "purpose", "criterionIds"],
+};
 
 /**
  * Server-side agent tools for issue #275: tools an agent running inside
@@ -43,6 +53,7 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
         provider: { type: "string", description: "Model provider, used with modelId instead of model." },
         modelId: { type: "string", description: "Model ID, used with provider instead of model." },
         name: { type: "string", description: "Display name for the new session." },
+        coordination: GOAL_COORDINATION_PARAMETER,
       },
     },
   },
@@ -73,6 +84,7 @@ export const AGENT_TOOL_DEFINITIONS: HostToolDefinition[] = [
             "When true, wait for the target turn to finish (up to waitTimeoutMs) and return its final assistant text. When false, return as soon as the target accepts the message.",
         },
         waitTimeoutMs: { type: "number", description: "Maximum wait for a waited delivery, in milliseconds. Defaults to 120000, capped at 300000." },
+        coordination: GOAL_COORDINATION_PARAMETER,
       },
       required: ["sessionId", "message"],
     },
@@ -309,6 +321,7 @@ export async function executeAgentTool(
   }
   if (!AGENT_TOOL_NAMES.has(toolName)) throw new Error(`Unknown agent tool: ${toolName}.`);
   const record = asRecord(args);
+  if (record.coordination !== undefined) parseFoxGoalCoordination(record.coordination);
 
   if (toolName === "list_sessions") {
     ctx.guard.checkRate(ctx.sourceSessionId);

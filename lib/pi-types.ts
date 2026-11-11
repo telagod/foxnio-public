@@ -1,4 +1,5 @@
 import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
+import type { NativeGoalModeState } from "./fox-goal-types";
 
 // Local mirrors of the omp shapes used by omp-web. omp's SDK packages are
 // Bun-only, so these types are hand-maintained against
@@ -85,6 +86,7 @@ export interface RpcSessionState {
   /** Displayable queue-chip texts (omp ≥ 18.4.4); mirrored live by `queue_update`. */
   queuedMessages?: QueuedMessages;
   todoPhases: TodoPhase[];
+  goal?: NativeGoalModeState | null;
   systemPrompt?: string[];
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
   fastMode?: boolean;
@@ -140,6 +142,9 @@ export interface WebSessionState {
   /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
+  goal?: NativeGoalModeState | null;
+  isSettled?: boolean;
+  hasPendingAsyncWork?: boolean;
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
 }

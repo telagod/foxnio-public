@@ -1,6 +1,6 @@
 # FOX high-autonomy delivery workflow
 
-Status: design proposal, awaiting approval; product implementation has not started.
+Status: approved on 2026-11-11; implemented in the native-goal delivery branch.
 
 ## 1. User intent and selected approach
 
@@ -421,6 +421,18 @@ linearization, logical dispatch counting, question audience, acceptance predicat
 and notification-counter semantics. Sections 5–10 make explicit decisions for
 all of them. The critical native-goal discovery removed the proposed custom
 lifecycle, multi-goal scheduler and next-turn context installer entirely.
-The actual 18.18.8 lifecycle and per-process RPC continuation probes are complete;
-extension/report integration, restart recovery and turn-accounting acceptance
-remain implementation requirements, not claimed as tested.
+Actual OMP 18.18.8 lifecycle and per-process RPC continuation probes passed.
+The real native acceptance fixture exercised one confirmation, two actual worker
+sessions, a failing Node assertion, automatic rework, passing verification,
+criterion review and native goal completion with no browser involved. The local
+provider makes model decisions deterministic; this proves runtime integration,
+not real-model planning quality. Existing native manual FOX acceptance also passed.
+
+Implementation rulings: the existing global Agent tools setting remains an
+explicit prerequisite, not a newly introduced continuation toggle. Native
+report receipt/goal metadata share a serialized wrapper lane; metadata-only
+receipt needs idle/no queued input, while model handoff still requires full
+settlement. Independent native agent_start events are not attributed to a
+metadata command; its ACK, native correlated receipt and persistence determine
+success. Existing push/device endpoints remain retired; the notification limit
+applies to the new dedicated in-app goal notices, never raw history/input signals.

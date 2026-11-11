@@ -152,6 +152,7 @@ export function AppShell({ appName }: { appName: string }) {
   // first render agree; the URL is then treated as the source of truth until
   // the user closes FOX or opens a session.
   const [foxOpen, setFoxOpen] = useState(false);
+  const [foxWorkerReturnId, setFoxWorkerReturnId] = useState<string | null>(null);
   // FOX's cwd, reported by FoxPage once it resolves; the file panel uses it
   // instead of falling back to the last project the user had selected.
   const [foxCwd, setFoxCwd] = useState<string | null>(null);
@@ -1167,6 +1168,7 @@ export function AppShell({ appName }: { appName: string }) {
     // re-select, notification click) must not bump sessionKey: that remounts
     // ChatWindow, reconnects SSE, and drops the mid-run streaming view.
     setFoxOpen(false);
+    if (!foxOpen && session.id !== foxWorkerReturnId) setFoxWorkerReturnId(null);
     foxReturnRef.current = null;
     setSettingsTab(null);
     // Re-picking the current conversation still closes/rearms the drawer,
@@ -1195,10 +1197,11 @@ export function AppShell({ appName }: { appName: string }) {
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [router, isMobile, selectedSession?.id]);
+  }, [router, isMobile, selectedSession?.id, foxOpen, foxWorkerReturnId]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string | null) => {
     setFoxOpen(false);
+    setFoxWorkerReturnId(null);
     foxReturnRef.current = null;
     setSettingsTab(null);
     setSelectedSession(null);
@@ -1221,6 +1224,7 @@ export function AppShell({ appName }: { appName: string }) {
     // conversation instead of dumping the user on an empty screen.
     foxReturnRef.current = { session: selectedSession, newSessionCwd };
     setFoxOpen(true);
+    setFoxWorkerReturnId(null);
     setSelectedSession(null);
     setNewSessionCwd(null);
     setSettingsTab(null);
@@ -1424,10 +1428,13 @@ export function AppShell({ appName }: { appName: string }) {
     const sessionUrl = new URL(`/?session=${encodeURIComponent(sessionId)}`, window.location.origin).href;
     void resolveStoreSession(getSessionStore(), sessionId).then((session) => {
       if (session === "unavailable") window.location.assign(sessionUrl);
-      else if (session) handleSelectSession(session);
+      else if (session) {
+        if (foxOpen) setFoxWorkerReturnId(session.id);
+        handleSelectSession(session);
+      }
       else toast.error(translate("notifications.sessionNotFound"));
     });
-  }, [handleSelectSession, isCompactOverlay]);
+  }, [handleSelectSession, isCompactOverlay, foxOpen]);
 
   // Full-page Settings hides the chat, so its session counts as not viewed.
   useSessionSignals({ sessionId: settingsTab ? null : selectedSession?.id ?? null, onOpenSession: openSessionById });
@@ -2514,6 +2521,14 @@ export function AppShell({ appName }: { appName: string }) {
             onMove={moveTab}
             onShift={shiftTab}
           />
+        )}
+
+        {!foxOpen && selectedSession?.id === foxWorkerReturnId && (
+          <div className="fox-worker-return-bar">
+            <button type="button" className="fox-native-text-button" onClick={openFox}>
+              {t("fox.goal.returnToFox")}
+            </button>
+          </div>
         )}
 
         {/* Chat content */}

@@ -1,3 +1,5 @@
+import type { FoxGoalEvidence } from "./fox-goal-types";
+
 export type FoxReportStatus = "accepted" | "progress" | "blocked" | "needs_input" | "result" | "failed" | "cancelled";
 
 export interface FoxWorkerReport {
@@ -12,6 +14,13 @@ export interface FoxWorkerReport {
   status: FoxReportStatus;
   summary: string;
   evidence: string[];
+  audience?: "coordinator" | "human";
+  structuredEvidence?: FoxGoalEvidence[];
+  goalId?: string;
+  assignmentId?: string;
+  assignmentWorkerSessionId?: string;
+  criterionIds?: string[];
+  question?: { sessionId: string; requestId?: string };
   toolCallId?: string;
   truncated?: boolean;
 }

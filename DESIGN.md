@@ -264,24 +264,51 @@ direct child of the current FOX conversation, with its exact cwd and session
 ID. Briefing workers come from that lineage and live session state, never a
 dispatch ledger. Idle or new activity does not prove task completion.
 
-The native `tool_call` hook enforces coordinator tool scope and project policy:
-`observe` blocks execution, `confirm` opens native confirmation, and `auto`
-permits delegation. The host still requires a process-scoped, single-use native
-receipt bound to the source session, tool call, exact arguments and resolved
-project path. Policy is checked again before execution. Proactive observation
-blocks dispatch and blocking questions regardless of project policy.
+The native `tool_call` hook enforces coordinator scope and project policy.
+Without a goal grant, `observe` blocks execution, `confirm` opens native
+per-call confirmation, and `auto` permits delegation. `fox_goal authorize`
+instead confirms one outcome, canonical project scope and acceptance criteria
+for a bounded workflow. Both confirm and auto projects can then continue
+without repeated dialogs; observe-only projects cannot be included. The existing
+global Agent tools setting remains a prerequisite and is never silently enabled.
+Every effect still needs a fresh exact-arguments native receipt, a verified
+assignment, and a host-side permission/policy/control recheck.
 
-foxnio keeps only the FOX workspace/persona, read-only `BRIEFING.md` projection,
-`session.json` pointer/reset epoch, `service.json` observation/dispatch policy,
-and dedupe/daily-budget metadata in `service-state.json`. One 60s wake loop
-coalesces native attention and worker activity, respects quiet hours and daily
-limits, and wakes the current conversation. Pending retries stay in memory;
-unreported signals are reconstructed after restart. The observer never edits
-OMP todos or reads worker transcripts; FOX reviews the evidence itself.
-An idle FOX's last run error is not busy and does not prevent the next normal
-wake. Service health surfaces that native error separately from tick freshness;
-only native recovery clears it. Running work and pending human input still block
-wakes under the existing quiet-hour and daily-budget policy.
+OMP's native `goal` owns objective, lifecycle, accounting and automatic
+continuation. A temporary FOX-only CLI config overlay enables RPC continuation;
+ordinary sessions and global settings are unchanged. Native session extension
+entries hold only scope consent/revocation, assignment references, consumed
+dispatch bounds, report handoff and evidence reviews. OMP owns all JSONL writes.
+No new goal database, mirrored todo or independent continuation scheduler exists.
+The default envelope permits four concurrent workers, 64 automatic logical
+dispatches and three rework attempts per item, until delivery or revocation;
+expiry and native token budget are optional. Native goal accounting is not a
+total spend cap for separate top-level workers. Workers are not a shell sandbox.
+
+Received reports and completed worker turns are not acceptance. FOX reviews
+criterion-specific evidence, settles assignments and updates native todo;
+`goal complete` is blocked by unresolved work, stale or missing evidence and
+uncertain delivery. Human questions retain their original session/request;
+ordinary engineering questions go to FOX. Pause preserves the goal, Stop
+revokes authority, drops the native goal and attempts worker abort. Controls
+cannot undo effects already admitted. Reset invalidates native authority before
+clearing the active pointer; verified fork copies need fresh consent.
+
+The existing observation loop remains read-only and obeys its enable switch,
+quiet hours and daily observation limit. Authorized native goals do not depend
+on the browser or observation settings. The loop only reconciles reports and
+proven interrupted obligations; it never replays an uncertain effect blindly.
+Strict native family reads preserve revoked permissions and consumed limits
+across continuation/rewind. Explicit user pause and resource exhaustion never
+become restart permission.
+
+Goal outcome/decision notices use a separate daily cap and quiet hours; raw
+history/input signals are retained. Current goal notices are in-app; retired
+push/device endpoints remain retired, not a newly promised offline push service.
+Native report receipts and once-only handoff share the wrapper metadata queue
+with goal queries, so observing state cannot interrupt a report or duplicate a
+native continuation. Service health still exposes native errors independently
+of tick freshness.
 
 Historical `chief.db`, `dispatches.json` and preference files remain untouched.
 A one-time read-only migration copies only autonomy policy; old tickets and
@@ -292,9 +319,10 @@ database and dispatch/preference records stay on disk as history only.
 The scheduler may only call existing RPC/session operations and existing
 file/Git APIs. It must not add a browser-triggered host execution path.
 
-See `docs/specs/2026-11-08-native-first-fox-design.md` for the original migration
-proposal and its implementation notes. The older resident-Chief proposal is
-historical; it is not authority for recreating its control plane.
+See `docs/specs/2026-11-11-fox-delivery-workflow-design.md` for the high-autonomy
+workflow and `docs/specs/2026-11-08-native-first-fox-design.md` for the original
+migration. The older resident-Chief proposal is historical, not authority for
+recreating its control plane.
 
 ## Upstream and release strategy
 
