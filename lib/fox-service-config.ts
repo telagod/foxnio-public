@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, realpathSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 import { DatabaseSync } from "node:sqlite";
 import { comparableProjectPath } from "./comparable-path";
+import { canonicalFoxProjectPath, foxDispatchPolicyForKey } from "./fox-dispatch-policy.mjs";
 import { writeFileAtomic } from "./fs-atomic";
 import { getAgentDir } from "./omp/paths";
 import { foxWorkspaceDir } from "./fox-workspace";
@@ -86,11 +87,11 @@ export function writeFoxServiceConfig(config: FoxServiceConfig, home?: string): 
 }
 
 export function foxDispatchProjectKey(cwd: string): string {
-  return comparableProjectPath(existsSync(cwd) ? realpathSync(cwd) : cwd);
+  return existsSync(cwd) ? canonicalFoxProjectPath(cwd) : comparableProjectPath(cwd);
 }
 
 export function foxDispatchPolicy(config: FoxServiceConfig, cwd: string): FoxDispatchPolicy {
-  return config.dispatchPolicies?.[foxDispatchProjectKey(cwd)] ?? "confirm";
+  return foxDispatchPolicyForKey(config.dispatchPolicies, foxDispatchProjectKey(cwd));
 }
 
 export function initializeFoxNativePolicy(home?: string, legacyPath = join(getAgentDir(), "omp-web", "chief.db")): FoxServiceConfig {

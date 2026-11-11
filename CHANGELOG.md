@@ -9,6 +9,7 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 ### Fixes & Improvements
 
 - **Canonical filesystem aliases preserve session identity and authority.** Native indexing, targeted invalidation, parent lineage and FOX scope checks resolve macOS `/var` aliases and Windows short paths without granting access outside verified roots. File-index requests accept aliases only after physical containment checks.
+- **FOX identity stays consistent across Windows short paths.** New grants and manual receipts use native canonical paths; old policy aliases resolve conservatively, conflicting aliases use the most restrictive policy, and worker reports must still prove the exact assigned project. Historical noncanonical grants require fresh authorization rather than being silently broadened.
 - **Cross-platform regression fixtures use native paths.** Migration, backup and registry tests no longer assume POSIX path spelling or Windows support for POSIX permission bits; idle reaping tests use a deterministic clock.
 
 > Upgrades from 0.6.x still require all old instances stopped and
