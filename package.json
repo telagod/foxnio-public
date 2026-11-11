@@ -1,6 +1,6 @@
 {
   "name": "@telagod/foxnio",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "foxnio: web UI for the oh-my-pi (omp) coding agent, a fork of ompweb focused on agent customization",
   "homepage": "https://github.com/telagod/foxnio-public#readme",
   "repository": {

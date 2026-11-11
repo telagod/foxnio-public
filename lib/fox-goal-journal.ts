@@ -88,6 +88,23 @@ export async function readFoxGoalJournal(file: string): Promise<{
   }
   const current = [...headers.values()].find((entry) => entry.file === currentFile);
   if (!current) throw new Error("Native goal session is missing from its family");
+  const files = new Map([...headers.values()].map((entry) => [entry.file, entry]));
+  const parents = new Map<string, { file: string; header: Header }>();
+  for (const { header } of headers.values()) {
+    const reference = header.parentSession;
+    if (typeof reference !== "string" || parents.has(reference)) continue;
+    let parent = headers.get(reference) ?? files.get(reference);
+    if (!parent && isAbsolute(reference)) {
+      // Native headers may retain /var, short Windows paths, or directory
+      // aliases. Resolve identity without admitting parents outside siblings.
+      try { parent = files.get(await realpath(reference)); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+    }
+    if (parent) parents.set(reference, parent);
+  }
   function root(value: typeof current): string {
     const seen = new Set<string>();
     while (value) {
@@ -97,7 +114,7 @@ export async function readFoxGoalJournal(file: string): Promise<{
       if (header.continuationOf === undefined) return header.id;
       if (typeof header.continuationOf !== "string" || !header.continuationOf || typeof header.parentSession !== "string") throw new Error("Native goal continuation metadata is incomplete");
       const parent = headers.get(header.continuationOf);
-      if (!parent || parent.header.cwd !== header.cwd || (header.parentSession !== parent.header.id && header.parentSession !== parent.file)) throw new Error("Native goal continuation parent cannot be verified");
+      if (!parent || parent.header.cwd !== header.cwd || parents.get(header.parentSession) !== parent) throw new Error("Native goal continuation parent cannot be verified");
       value = parent;
     }
     throw new Error("Native goal continuation root is missing");
@@ -126,7 +143,7 @@ export async function readFoxGoalJournal(file: string): Promise<{
   const familyRoot = headers.get(rootId)!;
   const parentRef = familyRoot.header.parentSession;
   if (typeof parentRef === "string") {
-    const source = headers.get(parentRef) ?? [...headers.values()].find((entry) => entry.file === parentRef);
+    const source = parents.get(parentRef);
     if (source && source.header.cwd === familyRoot.header.cwd && source.header.id !== rootId) {
       const before = await stat(source.file);
       bytes += before.size;

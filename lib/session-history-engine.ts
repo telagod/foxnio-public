@@ -1,6 +1,6 @@
 // Imported only by the history worker in production. Tests exercise the same
 // synchronous engine directly to observe file reads and cache eviction.
-import { closeSync, fstatSync, openSync, readSync, statSync, type Stats } from "fs";
+import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync, type Stats } from "fs";
 import { buildSessionTree, containsBlobRef, loadSessionFile, MAX_SESSION_LOAD_BYTES, resolveBlobRefsInEntries, type ResolveBlobOptions } from "./omp/session-files";
 import type { SessionContext, SessionEntry } from "./types";
 import { isRecord } from "./type-guards";
@@ -10,13 +10,18 @@ import { buildSessionContext, compactionUiMessage, entryToUiMessage, selectSessi
 import { SessionFileTooLargeError } from "./session-history-errors";
 import { projectTreeForResponse } from "./session-tree-projection";
 
+function historyPathKey(filePath: string): string {
+  try { return sessionPathKey(realpathSync.native(filePath)); }
+  catch { return sessionPathKey(filePath); }
+}
+
 export function invalidateSessionEntriesCache(filePath?: string): void {
   if (!filePath) {
     globalThis.__ompSessionEntriesCache?.clear();
     globalThis.__ompSessionHistoryIndexes?.clear();
     return;
   }
-  const pathKey = sessionPathKey(filePath);
+  const pathKey = historyPathKey(filePath);
   globalThis.__ompSessionEntriesCache?.delete(pathKey);
   for (const [key, index] of globalThis.__ompSessionHistoryIndexes ?? []) {
     if (index.pathKey === pathKey) globalThis.__ompSessionHistoryIndexes?.delete(key);
@@ -72,7 +77,7 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
     return loadSessionFile(filePath).entries;
   }
   const cache = getSessionEntriesCache();
-  const key = sessionPathKey(filePath);
+  const key = historyPathKey(filePath);
   const cached = cache.get(key);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
     cache.delete(key);
@@ -124,7 +129,7 @@ function loadEntriesOrThrowTooLarge(filePath: string): SessionEntry[] {
     if (statSync(filePath).size > MAX_SESSION_LOAD_BYTES) {
       // The cached entry (keyed on the old, smaller size) can never match
       // again — drop it instead of letting it linger until LRU eviction.
-      getSessionEntriesCache().delete(sessionPathKey(filePath));
+      getSessionEntriesCache().delete(historyPathKey(filePath));
       throw new SessionFileTooLargeError(filePath);
     }
   } catch (error) {
@@ -277,14 +282,14 @@ function buildHistoryIndex(
   const entryIds = detached.rows.map((row) => row.id);
   const positions = new Map(entryIds.map((id, position) => [id, position]));
   const bytes = 256 + serialized.length * 2 + rows.length * 192;
-  return { ...detached, pathKey: sessionPathKey(filePath), version, bytes, entryIds, positions };
+  return { ...detached, pathKey: historyPathKey(filePath), version, bytes, entryIds, positions };
 }
 
 /** Rebuild on any file-version change: growth alone cannot prove that old
  * offsets survived a prefix rewrite. Both readers share the same bounded LRU. */
 function getSessionHistoryIndex(filePath: string, leafId?: string, includePreCompaction = false) {
   const cache = globalThis.__ompSessionHistoryIndexes ??= new Map();
-  const pathKey = sessionPathKey(filePath);
+  const pathKey = historyPathKey(filePath);
   const key = JSON.stringify([pathKey, leafId ?? null, includePreCompaction]);
   let stat: Stats | undefined;
   try { stat = statSync(filePath); } catch { /* Missing/unreadable: retain the lenient empty result. */ }

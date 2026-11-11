@@ -4,6 +4,16 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ---
 
+## [0.7.1] - 2026-11-12
+
+### Fixes & Improvements
+
+- **Canonical filesystem aliases preserve session identity and authority.** Native indexing, targeted invalidation, parent lineage and FOX scope checks resolve macOS `/var` aliases and Windows short paths without granting access outside verified roots. File-index requests accept aliases only after physical containment checks.
+- **Cross-platform regression fixtures use native paths.** Migration, backup and registry tests no longer assume POSIX path spelling or Windows support for POSIX permission bits; idle reaping tests use a deterministic clock.
+
+> Upgrades from 0.6.x still require all old instances stopped and
+> `foxnio data migrate --offline`; 0.7.0 databases do not need reimport.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

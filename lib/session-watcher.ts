@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from "fs";
+import { realpathSync, watch, type FSWatcher } from "fs";
 import { join, relative, sep } from "path";
 import { invalidateSessionHistory } from "./session-history-queue";
 import { ensureSessionIndex, invalidateSessionIndex, readSessionIndex } from "./session-index";
@@ -67,6 +67,7 @@ function queueFlush(state: WatchState): void {
 function attach(state: WatchState): void {
   if (state.closed || state.watcher) return;
   try {
+    state.root = realpathSync.native(state.root);
     state.watcher = watch(state.root, { recursive: true, persistent: false }, (event, filename) => {
       if (!filename) state.pendingUnknown = true;
       else {
@@ -91,6 +92,8 @@ function attach(state: WatchState): void {
 
 /** Owned by server startup, not by browser subscription reference counts. */
 export function startSessionFileWatcher(root: string): () => void {
+  // The index stores physical paths; alias roots must emit the same identities.
+  try { root = realpathSync.native(root); } catch { /* attach retries missing roots. */ }
   const previous = globalThis.__foxSessionFileWatch;
   if (previous && !previous.closed && previous.root === root) return () => stop(previous);
   if (previous) stop(previous);

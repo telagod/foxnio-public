@@ -8,7 +8,7 @@ import { StorageError, isStorageMutation, type StorageRequest, type StorageResul
 
 interface Work { id: number; request: StorageRequest; resolve: (value: unknown) => void; reject: (reason: unknown) => void; key?: string }
 interface WorkerReply { id?: number; value?: unknown; head?: DataCursor; error?: { code: string; message: string; outcome?: 'not_committed' | 'uncertain' } }
-function canonicalRoot(path: string): string { return existsSync(path) ? realpathSync(path) : resolve(path); }
+function canonicalRoot(path: string): string { return existsSync(path) ? realpathSync.native(path) : resolve(path); }
 export function storageRoots(home?: string): StorageRoots {
   const agentDir = home === undefined ? getAgentDir() : join(home, '.omp', 'agent');
   return { agentDir: canonicalRoot(agentDir), sessionsDir: canonicalRoot(home === undefined ? getSessionsDir() : join(agentDir, 'sessions')), foxDir: canonicalRoot(foxWorkspaceDir(home)) };

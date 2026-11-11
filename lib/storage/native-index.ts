@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "crypto";
-import { opendirSync, statSync, type Dir, type Stats } from "fs";
-import { extname, isAbsolute, join, relative, resolve, sep } from "path";
+import { opendirSync, realpathSync, statSync, type Dir, type Stats } from "fs";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 import { readSessionHeaderSync, scanSessionInfo, type OmpSessionInfo } from "../omp/session-files";
 import { projectIdentityKey, sessionPathKey } from "../paths";
 import { resolveProjectWithRegistry, type ProjectInfo } from "../project-resolution";
@@ -61,6 +61,16 @@ function dispose(scan: Scan): void {
   closeDirectory(scan.rootDirectory);
   closeDirectory(scan.projectDirectory);
   scans.delete(scan.token);
+}
+/** Resolve aliases before comparing native identities. Missing leaves still
+ * retain their canonical parent so targeted failures update the existing row. */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try { return realpathSync.native(absolute); }
+  catch {
+    const parent = dirname(absolute);
+    return parent === absolute ? absolute : join(canonicalPath(parent), basename(absolute));
+  }
 }
 function sourcePath(path: string, root: string): boolean {
   const rel = relative(root, path);
@@ -137,7 +147,7 @@ function toSessionInfo(info: OmpSessionInfo, project?: ProjectInfo): SessionInfo
 }
 
 function startScan(request: IndexScanRequest, roots: StorageRoots, sources: Source[], health: DataHealth): Scan {
-  const root = resolve(roots.sessionsDir);
+  const root = canonicalPath(roots.sessionsDir);
   // A new reconciliation supersedes an abandoned/conflicted run for this worker root.
   for (const active of scans.values()) if (active.root === root || Date.now() - active.touchedAt > IDLE_MS) dispose(active);
   if (scans.size >= MAX_SCANS) throw new StorageError("storage_busy", "Native inventory capacity is exhausted");
@@ -146,7 +156,7 @@ function startScan(request: IndexScanRequest, roots: StorageRoots, sources: Sour
   const scan: Scan = {
     token: randomUUID(), root, full, force: request.force === true, initial,
     observed: new Map(sources.map(source => [source.path, source.stamp])),
-    files: full ? [] : [...new Set(request.paths!.map(path => resolve(path)))].filter(path => sourcePath(path, root)),
+    files: full ? [] : [...new Set(request.paths!.map(canonicalPath))].filter(path => sourcePath(path, root)),
     seen: new Set(), stale: new Set([...(full ? [] : health.staleSources), ...sources.filter(source => source.error).map(source => source.path)]),
     warnings: new Set(full ? [] : health.warnings), inventoryDone: !full,
     inventoryFailed: !full && !health.complete && health.staleSources.length === 0, offset: 0,
@@ -173,7 +183,7 @@ export async function scanNativeIndexBatch(
   health: DataHealth = { complete: true, staleSources: [], warnings: [] },
 ): Promise<NativeScanResult> {
   const scan = request.scanToken ? scans.get(request.scanToken) : startScan(request, roots, sources, health);
-  if (!scan || scan.root !== resolve(roots.sessionsDir) || Date.now() - scan.touchedAt > IDLE_MS) {
+  if (!scan || scan.root !== canonicalPath(roots.sessionsDir) || Date.now() - scan.touchedAt > IDLE_MS) {
     if (scan) dispose(scan);
     throw new StorageError("reset_required", "Native inventory expired; restart reconciliation");
   }
@@ -250,7 +260,10 @@ export async function scanNativeIndexBatch(
     for (; scan.offset < end; scan.offset++) {
       const candidate = scan.candidates.get(scan.links![scan.offset])!;
       const { session, parent, physical, stamp } = candidate;
-      const parentId = parent ? scan.parentPaths!.get(sessionPathKey(parent)) ?? (scan.parentIds!.has(parent) ? parent : undefined) : undefined;
+      let parentId = parent && scan.parentIds!.has(parent) ? parent : undefined;
+      if (!parentId && parent && isAbsolute(parent)) {
+        parentId = scan.parentPaths!.get(sessionPathKey(canonicalPath(parent)));
+      }
       if (session.parentSessionId === parentId) continue;
       const next = { ...session };
       if (parentId) next.parentSessionId = parentId;
