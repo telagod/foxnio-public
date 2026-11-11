@@ -12,6 +12,11 @@ const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/compon
 const { useSessionSignals } = await jiti.import("@/hooks/useSessionSignals");
 const { notificationHistory } = await jiti.import("@/lib/notification-history");
 const { OPEN_SESSION_EVENT } = await jiti.import("@/lib/notification-client");
+const durableSnapshot = {
+  token: "toast-reader", cursor: { generation: "toast-generation", revision: 1 }, next: false,
+  complete: true, staleSources: [], warnings: [],
+  data: { sessions: [], projects: [], pins: [], notifications: [], foxPointer: { sessionId: null, resetAt: null, revokedSessionId: null }, foxObservation: {}, foxWorkspace: "/fox" },
+};
 
 /** The tab side of the shared event-stream worker (lib/event-stream.ts), so a
  * test can deliver frames on the notifications channel the hook opened. */
@@ -33,7 +38,7 @@ function deliverNotification(message) {
 before(() => {
   globalThis.AbortController = window.AbortController;
   window.Element.prototype.setPointerCapture = () => {};
-  globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
+  globalThis.fetch = async (url, init) => ({ ok: true, status: 200, json: async () => init?.method === "DELETE" ? { ok: true } : String(url).includes("/api/data/snapshot") ? durableSnapshot : {} });
   // `new Worker()` yields the one shared fake (a constructor may return an object).
   globalThis.Worker = function Worker() { return eventWorker; };
 });
@@ -102,13 +107,13 @@ test("a toast without an action keeps the default cursor", () => {
   assert.equal(document.querySelector(".toast-card").style.cursor, "");
 });
 
-test("signals update history without alerts; legacy alert frames are ignored", async () => {
+test("live signals cannot invent database history or alerts; legacy alert frames are ignored", async () => {
   let calls = 0;
   const requests = [];
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     requests.push(String(url));
-    return { ok: true, json: async () => ({ entries: [] }) };
+    return { ok: true, status: 200, json: async () => durableSnapshot };
   };
   globalThis.Notification = window.Notification = class { static requestPermission() { calls++; throw new Error("permission"); } constructor() { calls++; throw new Error("alert"); } };
   try {
@@ -120,10 +125,10 @@ test("signals update history without alerts; legacy alert frames are ignored", a
       deliverNotification({ kind: "os", event: { type: "error", sessionId: "os", sessionName: "OS" } });
       deliverNotification({ kind: "signal", event: { type: "error", sessionId: "s9", sessionName: "Signal", detail: "boom" } });
     });
-    assert.deepEqual(notificationHistory.get().map((e) => e.id), ["s9:error"]);
+    assert.deepEqual(notificationHistory.get(), []);
     assert.equal([...document.querySelectorAll(".toast-card")].some((card) => ["Signal", "Toast", "OS"].includes(card.querySelector(".display-serif")?.textContent)), false);
     assert.equal(calls, 0);
-    assert.ok(requests.every((url) => url === "/api/notifications/history"));
+    assert.ok(requests.every((url) => !url.startsWith("/api/notifications/history")));
     view.unmount();
     assert.equal([...eventStreams.values()].filter((c) => c.kind === "notifications").length, 0);
   } finally {

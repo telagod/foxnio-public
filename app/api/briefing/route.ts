@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { loadBriefingSnapshot } from "@/lib/briefing-server";
+import { apiErrorResponse } from "@/lib/api-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -15,13 +16,14 @@ function daysFromQuery(value: string | null): number {
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
-  const { briefing } = await loadBriefingSnapshot({
-    days: daysFromQuery(params.get("days")),
-    excludeSessionId: params.get("excludeSession"),
-    now: Date.now(),
-  });
-
-  return NextResponse.json(briefing, {
-    headers: { "Cache-Control": "no-store" },
-  });
+  try {
+    const { briefing } = await loadBriefingSnapshot({
+      days: daysFromQuery(params.get("days")),
+      excludeSessionId: params.get("excludeSession"),
+      now: Date.now(),
+    });
+    return NextResponse.json(briefing, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
 }

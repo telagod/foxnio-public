@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-import { clearHistory, listHistory, markHistoryRead, removeHistory } from "@/lib/notification-store";
+import { clearHistory, listHistory, markHistoryRead, removeHistory } from "@/lib/notification-history-store";
+import { apiErrorResponse } from "@/lib/api-utils";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +15,11 @@ const isId = (value: unknown): value is string => typeof value === "string" && v
 
 /** GET /api/notifications/history — every entry, newest first. */
 export async function GET() {
-  return NextResponse.json({ entries: listHistory() });
+  try {
+    return NextResponse.json({ entries: await listHistory() });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
 }
 
 /** PATCH /api/notifications/history { ids } — mark entries read. A client marks what it shows, never entries it has not seen. */
@@ -27,8 +32,12 @@ export async function PATCH(req: Request) {
     return invalid();
   }
   if (!isRecord(body) || !Array.isArray(body.ids) || body.ids.length > MAX_IDS || !body.ids.every(isId)) return invalid();
-  markHistoryRead(body.ids);
-  return NextResponse.json({ ok: true });
+  try {
+    await markHistoryRead(body.ids);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
 }
 
 /**
@@ -38,8 +47,12 @@ export async function PATCH(req: Request) {
 export async function DELETE(req: Request) {
   const params = new URL(req.url).searchParams;
   const id = params.get("id");
-  if (isId(id)) removeHistory(id);
-  else if (id === null && params.get("all") === "1") clearHistory();
-  else return invalid();
-  return NextResponse.json({ ok: true });
+  try {
+    if (isId(id)) await removeHistory(id);
+    else if (id === null && params.get("all") === "1") await clearHistory();
+    else return invalid();
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
 }

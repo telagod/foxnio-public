@@ -1,7 +1,8 @@
 import { statSync } from "fs";
 import { basename, join } from "path";
 import { readModelsConfig } from "./omp/models-config";
-import { forEachFileLineSync, invalidateSessionFileListCache, readSessionHeaderSync } from "./omp/session-files";
+import { forEachFileLineSync, readSessionHeaderSync } from "./omp/session-files";
+import { invalidateSessionIndex } from "./session-index";
 import { SUBAGENT_ID_RE } from "./subagent-types";
 import { isRecord } from "./type-guards";
 import {
@@ -421,7 +422,7 @@ export function parseSessionUsage(
 export async function getUsageReport(options: UsageQueryOptions = {}): Promise<UsageReport> {
   if (options.forceRefresh) {
     invalidateUsageCache();
-    invalidateSessionFileListCache();
+    invalidateSessionIndex();
   }
   return getUsageReportFromDb(options);
 }

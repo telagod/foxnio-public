@@ -5,6 +5,8 @@ import { readFoxSessionRecord, compareAndSetFoxSessionId } from "@/lib/fox-sessi
 import { listAllSessions, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { isRecord } from "@/lib/type-guards";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { apiErrorResponse } from "@/lib/api-utils";
+import { StorageError } from "@/lib/storage/protocol";
 
 export const dynamic = "force-dynamic";
 
@@ -13,12 +15,13 @@ const SESSION_ID = /^[A-Za-z0-9_-]{8,128}$/;
 /** GET /api/fox/session → the active session and the last reset epoch. */
 export async function GET() {
   try {
-    const record = readFoxSessionRecord();
+    const record = await readFoxSessionRecord();
     return NextResponse.json(
       { sessionId: record.sessionId, resetAt: record.resetAt },
       { headers: { "Cache-Control": "no-store" } },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof StorageError) return apiErrorResponse(error);
     return NextResponse.json({ error: "Could not read the FOX session record", code: "fox_session_read_failed" }, { status: 503 });
   }
 }
@@ -44,7 +47,8 @@ export async function POST(request: Request) {
 
   const sessionId = body.sessionId;
   let record;
-  try { record = readFoxSessionRecord(); } catch {
+  try { record = await readFoxSessionRecord(); } catch (error) {
+    if (error instanceof StorageError) return apiErrorResponse(error);
     return NextResponse.json({ error: "Could not read the FOX session record", code: "fox_session_read_failed" }, { status: 503 });
   }
   if (record.revokedSessionId === sessionId || (body.resetAt ?? null) !== record.resetAt
@@ -80,7 +84,8 @@ export async function POST(request: Request) {
         }
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof StorageError) return apiErrorResponse(error);
     valid = false;
   }
 
@@ -99,10 +104,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (!compareAndSetFoxSessionId(sessionId, record)) {
+    if (!await compareAndSetFoxSessionId(sessionId, record)) {
       return NextResponse.json({ error: "FOX changed conversations during registration", code: "fox_session_superseded" }, { status: 409 });
     }
   } catch (error) {
+    if (error instanceof StorageError) return apiErrorResponse(error);
     console.error("[api/fox/session]", error);
     return NextResponse.json({ error: "Could not store the FOX session", code: "fox_session_write_failed" }, { status: 500 });
   }

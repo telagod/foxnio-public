@@ -9,6 +9,7 @@ require("./node-version").exitIfUnsupportedNode();
 // `npx @telagod/foxnio@latest foxnio-systemd ...` work without requiring
 // callers to know the path of the secondary executable.
 const forwardedServiceScripts = {
+  data: "omp-web-data.mjs",
   launchd: "omp-web-launchd.js",
   "foxnio-launchd": "omp-web-launchd.js",
   systemd: "omp-web-systemd.js",

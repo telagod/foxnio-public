@@ -1,7 +1,8 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
 import { join } from "path";
-import { startFoxService } from "@/lib/fox-service";
 import { getDiagnosticsDir } from "@/lib/omp/paths";
+import { startDataRuntime, startDataServices, stopDataRuntime } from "@/lib/data-runtime";
+import { installServerShutdownBarrier } from "@/lib/server-shutdown";
 
 export async function register(): Promise<void> {
   // Honor HTTP(S)_PROXY/NO_PROXY for server-side fetch (update checks, skill
@@ -63,6 +64,7 @@ export async function register(): Promise<void> {
   void (async () => {
     try {
       const { resumeInterruptedSessions } = await import("@/lib/rpc-manager");
+      await startDataRuntime();
       await resumeInterruptedSessions();
     } catch (error) {
       console.warn(`[omp-web] session auto-resume failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -134,13 +136,8 @@ export async function register(): Promise<void> {
   }, 15_000);
   watchdog.unref?.();
 
-  // Resident FOX service: one observation tick over the existing session /
-  // notification / live views. It never starts a second model loop; a wake is
-  // an ordinary prompt to the FOX OMP session. Fire-and-forget so a slow
-  // session store cannot block boot.
-  try {
-    startFoxService();
-  } catch (error) {
-    console.warn(`[omp-web] FOX service failed to start: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  // Retry unavailable storage without requiring a browser to start resident work.
+  // Drain durable ingress before Next's signal handler can exit the process.
+  installServerShutdownBarrier(stopDataRuntime);
+  startDataServices();
 }

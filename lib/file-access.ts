@@ -4,6 +4,8 @@ import path from "path";
 import { getAgentDir, getConfigRoot, getSessionsDir } from "./omp/paths";
 import { isWindowsAbsolutePath } from "./paths";
 import { listAllSessions } from "./session-reader";
+import { loadProjectRegistry } from "./project-registry";
+import { readSessionHeader } from "./session-reader";
 
 export { isWindowsAbsolutePath } from "./paths";
 
@@ -91,6 +93,8 @@ const CONFIG_ROOT_DENIED_PREFIXES: readonly string[] = [
   "models.yml",
   "omp-web-settings.json",
   "notifications.db",
+  "app.db",
+  "projects.json",
   "web-auth-secret.json",
   "broker.token",
   "mcp.json",
@@ -156,12 +160,14 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();
   const cached = globalThis.__piAllowedRootsCache;
   if (cached && cached.expiresAt > now) return cached.roots;
-  const sessions = await listAllSessions();
+  const [sessions, registry] = await Promise.all([listAllSessions(), loadProjectRegistry()]);
   const roots = new Set<string>();
-  for (const s of sessions) {
-    if (s.cwd) roots.add(normalizeSlashes(s.cwd));
-    if (s.projectRoot) roots.add(normalizeSlashes(s.projectRoot));
+  // Display index rows locate files, but cannot grant access to an injected cwd.
+  for (const session of sessions) {
+    const header = readSessionHeader(session.path);
+    if (header?.id === session.id && header.cwd) roots.add(normalizeSlashes(header.cwd));
   }
+  for (const project of registry.projects) if (!project.hidden) roots.add(normalizeSlashes(project.path));
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
   // Config roots are appended LAST: a relative request must fan out over real
   // workspaces (session cwds, project roots, allowFileRoot() roots) before it

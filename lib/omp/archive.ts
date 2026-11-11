@@ -5,7 +5,8 @@ import path from "path";
 import type { Dirent } from "fs";
 import type { SessionHeader } from "../types";
 import { getArchivedSessionsDir, getSessionsDir } from "./paths";
-import { invalidateSessionFileListCache, loadSessionFile, type SessionStatus } from "./session-files";
+import { loadSessionFile, type SessionStatus } from "./session-files";
+import { invalidateSessionIndex } from "../session-index";
 
 export interface ArchivedSessionRecord {
   key: string;
@@ -189,7 +190,7 @@ export function restoreArchivedSession(key: string, sessionsRoot = getSessionsDi
     const loaded = loadSessionFile(destination);
     if (!loaded.header?.id) throw new Error("Archived session is invalid");
     unlinkSync(source);
-    invalidateSessionFileListCache();
+    invalidateSessionIndex();
     return loaded.header.id;
   } catch (error) {
     if (artifactsMoved) {

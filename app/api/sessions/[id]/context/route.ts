@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
-import { buildSessionContext, getSessionContextBoundary, getSessionContextForDisplay, getSessionHistoryPage, getSessionLoadError, readSessionHeader, SessionFileTooLargeError, SessionHistoryWorkerError } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { buildSessionContext, getSessionContextBoundary, getSessionContextForDisplay, getSessionHistoryPage, getSessionLoadError, readSessionHeader, resolveSessionCandidate, SessionFileTooLargeError, SessionHistoryWorkerError } from "@/lib/session-reader";
+import { apiErrorResponse } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
 
@@ -64,7 +64,8 @@ export async function GET(
   }
 
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const candidate = await resolveSessionCandidate(id);
+    const resolved = candidate ? { filePath: candidate } : { response: NextResponse.json({ error: "Session not found", code: "session_not_found" }, { status: 404 }) };
     if ("response" in resolved) {
       // OMP may not create the file until the first assistant message is
       // committed. A live wrapper can still recover that first partial reply,

@@ -4,8 +4,8 @@ import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { getSessionsDir, getSessionDirNameForCwd } from "@/lib/omp/paths";
-import { invalidateSessionListCache } from "@/lib/session-reader";
-import { invalidateSessionFileListCache } from "@/lib/omp/session-files";
+import { invalidateSessionEntriesCache } from "@/lib/session-reader";
+import { ensureSessionIndex } from "@/lib/session-index";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
@@ -91,10 +91,9 @@ export async function POST(req: Request) {
     const sessionFile = path.join(sessionDir, `${isoSessionTimestamp()}_${randomUUID()}.jsonl`);
     writeFileSync(sessionFile, rewritten.join("\n") + "\n", "utf8");
 
-    // New session must appear immediately: clear both the list cache and the
-    // mtime-keyed walk cache (the AGENTS.md-documented Windows/NTFS trap).
-    invalidateSessionListCache();
-    invalidateSessionFileListCache();
+    // The successful import response must include its session in the durable view.
+    invalidateSessionEntriesCache(sessionFile);
+    await ensureSessionIndex();
 
     return NextResponse.json({ success: true, sessionFile });
   } catch (error) {

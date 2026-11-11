@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { getFoxGoalSnapshot, controlFoxGoal } from "@/lib/fox-goal-service";
+import { controlFoxGoal } from "@/lib/fox-goal-service";
+import { getFoxGoalDisplay } from "@/lib/fox-display";
+import { apiErrorResponse } from "@/lib/api-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -7,9 +9,9 @@ export const dynamic = "force-dynamic";
 // every other agent API. This endpoint never accepts a grant or arbitrary RPC.
 export async function GET() {
   try {
-    return NextResponse.json(await getFoxGoalSnapshot(), { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(await getFoxGoalDisplay(), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not read FOX goal" }, { status: 503 });
+    return apiErrorResponse(error, 503);
   }
 }
 
@@ -32,6 +34,6 @@ export async function POST(request: Request) {
     }
     return NextResponse.json(await controlFoxGoal(body.action), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Native goal control failed" }, { status: error instanceof SyntaxError ? 400 : 409 });
+    return apiErrorResponse(error, error instanceof SyntaxError ? 400 : 409);
   } finally { reader?.releaseLock(); }
 }

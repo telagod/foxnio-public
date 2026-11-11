@@ -4,6 +4,12 @@ import test, { afterEach } from "node:test";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 import { createJiti } from "jiti";
 
+const streams = [];
+const originalWorker = globalThis.SharedWorker;
+globalThis.SharedWorker = class {
+  constructor() { this.port = { onmessage: null, start() {}, postMessage: (message) => { if (message.op === "open") streams.push({ channel: message.channel, deliver: (frame) => this.port.onmessage?.({ data: { id: message.id, type: "message", data: JSON.stringify(frame) } }) }); } }; }
+};
+test.after(() => { globalThis.SharedWorker = originalWorker; });
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const { useFoxGoal } = await jiti.import("./useFoxGoal.ts");
 const originalFetch = globalThis.fetch;
@@ -105,4 +111,18 @@ test("changing FOX conversation invalidates an older pending control without loc
   assert.equal(view.result.current.snapshot.goal.goal.id, "goal-new");
   await act(async () => { oldStop.resolve(response({ ...snapshot(), goal: null })); await stopping; });
   assert.equal(view.result.current.snapshot.goal.goal.id, "goal-new");
+});
+
+test("live-only running hints refresh goal state without requiring a database revision", async () => {
+  let current = { ...snapshot(), recovery: "waiting" };
+  globalThis.fetch = async (url) => {
+    assert.equal(url, "/api/fox/goal");
+    return response(current);
+  };
+  const view = renderHook(() => useFoxGoal());
+  await act(async () => {});
+  const running = streams.filter((stream) => stream.channel.kind === "running").at(-1);
+  current = { ...snapshot(), recovery: "running" };
+  await act(async () => { running.deliver({ type: "running", runningSessionIds: ["worker"] }); await new Promise((resolve) => setTimeout(resolve, 120)); });
+  assert.equal(view.result.current.snapshot.recovery, "running");
 });

@@ -27,7 +27,7 @@ function parseIdList(value: unknown): string[] | null {
 /** GET /api/session-ui -> { pinned: [{ id, at }] }, newest pin first. */
 export async function GET() {
   try {
-    return NextResponse.json(loadSessionUiState());
+    return NextResponse.json(await loadSessionUiState());
   } catch (error) {
     return apiErrorResponse(error);
   }
@@ -49,7 +49,7 @@ export async function PATCH(req: Request) {
   const unpin = parseIdList(body.unpin);
   if (!pin || !unpin) return invalid();
   try {
-    return NextResponse.json(updateSessionPins({ pin, unpin }));
+    return NextResponse.json(await updateSessionPins({ pin, unpin }));
   } catch (error) {
     return apiErrorResponse(error);
   }

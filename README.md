@@ -88,6 +88,40 @@ foxnio
 
 foxnio opens <http://127.0.0.1:30177> in your browser. `npx @telagod/foxnio@latest` runs it without installing.
 
+### Application data migration and recovery
+
+foxnio metadata now lives in `<PI_CODING_AGENT_DIR>/omp-web/app.db`
+(normally `~/.omp/agent/omp-web/app.db`). OMP sessions, credentials and operator
+settings remain in their native locations. Existing installations show
+`migration_required` until you stop **all** older desktop/server instances and run:
+
+```bash
+foxnio data status
+foxnio data migrate --offline
+foxnio data backup
+```
+
+`--offline` is your assertion that old writers have stopped, not automatic proof.
+Migration retains original files and imports metadata in one transaction; malformed
+required input aborts the whole import. Repair the reported source, then retry.
+Only corrupt derived observation accounting may be explicitly discarded with
+`foxnio data migrate --offline --discard-observation`; this resets seen/day limits.
+Retired push credentials are not copied into the new database.
+
+`foxnio data rebuild-index` rebuilds native display projections without deleting
+projects, pins, notification history or FOX metadata. It is not a repair for lost
+application data. Missing databases with prior receipts/backups fail closed with
+`restore_required`; never delete those guards to force an empty installation.
+
+For recovery, stop **all** server, desktop and data CLI processes. Preserve the
+damaged database, its `-wal`/`-shm` sidecars and receipts separately, then restore
+a consistent backup produced by `data backup` to `app.db` with owner-only access.
+Do not combine the restored file with old WAL/SHM sidecars or another installation's
+receipts. Restart processes after restoration so no connection retains the old
+file. Open tabs reconcile through a complete snapshot if revision history moved
+backwards. Historical migration-copy damage is reported as a warning; it does
+not make those copies authoritative over the committed database.
+
 ### Desktop app
 
 Every [release](https://github.com/telagod/foxnio-public/releases/latest) has installers for Windows (setup and portable `.exe`), macOS (DMG and ZIP, for Apple silicon and Intel) and Linux (AppImage and `.deb`). The app starts its own foxnio server on port 30177, or on the next free port when that one is taken. It does not include `omp`: install that separately.

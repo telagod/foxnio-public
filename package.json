@@ -1,6 +1,6 @@
 {
   "name": "@telagod/foxnio",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "foxnio: web UI for the oh-my-pi (omp) coding agent, a fork of ompweb focused on agent customization",
   "homepage": "https://github.com/telagod/foxnio-public#readme",
   "repository": {
@@ -50,7 +50,7 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30177",
     "start:lan": "node bin/omp-web.js --hostname 0.0.0.0 --no-open",
-    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs components/sidebar/*.test.mjs hooks/*.test.mjs bin/*.test.mjs desktop/*.test.mjs desktop/*.test.cjs",
+    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs lib/storage/*.test.mjs components/*.test.mjs components/ui/*.test.mjs components/sidebar/*.test.mjs hooks/*.test.mjs bin/*.test.mjs desktop/*.test.mjs desktop/*.test.cjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "tray:install": "node bin/omp-web-tray.js --install",

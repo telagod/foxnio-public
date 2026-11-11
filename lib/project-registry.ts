@@ -1,16 +1,16 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from "fs";
+import { realpathSync, statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { comparableProjectPath } from "./comparable-path";
-import { getAgentDir } from "./omp/paths";
+import { storageRequest } from "./storage/client";
+import type { StorageRequest } from "./storage/protocol";
+import { mergeCanonicalProjects } from "./project-presentation";
 import type { ManagedProject, ProjectLaunchConfig } from "./types";
 
 // ============================================================================
-// Project registry: which directories the user explicitly manages, and which
-// of them are hidden from the sidebar. Stored as ~/.omp/agent/projects.json
-// (the same agent dir as sessions), written atomically so a crash can never
-// leave a half-written registry. Hiding is reversible: the entry (and its
-// sessions) is restored by adding the directory again.
+// Project registry: installation-wide application metadata in the storage worker.
+// Field-level commands preserve unrelated edits from other requests/processes.
+// Hiding is reversible: the entry and its sessions are restored by adding it.
 //
 // Paths are stored in their canonical (worktree-resolved) projectRoot form so
 // worktrees always group under their main repository.
@@ -113,33 +113,19 @@ export function parseProjectRegistry(raw: string): ProjectRegistryFile {
   }
 }
 
-export function loadProjectRegistry(): ProjectRegistryFile {
-  const registryPath = resolve(getAgentDir(), "projects.json");
-  if (!existsSync(registryPath)) return EMPTY_REGISTRY;
-  try {
-    return parseProjectRegistry(readFileSync(registryPath, "utf8"));
-  } catch {
-    return EMPTY_REGISTRY;
-  }
+export function loadProjectRegistry(): Promise<ProjectRegistryFile> {
+  return storageRequest({ operation: "projects.get" });
 }
 
-/** Atomic persistence: write a temp file in the same directory, then rename
- *  over the registry. A crash mid-write leaves the previous registry intact. */
-export function saveProjectRegistry(registry: ProjectRegistryFile): void {
-  const registryPath = resolve(getAgentDir(), "projects.json");
-  mkdirSync(resolve(registryPath, ".."), { recursive: true });
-  const temp = `${registryPath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(temp, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
-    renameSync(temp, registryPath);
-  } finally {
-    // Best-effort cleanup if the rename never happened (e.g. EACCES).
-    try {
-      if (existsSync(temp)) rmSync(temp);
-    } catch {
-      // ignore cleanup failures
-    }
-  }
+export type ProjectRegistryUpdate = Extract<StorageRequest, { operation: "projects.patch" }>["updates"][number];
+
+/** Apply only supplied fields, atomically across all targets. */
+export function patchProjectRegistry(updates: readonly ProjectRegistryUpdate[], expectedRevision?: number): Promise<ProjectRegistryFile> {
+  return storageRequest({
+    operation: "projects.patch",
+    updates: updates.map((update) => ({ ...update, path: canonicalProjectPath(update.path) })),
+    ...(expectedRevision === undefined ? {} : { expectedRevision }),
+  });
 }
 
 /** Register a project (or restore a hidden one). Re-adding refreshes addedAt,
@@ -157,15 +143,12 @@ export function upsertProject(
   // An omitted launchConfig preserves the stored one: re-adding a workspace
   // (e.g. un-hiding) without config must not wipe it. Explicit clear goes
   // through PATCH with null.
-  projects.push({ path: canonical, addedAt: now, hidden: false, launchConfig: launchConfig ?? existing?.launchConfig });
+  projects.push({ ...existing, path: canonical, addedAt: now, hidden: false, launchConfig: launchConfig ?? existing?.launchConfig });
   return { version: 1, projects };
 }
 
-/** Apply display-only updates (alias, sortOrder, pinOrder) to any number of projects in
- *  ONE atomic operation — the caller persists the result once, so concurrent
- *  single-entry writes can never lose each other's changes. Paths that match
- *  no registry entry are ignored; callers wanting session-discovered projects
- *  managed must register them in the same cycle (see /api/projects PATCH). */
+/** Pure presentation transform for legacy parsing and non-persistent callers.
+ * Production mutations use patchProjectRegistry, never read-modify-write. */
 export function updateProjectsPresentation(
   registry: ProjectRegistryFile,
   updates: ReadonlyArray<{ path: string; alias?: string | null; sortOrder?: number | null; pinOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }>,
@@ -220,34 +203,7 @@ export function hideProject(registry: ProjectRegistryFile, path: string): Projec
  *  Registered projects come first in most-recently-added order; discovered
  *  projects follow sorted by path. */
 export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterable<string>): ManagedProject[] {
-  const hidden = new Set(
-    registry.projects.filter((p) => p.hidden).map((p) => comparableProjectPath(p.path)),
-  );
-  const registered: ManagedProject[] = [];
-  const registeredSeen = new Set<string>();
-  for (const p of registry.projects
-    .filter((entry) => !entry.hidden)
-    .sort((a, b) => {
-      const aOrder = a.sortOrder ?? Number.POSITIVE_INFINITY;
-      const bOrder = b.sortOrder ?? Number.POSITIVE_INFINITY;
-      if (aOrder !== bOrder) return aOrder - bOrder;
-      return b.addedAt.localeCompare(a.addedAt);
-    })) {
-    const key = comparableProjectPath(p.path);
-    if (registeredSeen.has(key)) continue; // tolerate hand-edited duplicates
-    registeredSeen.add(key);
-    registered.push({ path: p.path, addedAt: p.addedAt, alias: p.alias, sortOrder: p.sortOrder, pinOrder: p.pinOrder, launchConfig: p.launchConfig });
-  }
-  const extra: ManagedProject[] = [];
-  const extraSeen = new Set<string>();
-  for (const raw of new Set([...discovered].filter(Boolean).map(canonicalProjectPath))) {
-    const key = comparableProjectPath(raw);
-    if (hidden.has(key) || registeredSeen.has(key) || extraSeen.has(key)) continue;
-    extraSeen.add(key);
-    extra.push({ path: raw });
-  }
-  extra.sort((a, b) => a.path.localeCompare(b.path));
-  return [...registered, ...extra];
+  return mergeCanonicalProjects(registry, [...discovered].filter(Boolean).map(canonicalProjectPath));
 }
 
 /** Normalize a user-supplied path: ~ and ~/ expand to the home directory,

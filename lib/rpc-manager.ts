@@ -13,7 +13,6 @@ import {
   cacheSessionPath,
   invalidateSessionEntriesCache,
   invalidateSessionListCache,
-  invalidateSessionListMeta,
   listAllSessions,
   readSessionHeader,
   resolveSessionPath,
@@ -44,8 +43,7 @@ import { nativeSessionLineage, sameNativeConversation } from "./omp/session-line
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
-import { publishNotification } from "./notification-hub";
-import { markHistoryRead } from "./notification-store";
+import { publishNotification, settleNotificationInputs } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
@@ -433,7 +431,9 @@ export class AgentSessionWrapper {
   private handshaking = false;
   private readonly disconnectDestroyMs: number;
   private onDestroyCallback: (() => void) | null = null;
-  private onIdentityChangeCallback: ((oldId: string, newId: string, options?: IdentityChangeOptions) => void) | null = null;
+  private onIdentityChangeCallback: ((oldId: string, newId: string, options?: IdentityChangeOptions) => void | Promise<void>) | null = null;
+  private identityPersistence: Promise<void> = Promise.resolve();
+  private identityPersistenceError: Error | null = null;
   /** omp reported a `session-persistence` notice: its next identity change is
    * the same conversation moving to a sibling file, not a session switch. */
   private sessionMovePending = false;
@@ -748,7 +748,7 @@ export class AgentSessionWrapper {
         this.movedFromIds.push(oldId);
         // Keep the old id routable: other tabs still address it, and a fresh
         // `--resume` of the old file would fork again (its owner lives on).
-        this.onIdentityChangeCallback?.(oldId, this._sessionId, { keepOldId: true });
+        this.recordIdentityChange(oldId, this._sessionId, { keepOldId: true });
         this.invalidateSessionLists();
       }
     }
@@ -897,6 +897,7 @@ export class AgentSessionWrapper {
   }
 
   private publishNotifications(frame: Record<string, unknown>): void {
+    if (!this._sessionId) return;
     const session = {
       sessionId: this._sessionId,
       sessionName: this._sessionName || this.cwd.split(/[\\/]/).filter(Boolean).pop() || null,
@@ -1233,11 +1234,8 @@ export class AgentSessionWrapper {
     if (this.pendingUiRequests.size > 0) return;
     const ids = [this._sessionId, ...this.movedFromIds].filter(Boolean);
     if (ids.length === 0) return;
-    try {
-      markHistoryRead(ids.map((id) => `${id}:input`));
-    } catch {
-      // Notification bookkeeping must never break dialog lifecycle.
-    }
+    void settleNotificationInputs(ids.map((id) => `${id}:input`));
+    notifyRunningChange();
   }
 
   private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
@@ -1471,7 +1469,6 @@ export class AgentSessionWrapper {
    * still always refreshes. */
   private invalidateSessionLists(): void {
     if (this._sessionFile) {
-      invalidateSessionListMeta();
       invalidateSessionEntriesCache(this._sessionFile);
     } else {
       invalidateSessionListCache();
@@ -1746,6 +1743,7 @@ export class AgentSessionWrapper {
   }
 
   private async withFoxGoalEffect<T>(operation: () => Promise<T>): Promise<T> {
+    await this.waitIdentityPersistence();
     const result = this.foxGoalEffects.then(operation, operation);
     this.foxGoalEffects = result;
     return result;
@@ -2041,8 +2039,24 @@ export class AgentSessionWrapper {
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
-  onIdentityChange(cb: (oldId: string, newId: string, options?: IdentityChangeOptions) => void): void {
+  onIdentityChange(cb: (oldId: string, newId: string, options?: IdentityChangeOptions) => void | Promise<void>): void {
     this.onIdentityChangeCallback = cb;
+  }
+
+  private recordIdentityChange(oldId: string, newId: string, options?: IdentityChangeOptions): void {
+    const result = this.onIdentityChangeCallback?.(oldId, newId, options);
+    if (!result) return;
+    const persistence = Promise.resolve(result);
+    this.identityPersistence = Promise.all([this.identityPersistence, persistence]).then(() => {});
+    void this.identityPersistence.catch((error) => {
+      this.identityPersistenceError = error instanceof Error ? error : new Error(String(error));
+      this.closeFoxGoalAdmission();
+    });
+  }
+
+  async waitIdentityPersistence(): Promise<void> {
+    await this.identityPersistence;
+    if (this.identityPersistenceError) throw this.identityPersistenceError;
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -2317,8 +2331,9 @@ export class AgentSessionWrapper {
     const state = await this.getStateWithTimeout();
     this.applyIdentity(state);
     if (oldId && oldId !== this._sessionId) {
-      this.onIdentityChangeCallback?.(oldId, this._sessionId);
+      this.recordIdentityChange(oldId, this._sessionId);
     }
+    await this.waitIdentityPersistence();
     this.invalidateSessionLists();
     return this._sessionId;
   }
@@ -2452,7 +2467,7 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
-      const launchConfig = launchConfigForCwd(this.cwd);
+      const launchConfig = await launchConfigForCwd(this.cwd);
       const toolNames = this._toolNames ?? undefined;
       // A resumed session's preset is unknown (no --tools was passed at the
       // original resume); respawning with identical arguments keeps it unknown.
@@ -2551,6 +2566,7 @@ export class AgentSessionWrapper {
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
+    if (isFoxWorkspacePath(this.cwd)) await this.waitIdentityPersistence();
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
@@ -3164,6 +3180,13 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+/** Permission fence before awaiting the durable active-conversation pointer. */
+export function closeFoxGoalAdmissions(): void {
+  for (const wrapper of new Set(getRegistry().values())) {
+    if (isFoxWorkspacePath(wrapper.cwd)) wrapper.closeFoxGoalAdmission();
+  }
+}
+
 export function getRunningRpcSessions(): RunningRpcSession[] {
   const map = new Map<string, string>();
   for (const [sessionId, session] of getRegistry()) {
@@ -3263,7 +3286,7 @@ export function subscribeHostToolCalls(listener: (call: CrossSessionHostToolCall
 }
 
 // Starts at the empty state so an idle server never broadcasts "nothing changed".
-let lastRunningSnapshot = "[[],[]]";
+let lastRunningSnapshot = "[[],[],[]]";
 
 /**
  * Recompute the running-session-id set and, when it changes, broadcast it.
@@ -3275,7 +3298,7 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
   const exitedSessions = getExitedRpcSessions();
   const ids = runningSessions.map((s) => s.id);
   const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
-  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId)]);
+  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId), getLiveRpcSessionStates().sort(byId)]);
   if (snapshot === lastRunningSnapshot && !refreshSessionList) return;
   lastRunningSnapshot = snapshot;
   syncInterruptibleSessions();
@@ -3320,11 +3343,11 @@ export async function resumeInterruptedSessions(): Promise<void> {
 }
 
 /** Look up the workspace-registered launch config; unregistered projects attach none. */
-export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
+export async function launchConfigForCwd(cwd: string): Promise<ProjectLaunchConfig | undefined> {
   let canonical = cwd;
   try { canonical = realpathSync(cwd); } catch {}
   const key = comparableProjectPath(canonical);
-  return loadProjectRegistry().projects.find((project) => {
+  return (await loadProjectRegistry()).projects.find((project) => {
     if (project.hidden) return false;
     const projectKey = comparableProjectPath(project.path);
     return projectKey === key || key.startsWith(`${projectKey}-worktrees/`);
@@ -3552,7 +3575,7 @@ export async function startRpcSession(
   if (sessionFile && recordedCwd && !samePath(cwd, recordedCwd)) throw new WebRpcError("The session workspace changed; refusing to execute in another directory", "session_cwd_unavailable");
   const registry = getRegistry();
   const locks = getLocks();
-  launchConfig = launchConfig ?? launchConfigForCwd(cwd);
+  launchConfig = launchConfig ?? await launchConfigForCwd(cwd);
   const fox = isFoxWorkspacePath(cwd);
   if (fox) initializeFoxNativePolicy();
   const effectiveToolNames = effectiveToolNamesForCwd(cwd, toolNames);
@@ -3667,21 +3690,25 @@ export async function startRpcSession(
       // Drop every key (current id, original id, moved-from aliases).
       for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     });
+    let pointerUpdates: Promise<void> = Promise.resolve();
     created.onIdentityChange((oldId, newId, options) => {
       if (!options?.keepOldId) for (const [key, value] of registry) if (value === created) registry.delete(key);
       registry.set(newId, created);
       if (fox) {
-        try {
-          const record = readFoxSessionRecord();
-          if (record.sessionId === oldId) compareAndSetFoxSessionId(newId, record);
-        } catch {}
+        const update = pointerUpdates.then(async () => {
+          const record = await readFoxSessionRecord();
+          if (record.sessionId === oldId && !await compareAndSetFoxSessionId(newId, record)) {
+            throw new Error("FOX pointer changed during native identity persistence");
+          }
+        });
+        pointerUpdates = update;
+        return update;
       }
     });
     if (fox && sessionFile && sessionId !== realSessionId) {
-      try {
-        const record = readFoxSessionRecord();
-        if (record.sessionId === sessionId && sameNativeConversation(sessionFile, created.sessionFile)) compareAndSetFoxSessionId(realSessionId, record);
-      } catch {}
+      const record = await readFoxSessionRecord();
+      if (record.sessionId === sessionId && sameNativeConversation(sessionFile, created.sessionFile)
+        && !await compareAndSetFoxSessionId(realSessionId, record)) throw new Error("FOX pointer changed during native startup");
     }
     registry.set(realSessionId, created);
     // A resume that landed on a continuation copy (see initialize) still serves

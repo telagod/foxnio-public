@@ -1,7 +1,5 @@
-import { readFileSync } from "fs";
-import { join } from "path";
-import { foxWorkspaceDir } from "./fox-workspace";
-import { writeFileAtomic } from "./fs-atomic";
+import { storageRequest, storageRoots } from "./storage/client";
+import type { StorageRequest, VersionedObservation } from "./storage/protocol";
 import {
   emptyFoxServiceState,
   MAX_PENDING_EVENTS,
@@ -16,12 +14,8 @@ import {
  * store: it only remembers which attention events have already been surfaced,
  * and the daily message count. Pending retries live only inside the engine.
  */
-const FILE = "service-state.json";
 const KIND_BY_NAME: Record<FoxEventKind, true> = { error: true, input: true, blocked: true, "worker-update": true };
 
-export function foxServiceStatePath(home?: string): string {
-  return join(foxWorkspaceDir(home), FILE);
-}
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
@@ -78,19 +72,47 @@ export function normalizeFoxServiceState(value: unknown): FoxServiceState {
   };
 }
 
-export function readFoxServiceState(home?: string): FoxServiceState {
-  try {
-    return normalizeFoxServiceState(JSON.parse(readFileSync(foxServiceStatePath(home), "utf8")));
-  } catch {
-    return emptyFoxServiceState();
+/** Strict importer: corrupt budget/dedupe state must not create extra wakes. */
+export function parseFoxServiceState(value: unknown): FoxServiceState {
+  const invalid = () => { throw new Error("Invalid FOX observation state"); };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1) return invalid();
+  for (const field of ["seededAt", "lastTickAt", "lastWakeAt"]) {
+    const at = raw[field];
+    if (at !== null && (typeof at !== "string" || !Number.isFinite(Date.parse(at)))) return invalid();
   }
+  if (!raw.daily || typeof raw.daily !== "object" || Array.isArray(raw.daily)) return invalid();
+  const daily = raw.daily as Record<string, unknown>;
+  if (typeof daily.date !== "string" || daily.date !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(daily.date)
+    || typeof daily.count !== "number" || !Number.isSafeInteger(daily.count) || daily.count < 0) return invalid();
+  if (!raw.seen || typeof raw.seen !== "object" || Array.isArray(raw.seen)
+    || Object.entries(raw.seen).some(([key, at]) => !key || typeof at !== "string" || !Number.isFinite(Date.parse(at)))) return invalid();
+  if (raw.pending !== undefined && (!Array.isArray(raw.pending) || raw.pending.some((event) => !parsePending(event)))) return invalid();
+  return normalizeFoxServiceState(value);
 }
 
-export function writeFoxServiceState(state: FoxServiceState, home?: string): void {
-  const normalized = normalizeFoxServiceState(state);
-  const path = foxServiceStatePath(home);
-  const { pending, ...durable } = normalized;
-  const retryKeys = new Set(pending.map((event) => event.key));
-  durable.seen = Object.fromEntries(Object.entries(durable.seen).filter(([key]) => !retryKeys.has(key)));
-  writeFileAtomic(path, JSON.stringify(durable));
+function durableState(state: FoxServiceState): FoxServiceState {
+  const normalized = parseFoxServiceState(state);
+  const retryKeys = new Set(normalized.pending.map((event) => event.key));
+  return { ...normalized, pending: [], seen: Object.fromEntries(Object.entries(normalized.seen).filter(([key]) => !retryKeys.has(key))) };
+}
+
+export function readFoxServiceState(home?: string): Promise<VersionedObservation> {
+  return storageRequest({ operation: "foxObservation.get" }, storageRoots(home));
+}
+
+export async function writeFoxServiceState(state: FoxServiceState, expectedVersion: number, home?: string): Promise<VersionedObservation> {
+  return storageRequest({ operation: "foxObservation.save", state: durableState(state), expectedVersion }, storageRoots(home));
+}
+
+export type FoxObservationClaimRequest = Omit<Extract<StorageRequest, { operation: "observation.claim" }>, "operation">;
+export type FoxObservationSettleRequest = Omit<Extract<StorageRequest, { operation: "observation.settle" }>, "operation">;
+
+export function claimFoxObservation(request: FoxObservationClaimRequest, home?: string): Promise<{ claimed: boolean; version: number }> {
+  return storageRequest({ operation: "observation.claim", ...request }, storageRoots(home));
+}
+
+export async function settleFoxObservation(request: FoxObservationSettleRequest, home?: string): Promise<VersionedObservation> {
+  return storageRequest({ operation: "observation.settle", ...request, ...(request.state ? { state: durableState(request.state) } : {}) }, storageRoots(home));
 }

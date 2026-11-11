@@ -3,7 +3,7 @@ import { projectFoxGoal, nativeFoxGoalFromEntries, foxGoalTodo } from "./omp/fox
 import { readFoxGoalJournal } from "./fox-goal-journal";
 import { readFoxSessionRecord } from "./fox-session";
 import { isFoxWorkspacePath } from "./fox";
-import { getRpcSession, getLiveRpcSessionStates, isWebRpcError, startRpcSession, type AgentSessionWrapper } from "./rpc-manager";
+import { closeFoxGoalAdmissions, getRpcSession, getLiveRpcSessionStates, isWebRpcError, startRpcSession, type AgentSessionWrapper } from "./rpc-manager";
 import { readSessionHeader, resolveSessionPath, listAllSessions } from "./session-reader";
 import { sameNativeConversation, nativeSessionLineage } from "./omp/session-lineage";
 import { reconcileFoxReports, flushFoxReports, readFoxReportJournal } from "./fox-report-store";
@@ -89,8 +89,12 @@ function empty(reason?: string): FoxGoalSnapshot {
   return { ...projectFoxGoal([]), ...(reason ? { supported: false, reason } : {}) } as FoxGoalSnapshot;
 }
 
+function closeLiveFoxAdmissions(): void {
+  closeFoxGoalAdmissions();
+}
+
 async function currentWrapper(): Promise<AgentSessionWrapper | null> {
-  const pointer = readFoxSessionRecord();
+  const pointer = await readFoxSessionRecord();
   if (!pointer.sessionId) return null;
   let wrapper = getRpcSession(pointer.sessionId);
   if (!wrapper?.isAlive()) {
@@ -99,7 +103,7 @@ async function currentWrapper(): Promise<AgentSessionWrapper | null> {
     if (!file || !header || header.id !== pointer.sessionId || !isFoxWorkspacePath(header.cwd)) throw new Error("The current FOX native conversation is unavailable");
     wrapper = (await startRpcSession(header.id, file, header.cwd, undefined, undefined, header.cwd)).session;
   }
-  const after = readFoxSessionRecord();
+  const after = await readFoxSessionRecord();
   if (!isFoxWorkspacePath(wrapper.cwd) || after.resetAt !== pointer.resetAt || getRpcSession(after.sessionId ?? "") !== wrapper) throw new Error("FOX changed conversations during goal control");
   return wrapper;
 }
@@ -121,7 +125,7 @@ function currentBranch(entries: Record<string, unknown>[]): Record<string, unkno
 }
 
 export async function getFoxGoalSnapshot(): Promise<FoxGoalSnapshot> {
-  const pointer = readFoxSessionRecord();
+  const pointer = await readFoxSessionRecord();
   if (!pointer.sessionId) return empty();
   try {
     const live = getRpcSession(pointer.sessionId);
@@ -138,7 +142,8 @@ export async function getFoxGoalSnapshot(): Promise<FoxGoalSnapshot> {
     if (todo.planEntryId) snapshot.planEntryId = todo.planEntryId;
     snapshot.planReferences = todo.planReferences;
     snapshot.inheritedGoalIds = journal.inheritedGoalIds ?? [];
-    if (readFoxSessionRecord().sessionId !== pointer.sessionId || readFoxSessionRecord().resetAt !== pointer.resetAt) throw new Error("FOX changed conversations while reading its goal");
+    const after = await readFoxSessionRecord();
+    if (after.sessionId !== pointer.sessionId || after.resetAt !== pointer.resetAt) throw new Error("FOX changed conversations while reading its goal");
     return snapshot;
   } catch (error) {
     return empty(error instanceof Error ? error.message : String(error));
@@ -149,14 +154,14 @@ export async function getFoxGoalSnapshot(): Promise<FoxGoalSnapshot> {
  * damaged authority. Only a strict complete legacy journal permits fallback. */
 export async function foxGoalAllowsObservation(snapshot: FoxGoalSnapshot): Promise<boolean> {
   if (snapshot.supported) return !snapshot.grant || snapshot.grant.revoked || snapshot.goal?.goal.status === "complete";
-  const pointer = readFoxSessionRecord();
+  const pointer = await readFoxSessionRecord();
   if (!pointer.sessionId) return true;
   try {
     const live = getRpcSession(pointer.sessionId);
     const file = live?.sessionFile || await resolveSessionPath(pointer.sessionId);
     if (!file || live?.isAlive() && (!isFoxWorkspacePath(live.cwd) || live.sessionId !== pointer.sessionId)) return false;
     const legacy = await verifiedLegacyConversation(file, pointer.sessionId);
-    const after = readFoxSessionRecord();
+    const after = await readFoxSessionRecord();
     return legacy && after.sessionId === pointer.sessionId && after.resetAt === pointer.resetAt;
   } catch { return false; }
 }
@@ -180,15 +185,15 @@ export function shouldRecoverFoxGoal(snapshot: FoxGoalSnapshot): boolean {
 
 export async function controlFoxGoal(action: "pause" | "resume" | "stop" | "reset"): Promise<FoxGoalSnapshot> {
   if (!["pause", "resume", "stop", "reset"].includes(action)) throw new Error("Invalid FOX goal control");
-  const pointer = readFoxSessionRecord();
+  const controlVersion = ++state().controlVersion;
+  // Close local admission before awaiting durable pointer I/O. A cached
+  // pointer must never choose which conversation retains execution authority.
+  if (action !== "resume") closeLiveFoxAdmissions();
+  const pointer = await readFoxSessionRecord();
   if (!pointer.sessionId) return empty();
   const sessionId = pointer.sessionId;
-  const controlVersion = ++state().controlVersion;
-  // Synchronous linearization: receipts emitted before a Stop become unusable
-  // even when another async dispatch has not yet reached its side effect.
-  if (action !== "resume") getRpcSession(pointer.sessionId)?.closeFoxGoalAdmission();
   const run = async () => {
-    const beforePointer = readFoxSessionRecord();
+    const beforePointer = await readFoxSessionRecord();
     if (beforePointer.sessionId !== pointer.sessionId || beforePointer.resetAt !== pointer.resetAt) throw new Error("FOX changed conversations before goal control");
     if (action === "reset" && !getRpcSession(sessionId)?.isAlive()) {
       const file = await resolveSessionPath(sessionId);
@@ -256,12 +261,12 @@ export async function controlFoxGoal(action: "pause" | "resume" | "stop" | "rese
 export async function invalidateFoxGoalPolicy(changedProjectKeys: readonly string[]): Promise<FoxGoalSnapshot> {
   const changed = new Set(changedProjectKeys.map(foxDispatchProjectKey));
   if (!changed.size) return getFoxGoalSnapshot();
-  const pointer = readFoxSessionRecord();
-  if (!pointer.sessionId) return empty();
   ++state().controlVersion;
-  getRpcSession(pointer.sessionId)?.closeFoxGoalAdmission();
+  closeLiveFoxAdmissions();
+  const pointer = await readFoxSessionRecord();
+  if (!pointer.sessionId) return empty();
   const run = async () => {
-    const current = readFoxSessionRecord();
+    const current = await readFoxSessionRecord();
     if (current.sessionId !== pointer.sessionId || current.resetAt !== pointer.resetAt) throw new Error("FOX changed conversations before policy revocation");
     const wrapper = await currentWrapper();
     if (!wrapper) throw new Error("FOX conversation is unavailable for policy revocation");

@@ -1,142 +1,113 @@
 import { watch, type FSWatcher } from "fs";
-import { join } from "path";
-import {
-  getAgentDir,
-  invalidateSessionEntriesCache,
-  invalidateSessionListCache,
-  invalidateSessionListMeta,
-  listAllSessions,
-  resolveSessionIdByPath,
-} from "./session-reader";
-
-// omp owns the writes to a session's JSONL. ompweb streams RPC events only for
-// the sessions it spawned itself, so a session started outside the web UI — by
-// `omp` in a terminal, or by a harness that launches omp — never updated while
-// it was open: the file grew and nothing told the browser. This watches the
-// session tree and reports which session ids changed, which the running-events
-// stream forwards to the client.
+import { join, relative, sep } from "path";
+import { invalidateSessionHistory } from "./session-history-queue";
+import { ensureSessionIndex, invalidateSessionIndex, readSessionIndex } from "./session-index";
+import { sessionPathKey } from "./paths";
 
 type Listener = (sessionIds: string[]) => void;
-
+interface WatchState {
+  root: string;
+  watcher?: FSWatcher;
+  pendingPaths: Set<string>;
+  pendingUnknown: boolean;
+  flushTimer?: NodeJS.Timeout;
+  retryTimer?: NodeJS.Timeout;
+  closed: boolean;
+}
+declare global {
+  var __foxSessionFileWatch: WatchState | undefined;
+  var __foxSessionFileListeners: Set<Listener> | undefined;
+}
 const DEBOUNCE_MS = 250;
-
-const listeners = new Set<Listener>();
-let watcher: FSWatcher | null = null;
-let pendingPaths = new Set<string>();
-let pendingUnknown = false;
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let retryTimer: ReturnType<typeof setTimeout> | null = null;
 const RETRY_MS = 5000;
-
-function flush(): void {
-  flushTimer = null;
-  const paths = [...pendingPaths];
-  pendingPaths = new Set();
-  const hadUnknown = pendingUnknown;
-  pendingUnknown = false;
-  if (paths.length === 0 && !hadUnknown) return;
-
-  if (hadUnknown) {
-    // filename was null — fs.watch coalesced the event or overflowed. We
-    // don't know which file changed, so fall back to the full invalidation.
-    invalidateSessionListCache();
-    void rescanAndNotify();
-    return;
-  }
-
-  // Known paths: refresh the list metadata (a changed file means the cached
-  // list's mtimes and message counts are stale) and invalidate ONLY the
-  // changed sessions' parse caches, leaving unrelated sessions cached.
-  invalidateSessionListMeta();
-  for (const path of paths) invalidateSessionEntriesCache(path);
-
-  void Promise.all(paths.map((path) => resolveSessionIdByPath(path).catch(() => undefined)))
-    .then((ids) => {
-      const sessionIds = [...new Set(ids.filter((id): id is string => Boolean(id)))];
-      if (sessionIds.length === 0) return;
-      for (const listener of listeners) {
-        try {
-          listener(sessionIds);
-        } catch {
-          // a failing subscriber must not stop the others
-        }
-      }
-    })
-    .catch(() => {
-      // resolution failures are not worth tearing the watcher down for
-    });
+function listeners(): Set<Listener> {
+  return globalThis.__foxSessionFileListeners ??= new Set();
 }
-
-async function rescanAndNotify(): Promise<void> {
+function notify(ids: string[]): void {
+  if (!ids.length) return;
+  for (const listener of listeners()) {
+    try { listener(ids); } catch { /* A subscriber cannot stop ingestion. */ }
+  }
+}
+function flush(state: WatchState): void {
+  state.flushTimer = undefined;
+  if (state.closed) return;
+  const paths = [...state.pendingPaths];
+  const unknown = state.pendingUnknown;
+  state.pendingPaths.clear();
+  state.pendingUnknown = false;
+  if (!paths.length && !unknown) return;
+  if (unknown) {
+    invalidateSessionHistory();
+    invalidateSessionIndex();
+    void ensureSessionIndex().then(() => readSessionIndex()).then(result => notify(result.sessions.map(session => session.id))).catch(reportError);
+  } else {
+    const changed = new Set(paths.map(path => sessionPathKey(path)));
+    for (const path of paths) invalidateSessionHistory(path);
+    invalidateSessionIndex(paths);
+    void ensureSessionIndex().then(() => readSessionIndex()).then(result => {
+      notify(result.sessions.filter(session => changed.has(sessionPathKey(session.path))).map(session => session.id));
+    }).catch(reportError);
+  }
+}
+function reportError(error: unknown): void {
+  console.error("[session-watcher] Native session refresh failed:", error);
+}
+function scheduleRetry(state: WatchState): void {
+  if (state.closed || state.retryTimer) return;
+  state.retryTimer = setTimeout(() => { state.retryTimer = undefined; attach(state); }, RETRY_MS);
+  state.retryTimer.unref?.();
+}
+function queueFlush(state: WatchState): void {
+  if (!state.flushTimer) {
+    state.flushTimer = setTimeout(() => flush(state), DEBOUNCE_MS);
+    state.flushTimer.unref?.();
+  }
+}
+function attach(state: WatchState): void {
+  if (state.closed || state.watcher) return;
   try {
-    const sessions = await listAllSessions();
-    const sessionIds = sessions.map((s) => s.id);
-    if (sessionIds.length === 0) return;
-    for (const listener of listeners) {
-      try {
-        listener(sessionIds);
-      } catch {
-        // a failing subscriber must not stop the others
+    state.watcher = watch(state.root, { recursive: true, persistent: false }, (event, filename) => {
+      if (!filename) state.pendingUnknown = true;
+      else {
+        const path = join(state.root, filename.toString());
+        const parts = relative(state.root, path).split(sep);
+        if (parts.length === 2 && parts[1].endsWith(".jsonl")) state.pendingPaths.add(path);
+        else if (parts.length === 1 && event === "rename") state.pendingUnknown = true;
+        else return; // Native artifact transcripts are not session inventory.
+        if (event === "rename") state.pendingUnknown = true; // Only inventory can prove deletion.
       }
-    }
-  } catch {
-    // resolution failures are not worth tearing the watcher down for
-  }
-}
-
-function scheduleRetry(): void {
-  if (retryTimer || listeners.size === 0) return;
-  retryTimer = setTimeout(() => {
-    retryTimer = null;
-    ensureWatcher();
-  }, RETRY_MS);
-}
-
-function ensureWatcher(): void {
-  if (watcher || retryTimer) return;
-  const sessionsDir = join(getAgentDir(), "sessions");
-  try {
-    watcher = watch(sessionsDir, { recursive: true, persistent: false }, (_event, filename) => {
-      if (!filename) {
-        pendingUnknown = true;
-        if (!flushTimer) flushTimer = setTimeout(flush, DEBOUNCE_MS);
-        return;
-      }
-      const name = filename.toString();
-      if (!name.endsWith(".jsonl")) return;
-      pendingPaths.add(join(sessionsDir, name));
-      if (!flushTimer) flushTimer = setTimeout(flush, DEBOUNCE_MS);
+      queueFlush(state);
     });
-    watcher.on("error", () => {
-      watcher?.close();
-      watcher = null;
-      scheduleRetry();
+    state.watcher.on("error", () => {
+      state.watcher?.close();
+      state.watcher = undefined;
+      state.pendingUnknown = true;
+      queueFlush(state);
+      scheduleRetry(state);
     });
-  } catch {
-    // No sessions directory yet, or the platform refused a recursive watch.
-    // Schedule a retry while subscribers remain; otherwise degrade silently.
-    watcher = null;
-    scheduleRetry();
-  }
+  } catch { scheduleRetry(state); }
 }
 
+/** Owned by server startup, not by browser subscription reference counts. */
+export function startSessionFileWatcher(root: string): () => void {
+  const previous = globalThis.__foxSessionFileWatch;
+  if (previous && !previous.closed && previous.root === root) return () => stop(previous);
+  if (previous) stop(previous);
+  const state: WatchState = { root, pendingPaths: new Set(), pendingUnknown: false, closed: false };
+  globalThis.__foxSessionFileWatch = state;
+  attach(state);
+  return () => stop(state);
+}
+function stop(state: WatchState): void {
+  state.closed = true;
+  clearTimeout(state.flushTimer);
+  clearTimeout(state.retryTimer);
+  state.watcher?.close();
+  state.pendingPaths.clear();
+  if (globalThis.__foxSessionFileWatch === state) globalThis.__foxSessionFileWatch = undefined;
+}
 export function subscribeSessionFileChanges(listener: Listener): () => void {
-  listeners.add(listener);
-  ensureWatcher();
-  return () => {
-    listeners.delete(listener);
-    if (listeners.size > 0) return;
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
-    pendingPaths = new Set();
-    pendingUnknown = false;
-    watcher?.close();
-    watcher = null;
-  };
+  listeners().add(listener);
+  return () => { listeners().delete(listener); };
 }

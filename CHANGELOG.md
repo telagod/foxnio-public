@@ -4,16 +4,24 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ---
 
-## [Unreleased]
+## [0.7.0] - 2026-11-12
 
 ### Added
 
+> **Upgrade requires offline migration.** Stop all old foxnio instances, then run
+> `foxnio data migrate --offline` before starting this version. Original data is
+> retained; see README for backup and restore instructions.
+
+- **Unified application data and synchronization.** Project metadata, pins, notification history, FOX pointer and observation accounting now share a worker-owned SQLite database with transactional updates. One revisioned browser store replaces separate durable refresh loops; native OMP files and live execution remain authoritative. Existing installations require explicit offline migration; consistent backup and projection rebuild commands are available.
 - **FOX can deliver an authorized goal autonomously.** One native scope confirmation enables OMP goal-driven delegation, evidence review, bounded rework and next steps with no browser open. The activity view links the native goal, todo, exact workers and criterion evidence, with Pause/Resume/Stop and original-question navigation. Defaults are four workers, 64 automatic dispatches and three reworks per item; no Chief database or second agent runtime is added.
 - **Goal progress is separate from observation and notifications.** Quiet hours and observation limits do not stop authorized work. Dedicated in-app outcome/decision notices have their own daily limit while raw input/history signals remain intact. Existing global Agent tools disablement still blocks execution; old conversations receive no authority on upgrade.
 - **omp release tracking.** A daily workflow checks every new omp release against foxnio: it runs foxnio's native omp tests against the released binary and opens an issue (label `omp-update`) with the result and what changed since the verified version (`.github/omp-version.json`): RPC commands and frames, CLI flags, settings, session format, changed files per area and the changelog.
 
 ### Fixes & Improvements
 
+- **Storage recovery and lifecycle boundaries.** Initial databases are atomically published after commit, retained-copy damage is surfaced without blocking healthy data, and explicit cursor resets reconcile offline revision rollback. Resident startup retries after storage failures; shutdown drains durable notification writes before Next exits, with a bounded unsaved-data diagnostic.
+- **Storage regressions run in the default CI suite.** `npm test` includes `lib/storage/*.test.mjs`, covering migration, WAL history, crash recovery, worker behavior and native indexing alongside existing tests.
+- **Imported sessions appear before import success is returned.** The import endpoint waits for targeted native indexing instead of acknowledging only an asynchronous invalidation.
 - **Native goal recovery preserves authority boundaries.** Exact grant receipts, complete native-family replay, fork isolation, monotonic revocation, evidence-gated completion and uncertain-delivery handling prevent old permissions or ambiguous reports from becoming new work. Model catalogs are restored before native resume, and report receipt/state queries share a serialized metadata path without treating independent continuation as report-triggered execution.
 - **Session mutations honor native cross-process ownership.** Offline rename, delete and archive hold OMP's session lease inside an isolated maintenance process; older OMP versions without that capability fail closed. Failed live renames never fall back to direct writes. Parent sessions with children in other projects cannot be deleted or archived, preserving FOX worker lineage.
 - **A missing session workspace stops execution.** Automatic recovery and explicit commands no longer fall back to the server directory or home. History stays readable; restore the original directory or start a new conversation in the intended workspace.

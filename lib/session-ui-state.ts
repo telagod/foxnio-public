@@ -1,7 +1,4 @@
-import { readFileSync } from "fs";
-import { join } from "path";
-import { writeFileAtomic } from "./fs-atomic";
-import { getAgentDir } from "./omp/paths";
+import { storageRequest } from "./storage/client";
 import { isValidSessionId } from "./session-file-references-core";
 import { isRecord } from "./type-guards";
 
@@ -32,9 +29,6 @@ export interface PinChange {
   unpin?: readonly string[];
 }
 
-export function sessionUiStatePath(): string {
-  return join(getAgentDir(), "omp-web", "session-ui.json");
-}
 
 /** Anything that is not a well-formed state (bad ids, duplicates, junk) is dropped, never thrown. */
 export function parseSessionUiState(raw: unknown): SessionUiState {
@@ -52,39 +46,11 @@ export function parseSessionUiState(raw: unknown): SessionUiState {
   return { pinned: pinned.slice(0, MAX_PINNED_SESSIONS) };
 }
 
-/** A missing, unreadable or corrupt file is an empty state. */
-export function loadSessionUiState(): SessionUiState {
-  let text: string;
-  try {
-    text = readFileSync(sessionUiStatePath(), "utf8");
-  } catch {
-    return { pinned: [] };
-  }
-  try {
-    return parseSessionUiState(JSON.parse(text));
-  } catch {
-    return { pinned: [] };
-  }
+export function loadSessionUiState(): Promise<SessionUiState> {
+  return storageRequest({ operation: "pins.get" });
 }
 
-/**
- * Apply a pin/unpin change and persist it atomically. Synchronous from read to
- * write, so concurrent requests in this process cannot interleave. The file is
- * only rewritten when the pin list actually changes.
- */
-export function updateSessionPins(change: PinChange, now: number = Date.now()): SessionUiState {
-  const current = loadSessionUiState();
-  const removed = new Set(change.unpin ?? []);
-  const pinned = current.pinned.filter((entry) => !removed.has(entry.id));
-  const present = new Set(pinned.map((entry) => entry.id));
-  for (const id of change.pin ?? []) {
-    if (present.has(id)) continue;
-    present.add(id);
-    pinned.unshift({ id, at: now });
-  }
-  const next: SessionUiState = { pinned: pinned.slice(0, MAX_PINNED_SESSIONS) };
-  const unchanged = next.pinned.length === current.pinned.length
-    && next.pinned.every((entry, index) => entry.id === current.pinned[index].id && entry.at === current.pinned[index].at);
-  if (!unchanged) writeFileAtomic(sessionUiStatePath(), `${JSON.stringify(next, null, 2)}\n`);
-  return next;
+/** Transactional command: untouched pins and their timestamps remain intact. */
+export function updateSessionPins(change: PinChange, now: number = Date.now()): Promise<SessionUiState> {
+  return storageRequest({ operation: "pins.patch", pin: change.pin ? [...change.pin] : undefined, unpin: change.unpin ? [...change.unpin] : undefined, now });
 }

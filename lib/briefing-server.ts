@@ -2,17 +2,15 @@ import { buildBriefing, type Briefing, type LiveSessionState } from "./briefing"
 import { comparableProjectPath } from "./comparable-path";
 import { foxWorkspaceDir } from "./fox-workspace";
 import { nativeFoxWorkers } from "./fox-native-work";
-import { readFoxSessionId } from "./fox-session";
 import { foxDispatchProjectKey } from "./fox-service-config";
-import type { NotificationHistoryEntry } from "./notification-events";
-import { listHistory } from "./notification-store";
-import { loadProjectRegistry } from "./project-registry";
 import { getLiveRpcSessionStates } from "./rpc-manager";
-import { listAllSessions, resolveSessionPath } from "./session-reader";
+import { resolveSessionPath } from "./session-reader";
 import type { SessionInfo } from "./types";
-import { foxWorkerParent, foxWorkerReportView } from "./fox-report-store";
+import { foxWorkerParent } from "./fox-report-store";
 import { nativeSessionFamily, nativeSessionLineage } from "./omp/session-lineage";
 import type { FoxReportView } from "./fox-report-types";
+import { readDurableSnapshot } from "./session-index";
+import { getFoxReportDisplay } from "./fox-display";
 
 /**
  * Server-side read model used by both GET /api/briefing and the FOX service.
@@ -39,33 +37,18 @@ export interface BriefingSnapshotOptions {
 }
 
 export async function loadBriefingSnapshot(options: BriefingSnapshotOptions = {}): Promise<BriefingSnapshot> {
-  const warnings: string[] = [];
+  const snapshot = await readDurableSnapshot();
+  const warnings = [...snapshot.warnings, ...snapshot.staleSources.map((source) => `stale:${source}`)];
   const now = options.now ?? Date.now();
-
-  let sessions: SessionInfo[] = [];
-  let coordinatorIds = new Set<string>();
-  try {
-    sessions = await listAllSessions();
-    // FOX's own conversation is not a project; showing it would make the
-    // dashboard treat the resident chief as work to manage.
-    const foxCwd = comparableProjectPath(foxWorkspaceDir());
-    coordinatorIds = new Set(sessions.filter((session) => comparableProjectPath(session.cwd) === foxCwd).map((session) => session.id));
-    sessions = sessions.filter((session) => comparableProjectPath(session.cwd) !== foxCwd);
-  } catch {
-    warnings.push("sessions");
-  }
-
-  let notifications: NotificationHistoryEntry[] = [];
-  try {
-    notifications = listHistory();
-  } catch {
-    warnings.push("notifications");
-  }
+  const foxCwd = comparableProjectPath(foxWorkspaceDir());
+  const coordinatorIds = new Set(snapshot.data.sessions.filter((session) => comparableProjectPath(session.cwd) === foxCwd).map((session) => session.id));
+  const sessions = snapshot.data.sessions.filter((session) => comparableProjectPath(session.cwd) !== foxCwd);
+  const notifications = snapshot.data.notifications;
 
   const live = getLiveRpcSessionStates();
   const briefing = buildBriefing({
     sessions,
-    projects: loadProjectRegistry().projects,
+    projects: snapshot.data.projects,
     live,
     notifications,
     now,
@@ -78,7 +61,7 @@ export async function loadBriefingSnapshot(options: BriefingSnapshotOptions = {}
   // ledger. Live execution state is kept separate from task completion, which
   // belongs to OMP's own todo list and the conversation's evidence.
   try {
-    const current = readFoxSessionId();
+    const current = snapshot.data.foxPointer.sessionId;
     const reports = new Map<string, FoxReportView>();
     const groups = new Map<string, { session: SessionInfo; copies: SessionInfo[]; ids: Set<string> }>();
     for (const session of sessions) {
@@ -99,7 +82,7 @@ export async function loadBriefingSnapshot(options: BriefingSnapshotOptions = {}
     for (let index = 0; index < workers.length; index += 8) {
       await Promise.all(workers.slice(index, index + 8).map(async (worker) => {
         const group = groups.get(worker.id)!;
-        const views = await Promise.all(group.copies.map((copy) => foxWorkerReportView(copy.path)));
+        const views = await Promise.all(group.copies.map((copy) => getFoxReportDisplay(copy.path)));
         const view = views.reduce((latest, item) => !latest?.report || item.report && Date.parse(item.report.at) >= Date.parse(latest.report.at) ? item : latest, views[0]);
         reports.set(worker.id, { ...view, sourceSessionIds: [...group.ids] });
         const selected = nativeSessionLineage(worker.path)?.[0].header.id;

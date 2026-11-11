@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
 import { allowFileRoot } from "./file-access";
 import { execGit, type GitCommandMode } from "./git-command";
-import { normalizeForComparison, samePath, toNativePath } from "./paths";
+import { samePath, toNativePath } from "./paths";
 import { loadProjectRegistry } from "./project-registry";
+import { realPathOrSelf, resolveProjectWithRegistry, type ProjectInfo } from "./project-resolution";
+export type { ProjectInfo } from "./project-resolution";
 
 // ============================================================================
 // Project resolution: cwd → { projectRoot, branch }
@@ -14,17 +16,6 @@ import { loadProjectRegistry } from "./project-registry";
 // (hot-reload safe) with a short TTL; add/remove worktree invalidates eagerly.
 // ============================================================================
 
-export interface ProjectInfo {
-  projectRoot: string;
-  /** Current branch of the cwd, null for non-git dirs or detached HEAD */
-  branch: string | null;
-  /** True when cwd is a linked worktree (not the main checkout) */
-  isWorktree: boolean;
-  /** True when cwd is the top-level directory of a checkout (main or linked).
-   *  False for repo subdirectories and non-git dirs — the worktree switcher
-   *  is only meaningful at the top level. */
-  isTopLevel: boolean;
-}
 
 export interface WorktreeInfo {
   path: string;
@@ -38,15 +29,6 @@ declare global {
 
 const PROJECT_CACHE_TTL_MS = 60_000;
 
-function realPathOrSelf(filePath: string): string {
-  try {
-    // Use the OS-native resolver so Windows 8.3 aliases and filesystem casing
-    // canonicalize to the same identity Git reports.
-    return realpathSync.native(filePath);
-  } catch {
-    return filePath;
-  }
-}
 
 function getProjectCache(): Map<string, { info: ProjectInfo; expiresAt: number }> {
   if (!globalThis.__piProjectCache) globalThis.__piProjectCache = new Map();
@@ -106,107 +88,13 @@ export function repairWorktreeGitdirs(repoRoot: string): void {
   }
 }
 
-/**
- * When a worktree directory no longer exists or is no longer a valid git directory
- * (worktree removed, or leftover folders like .next/ remained on Windows),
- * resolve its sessions back under the main repo root instead of letting them dangle.
- */
-function inferRemovedWorktree(cwd: string): ProjectInfo | null {
-  // 1. Try `<repoRoot>-worktrees/<dir>`
-  const parent = dirname(cwd);
-  if (parent.endsWith("-worktrees")) {
-    const repoRoot = parent.slice(0, -"-worktrees".length);
-    if (repoRoot && existsSync(join(repoRoot, ".git"))) {
-      return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
-    }
-  }
-
-  // 2. Try registered projects from ~/.omp/agent/projects.json
-  try {
-    const registry = loadProjectRegistry();
-    const candidateNormalized = normalizeForComparison(cwd);
-    for (const project of registry.projects) {
-      const projRoot = project.path;
-      if (!existsSync(join(projRoot, ".git"))) continue;
-      if (candidateNormalized.startsWith(normalizeForComparison(`${projRoot}-worktrees`))) {
-        return { projectRoot: realPathOrSelf(projRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
-      }
-      const worktreesDir = join(projRoot, ".git", "worktrees");
-      if (existsSync(worktreesDir)) {
-        const entries = readdirSync(worktreesDir);
-        for (const entry of entries) {
-          const gitdirFile = join(worktreesDir, entry, "gitdir");
-          if (!existsSync(gitdirFile)) continue;
-          try {
-            const line = readFileSync(gitdirFile, "utf8").trim();
-            const wtDir = dirname(line);
-            if (samePath(wtDir, cwd) || samePath(line, cwd)) {
-              return { projectRoot: realPathOrSelf(projRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
-            }
-          } catch {
-            // Ignore file read error
-          }
-        }
-      }
-    }
-  } catch {
-    // Ignore registry lookup error
-  }
-
-  return null;
-}
 
 export async function resolveProject(cwd: string): Promise<ProjectInfo> {
   const cache = getProjectCache();
   const cached = cache.get(cwd);
   if (cached && cached.expiresAt > Date.now()) return cached.info;
-
-  let info: ProjectInfo;
-  try {
-    const hasGit = existsSync(join(cwd, ".git"));
-    if (!existsSync(cwd) || !hasGit) {
-      const inferred = inferRemovedWorktree(cwd);
-      if (inferred) {
-        cache.set(cwd, { info: inferred, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
-        return inferred;
-      }
-      if (!existsSync(cwd)) {
-        info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
-        cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
-        return info;
-      }
-    }
-    const out = await git(cwd, [
-      "rev-parse", "--path-format=absolute",
-      "--git-common-dir", "--git-dir", "--show-toplevel",
-      "--abbrev-ref", "HEAD",
-    ]);
-    const [commonDirRaw, gitDirRaw, toplevelRaw, ref] = out.split("\n").map((l) => l.trim());
-    const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map((p) => realPathOrSelf(toNativePath(p)));
-    // git prints resolved (symlink-free) paths; normalize cwd the same way
-    const realCwd = realPathOrSelf(cwd);
-    // For a linked worktree, --git-dir differs from --git-common-dir.
-    // Only collapse *worktree toplevels* into the main repo. A session whose
-    // cwd is a subdirectory of a repo keeps its own project identity —
-    // grouping subdirs under the repo root would change where new sessions
-    // are created for existing users.
-    const isTopLevel = samePath(toplevel, realCwd);
-    const isWorktreeTopLevel = !samePath(gitDir, commonDir) && isTopLevel;
-    const topLevelProjectRoot = isWorktreeTopLevel ? dirname(commonDir) : toplevel;
-    info = {
-      // realCwd is the symlink-free, on-disk-cased form git itself resolved;
-      // use it for the non-worktree root too so the project registry and the
-      // session-discovered roots produce identical strings (Windows casing).
-      projectRoot: isTopLevel ? realPathOrSelf(topLevelProjectRoot) : realPathOrSelf(cwd),
-      branch: ref && ref !== "HEAD" ? ref : null,
-      isWorktree: isWorktreeTopLevel,
-      isTopLevel,
-    };
-  } catch {
-    const inferred = inferRemovedWorktree(cwd);
-    info = inferred ?? { projectRoot: realPathOrSelf(cwd), branch: null, isWorktree: false, isTopLevel: false };
-  }
-
+  const registry = await loadProjectRegistry();
+  const info = await resolveProjectWithRegistry(cwd, registry.projects);
   cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
   return info;
 }

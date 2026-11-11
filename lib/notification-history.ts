@@ -1,128 +1,100 @@
 import { useSyncExternalStore } from "react";
-import type { NotificationEvent, NotificationHistoryEntry } from "./notification-events";
-import { isRecord } from "./type-guards";
+import { getDataStore, type DataStore } from "./data-store";
+import type { NotificationHistoryEntry } from "./notification-events";
+import type { DataSnapshot } from "./storage/protocol";
 
-/**
- * Browser mirror of server-side session signals used by navigation state.
- * Local changes apply immediately; failed writes, stream opens and visibility changes reload.
- */
-
-const HISTORY_URL = "/api/notifications/history";
-const LIMIT = 100;
-
-let entries: NotificationHistoryEntry[] = [];
-const listeners = new Set<() => void>();
-function set(next: NotificationHistoryEntry[]) {
-  entries = next;
-  for (const listener of listeners) listener();
+interface HistoryMutation {
+  apply(entries: NotificationHistoryEntry[]): NotificationHistoryEntry[];
+  committedAfter?: DataSnapshot | null;
+  awaitingRefresh?: boolean;
+}
+export interface NotificationHistory {
+  subscribe(listener: () => void): () => void;
+  get(): NotificationHistoryEntry[];
+  load(): Promise<void>;
+  markRead(id: string): void;
+  markAllRead(): void;
+  markSessionInputRead(sessionId: string): void;
+  remove(id: string): void;
+  clear(): void;
 }
 
-// A load's snapshot is stale if a local change or live signal arrived while it
-// was in flight, or a change request has not reached the server yet. Refetch
-// after pending writes settle so reconnect snapshots cannot undo newer state.
-let changes = 0;
-let requestsInFlight = 0;
-let loads = 0;
-let reloadWhenSettled = false;
-function change(next: NotificationHistoryEntry[]) {
-  changes++;
-  set(next);
-}
+/** History is durable. Only pending user commands are overlaid locally. */
+export function createNotificationHistory({ dataStore, fetch: request }: {
+  dataStore: DataStore;
+  fetch: (url: string, init?: RequestInit) => Promise<Response>;
+}): NotificationHistory {
+  let entries: NotificationHistoryEntry[] = [];
+  let base: NotificationHistoryEntry[] = [];
+  let unsubscribe: (() => void) | undefined;
+  let queue: Promise<void> = Promise.resolve();
+  const listeners = new Set<() => void>();
+  const pending = new Set<HistoryMutation>();
 
-const isEntry = (value: unknown): value is NotificationHistoryEntry =>
-  isRecord(value) && typeof value.id === "string" && isRecord(value.event) && typeof value.event.sessionId === "string" && typeof value.event.type === "string" && typeof value.at === "number" && typeof value.read === "boolean";
-
-function send(query: string, init: RequestInit) {
-  requestsInFlight++;
-  void fetch(`${HISTORY_URL}${query}`, init)
-    .then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    })
-    // The server's list is the truth; drop the local change rather than show a state it does not have.
-    .catch(() => { reloadWhenSettled = true; })
-    .finally(() => {
-      requestsInFlight--;
-      if (requestsInFlight > 0 || !reloadWhenSettled) return;
-      reloadWhenSettled = false;
-      void notificationHistory.load();
+  function reconcile(): void {
+    const snapshot = dataStore.getSnapshot().snapshot;
+    if (snapshot) base = snapshot.data.notifications;
+    for (const mutation of pending) {
+      if (!mutation.awaitingRefresh && "committedAfter" in mutation && snapshot && snapshot !== mutation.committedAfter) pending.delete(mutation);
+    }
+    let next = base;
+    for (const mutation of pending) next = mutation.apply(next);
+    if (entries === next || JSON.stringify(entries) === JSON.stringify(next)) return;
+    entries = next;
+    for (const listener of listeners) listener();
+  }
+  function send(query: string, init: RequestInit, apply: HistoryMutation["apply"]): void {
+    const mutation: HistoryMutation = { apply };
+    pending.add(mutation);
+    reconcile();
+    queue = queue.then(async () => {
+      try {
+        const response = await request(`/api/notifications/history${query}`, { ...init, signal: AbortSignal.timeout(15_000) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        mutation.committedAfter = dataStore.getSnapshot().snapshot;
+        mutation.awaitingRefresh = true;
+        await dataStore.refresh();
+        mutation.awaitingRefresh = false;
+        if (dataStore.getSnapshot().status === "ready") pending.delete(mutation);
+      } catch {
+        pending.delete(mutation);
+        reconcile();
+        await dataStore.refresh();
+      } finally { reconcile(); }
     });
+  }
+  function mark(ids: string[]): void {
+    send("", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) },
+      (list) => list.map((entry) => ids.includes(entry.id) && !entry.read ? { ...entry, read: true } : entry));
+  }
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      if (!unsubscribe) {
+        unsubscribe = dataStore.subscribe(reconcile);
+        dataStore.retain();
+        reconcile();
+      }
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && unsubscribe) { unsubscribe(); unsubscribe = undefined; dataStore.release(); }
+      };
+    },
+    get: () => entries,
+    async load() { await dataStore.refresh(); reconcile(); },
+    markRead(id) { if (entries.some((entry) => entry.id === id && !entry.read)) mark([id]); },
+    markAllRead() { const ids = entries.filter((entry) => !entry.read).map((entry) => entry.id); if (ids.length) mark(ids); },
+    // Reading a history marker never dismisses an actual pending RPC dialog.
+    markSessionInputRead(sessionId) { mark([`${sessionId}:input`]); },
+    remove(id) { send(`?id=${encodeURIComponent(id)}`, { method: "DELETE" }, (list) => list.filter((entry) => entry.id !== id)); },
+    clear() { const ids = new Set(entries.map((entry) => entry.id)); send("?all=1", { method: "DELETE" }, (list) => list.filter((entry) => !ids.has(entry.id))); },
+  };
 }
-
-const markRead = (ids: string[]) => send("", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
-
-export const notificationHistory = {
-  subscribe(listener: () => void) {
-    listeners.add(listener);
-    return () => { listeners.delete(listener); };
-  },
-  get: () => entries,
-  /** Replace the list with the server's; a failed request keeps the current one. */
-  async load() {
-    const load = ++loads;
-    const changesBefore = changes;
-    let body: unknown;
-    try {
-      const response = await fetch(HISTORY_URL);
-      if (!response.ok) return;
-      body = await response.json();
-    } catch {
-      return; // Offline: keep what is shown; the next load catches up.
-    }
-    if (load !== loads) return; // A newer load answers instead.
-    if (changes !== changesBefore || requestsInFlight > 0) {
-      if (requestsInFlight > 0) reloadWhenSettled = true;
-      else void notificationHistory.load();
-      return;
-    }
-    if (isRecord(body) && Array.isArray(body.entries)) set(body.entries.filter(isEntry));
-  },
-  /** A notification delivered to this tab, already recorded by the server. */
-  add(event: NotificationEvent) {
-    const id = `${event.sessionId}:${event.type}`;
-    const resolved = new Set([event.sessionId, ...(event.aliases ?? [])]);
-    const terminal = event.type === "completed" || event.type === "error";
-    const previous = entries.filter((entry) => entry.id !== id).map((entry) => terminal && entry.event.type === "input" && resolved.has(entry.event.sessionId) ? { ...entry, read: true } : entry);
-    change([{ id, event, at: Date.now(), read: false }, ...previous].slice(0, LIMIT));
-  },
-  markRead(id: string) {
-    if (!entries.some((entry) => entry.id === id && !entry.read)) return;
-    change(entries.map((entry) => (entry.id === id ? { ...entry, read: true } : entry)));
-    markRead([id]);
-  },
-  /** Marks the entries this tab shows; ones that reached the server since stay unread. */
-  markAllRead() {
-    const unread = entries.filter((entry) => !entry.read).map((entry) => entry.id);
-    if (unread.length === 0) return;
-    change(entries.map((entry) => (entry.read ? entry : { ...entry, read: true })));
-    markRead(unread);
-  },
-  /**
-   * Mark the session's "input" notification read: the user answered the dialog
-   * or is looking at the session, so it no longer waits on them. A stale entry
-   * would otherwise keep the sidebar on "waiting for input" forever.
-   */
-  markSessionInputRead(sessionId: string) {
-    const id = `${sessionId}:input`;
-    const next = entries.map((entry) => (entry.id === id && !entry.read ? { ...entry, read: true } : entry));
-    if (next.some((entry, index) => entry !== entries[index])) change(next);
-    markRead([id]);
-  },
-  remove(id: string) {
-    change(entries.filter((entry) => entry.id !== id));
-    send(`?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-  },
-  clear() {
-    change([]);
-    send("?all=1", { method: "DELETE" });
-  },
-};
-
+export const notificationHistory = createNotificationHistory({ dataStore: getDataStore(), fetch: (url, init) => fetch(url, init) });
 export function useNotificationHistory(): NotificationHistoryEntry[] {
   return useSyncExternalStore(notificationHistory.subscribe, notificationHistory.get, notificationHistory.get);
 }
-
-const unreadCount = () => entries.reduce((count, entry) => count + (entry.read ? 0 : 1), 0);
-/** Unread entry count. A primitive snapshot, so callers re-render only when the count changes. */
+const unreadCount = () => notificationHistory.get().reduce((count, entry) => count + (entry.read ? 0 : 1), 0);
 export function useUnreadNotificationCount(): number {
   return useSyncExternalStore(notificationHistory.subscribe, unreadCount, unreadCount);
 }

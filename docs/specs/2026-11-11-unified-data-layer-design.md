@@ -1,6 +1,6 @@
 # Unified foxnio data layer
 
-Status: selected architecture; detailed design awaiting approval. No implementation yet.
+Status: approved design; implemented in the isolated unified-data-layer worktree. Production migration remains an explicit operator action.
 
 ## 1. Goal and approach
 

@@ -7,14 +7,11 @@ import { comparableProjectPath } from "@/lib/comparable-path";
 import { allowFileRoot } from "@/lib/file-access";
 import { foxWorkspaceDir } from "@/lib/fox-workspace";
 import {
-  hideProject,
   isReservedLaunchArg,
   loadProjectRegistry,
   mergeProjects,
   ProjectPathError,
-  saveProjectRegistry,
-  upsertProject,
-  updateProjectsPresentation,
+  patchProjectRegistry,
   validateProjectPath,
 } from "@/lib/project-registry";
 import { listAllSessions } from "@/lib/session-reader";
@@ -49,7 +46,7 @@ function parseLaunchConfig(value: unknown): ProjectLaunchConfig | undefined {
 // sort with pins first — see lib/project-ordering.ts).
 export async function GET() {
   try {
-    const registry = loadProjectRegistry();
+    const registry = await loadProjectRegistry();
     const sessions = await listAllSessions();
     // FOX's cwd is a runtime home, not a user project. Excluding it here keeps
     // every client (sidebar, pickers, command palette) from discovering a
@@ -81,9 +78,7 @@ export async function POST(req: Request) {
     const normalized = validateProjectPath(cwd);
     const { projectRoot } = await resolveProject(normalized);
 
-    const registry = loadProjectRegistry();
-    const next = upsertProject(registry, projectRoot, new Date().toISOString(), launchConfig);
-    saveProjectRegistry(next);
+    const next = await patchProjectRegistry([{ path: projectRoot, register: true, hidden: false, addedAt: new Date().toISOString(), ...(launchConfig ? { launchConfig } : {}) }]);
     allowFileRoot(projectRoot);
 
     const entry = next.projects.find((p) => comparableProjectPath(p.path) === comparableProjectPath(projectRoot))!;
@@ -98,8 +93,7 @@ export async function POST(req: Request) {
 
 // PATCH /api/projects
 // Single shape: { cwd, alias?, sortOrder?, pinOrder? }   Batch shape: { updates: [{ cwd, alias?, sortOrder?, pinOrder? }, ...] }
-// Applied atomically in one registry load/save so a drag reorder (one request,
-// many entries) can never interleave with another writer and lose updates.
+// Applied as one worker transaction, never a whole-registry read/modify/write.
 // Renaming or ordering a project is an explicit act of managing it: paths that
 // were only session-discovered get registered and their root authorized in the
 // same cycle instead of silently no-oping.
@@ -114,7 +108,11 @@ export async function PATCH(req: Request) {
       pinOrder?: unknown;
       launchConfig?: unknown;
       updates?: unknown;
+      expectedRevision?: unknown;
     };
+    if (body.expectedRevision !== undefined && (typeof body.expectedRevision !== "number" || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0)) {
+      return NextResponse.json({ error: "Invalid expected revision", code: "invalid_revision" }, { status: 400 });
+    }
     const rawUpdates: unknown[] = Array.isArray(body.updates)
       ? body.updates
       : body.cwd !== undefined || body.alias !== undefined || body.sortOrder !== undefined || body.pinOrder !== undefined || body.launchConfig !== undefined
@@ -131,7 +129,7 @@ export async function PATCH(req: Request) {
     // deleted" (allow reorder/alias) from "session-discovered ghost" (must not
     // auto-register a deleted path). validateProjectPath is still required for
     // the latter.
-    const earlyRegistry = loadProjectRegistry();
+    const earlyRegistry = await loadProjectRegistry();
     const isAlreadyManaged = (cwd: string): string | null => {
       // Cheap check without stat: resolve ~ and relative, then compare.
       // Mirrors validateProjectPath's normalizeCwd + canonicalProjectPath fallback.
@@ -218,26 +216,17 @@ export async function PATCH(req: Request) {
       } : update);
     }
 
-    let registry = loadProjectRegistry();
-    const newRoots: string[] = [];
-    for (const update of merged.values()) {
-      const key = comparableProjectPath(update.path);
-      if (!registry.projects.some((p) => comparableProjectPath(p.path) === key)) {
-        registry = upsertProject(registry, update.path);
-        newRoots.push(update.path);
-      }
-    }
-    // Hidden entries are invisible management-wise: user actions target rows
-    // on screen, so their stored display data stays untouched.
+    // Registration only creates missing entries; omitted fields stay untouched
+    // even when another process modifies them between validation and COMMIT.
     const updates = [...merged.values()].filter((update) => {
-      const entry = registry.projects.find((p) => comparableProjectPath(p.path) === comparableProjectPath(update.path));
+      const entry = earlyRegistry.projects.find((project) => comparableProjectPath(project.path) === comparableProjectPath(update.path));
       return !entry?.hidden;
-    });
-    const next = updateProjectsPresentation(registry, updates);
-    saveProjectRegistry(next);
-    // Only after a successful save: a failed write must not leave an orphaned
-    // in-memory browse authorization behind.
-    for (const root of newRoots) allowFileRoot(root);
+    }).map((update) => ({ ...update, register: true }));
+    const next = await patchProjectRegistry(updates, body.expectedRevision as number | undefined);
+    for (const update of updates) {
+      const entry = next.projects.find((project) => comparableProjectPath(project.path) === comparableProjectPath(update.path));
+      if (entry && !entry.hidden) allowFileRoot(entry.path);
+    }
 
     const updatedKeys = new Set(updates.map((update) => comparableProjectPath(update.path)));
     const projects = next.projects
@@ -264,8 +253,7 @@ export async function DELETE(req: Request) {
     }
     // Canonicalize worktree paths so hiding a worktree hides its whole project.
     const { projectRoot } = await resolveProject(cwd);
-    const registry = loadProjectRegistry();
-    saveProjectRegistry(hideProject(registry, projectRoot));
+    await patchProjectRegistry([{ path: projectRoot, register: true, hidden: true }]);
     return NextResponse.json({ success: true });
   } catch (error) {
     return apiErrorResponse(error);

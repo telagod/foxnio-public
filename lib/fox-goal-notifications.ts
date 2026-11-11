@@ -54,7 +54,7 @@ export async function reconcileFoxGoalNotifications(
   persist: (record: { key: string; day: string; at: string }) => Promise<void>,
 ): Promise<void> {
   const notice = nextFoxGoalNotice(snapshot, readFoxServiceConfig());
-  const sessionId = readFoxSessionId();
+  const sessionId = await readFoxSessionId();
   if (!notice || !sessionId || pending.has(notice.key)) return;
   pending.add(notice.key);
   try {

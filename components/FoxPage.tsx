@@ -26,6 +26,7 @@ import { useFoxGoal } from "@/hooks/useFoxGoal";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { refreshBriefing } from "@/lib/briefing-events";
 import { comparableProjectPath } from "@/lib/comparable-path";
+import { getDataStore, subscribeDataTopics } from "@/lib/data-store";
 import { FOX_SESSION_STORAGE_KEY } from "@/lib/fox";
 import { FOX_ASK_EVENT, type FoxAskDetail } from "@/lib/fox-events";
 import { useI18n } from "@/lib/i18n";
@@ -54,6 +55,7 @@ async function rememberFoxSession(sessionId: string, record: FoxSessionPointer):
     body: JSON.stringify({ sessionId, resetAt: record.resetAt, expectedSessionId: record.sessionId }),
   });
   if (!response.ok) throw Object.assign(new Error("FOX registration failed"), { status: response.status });
+  await getDataStore().refresh();
   return { sessionId, resetAt: record.resetAt };
 }
 
@@ -185,9 +187,11 @@ export function FoxPage({
         return true;
       };
 
-      const record = await fetch("/api/fox/session", { headers: { accept: "application/json" }, cache: "no-store" })
-        .then((response) => response.ok ? response.json() : null)
-        .catch(() => null) as { sessionId?: unknown; resetAt?: unknown } | null;
+      const durable = getDataStore();
+      await durable.refresh();
+      const state = durable.getSnapshot();
+      if (state.status !== "ready" || !state.snapshot) throw new Error(state.error ?? "Could not read the active FOX conversation");
+      const record = state.snapshot.data.foxPointer;
       const serverId = typeof record?.sessionId === "string" ? record.sessionId : null;
       const resetAt = typeof record?.resetAt === "string" ? record.resetAt : null;
       if (!current()) return;
@@ -248,9 +252,9 @@ export function FoxPage({
     if (!cwd || registeringRef.current || resettingRef.current) return;
     const operation = operationRef.current;
     const sessionId = currentSessionIdRef.current;
-    const record = await fetch("/api/fox/session", { headers: { accept: "application/json" }, cache: "no-store" })
-      .then((response) => response.ok ? response.json() : null)
-      .catch(() => null) as FoxSessionPointer | null;
+    const durable = getDataStore().getSnapshot();
+    if (durable.status !== "ready") return;
+    const record = durable.snapshot?.data.foxPointer;
     if (!record || !aliveRef.current || operation !== operationRef.current || currentSessionIdRef.current !== sessionId || registeringRef.current || resettingRef.current) return;
     if (record.sessionId !== recordRef.current?.sessionId || record.resetAt !== recordRef.current?.resetAt) setSessionProblem("conflict");
     else if (sessionId && record.sessionId === sessionId) {
@@ -265,11 +269,9 @@ export function FoxPage({
   useEffect(() => {
     if (!booted || !cwd) return;
     void adoptServerSession();
-    const timer = window.setInterval(() => void adoptServerSession(), 10_000);
-    return () => window.clearInterval(timer);
+    return subscribeDataTopics(["fox-pointer"], () => { void adoptServerSession(); });
   }, [booted, cwd, adoptServerSession]);
 
-  useEffect(() => { void refreshGoal(); }, [briefingState.briefing?.generatedAt, refreshGoal]);
 
   const startNewConversation = useCallback(async () => {
     if (resettingRef.current) return;
@@ -286,6 +288,7 @@ export function FoxPage({
       const record = await response.json() as FoxSessionPointer;
       if (!aliveRef.current || operation !== operationRef.current) return;
       recordRef.current = record;
+      await getDataStore().refresh();
     } catch (error) {
       // Keep the current conversation when the server reset fails.
       if (!aliveRef.current || operation !== operationRef.current) return;

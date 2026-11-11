@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { listAllSessions, listSessionsByIds } from "@/lib/session-reader";
+import { ensureSessionIndex, readSessionIndex } from "@/lib/session-index";
+import { apiErrorResponse } from "@/lib/api-utils";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
 import { isValidSessionId } from "@/lib/session-file-references-core";
 
@@ -32,22 +33,24 @@ async function partialSessions(rawIds: string): Promise<NextResponse> {
       { status: 400, headers: { "Cache-Control": "no-store" } },
     );
   }
-  const { sessions, missing } = await listSessionsByIds(ids);
+  const { sessions, missing, cursor, complete, staleSources, warnings } = await readSessionIndex(ids);
   const runningSessions = getRunningRpcSessions();
   return NextResponse.json(
-    { sessions, missing, runningSessionIds: runningSessions.map((s) => s.id), runningSessions, partial: true },
+    { sessions, missing, cursor, complete, staleSources, warnings, runningSessionIds: runningSessions.map((s) => s.id), runningSessions, partial: true },
     { headers: SESSION_LIST_HEADERS },
   );
 }
 
 export async function GET(req: Request) {
   try {
-    const rawIds = new URL(req.url).searchParams.get("ids");
+    const query = new URL(req.url).searchParams;
+    if (query.get("refresh") === "1") await ensureSessionIndex({ force: true });
+    const rawIds = query.get("ids");
     if (rawIds !== null) return await partialSessions(rawIds);
-    const sessions = await listAllSessions();
+    const { sessions, cursor, complete, staleSources, warnings } = await readSessionIndex();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
-    const body = { sessions, runningSessionIds, runningSessions };
+    const body = { sessions, cursor, complete, staleSources, warnings, runningSessionIds, runningSessions };
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;
     if (req.headers.get("if-none-match") === etag) {
@@ -55,9 +58,6 @@ export async function GET(req: Request) {
     }
     return new NextResponse(bodyJson, { headers: { ETag: etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS } });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : String(error), code: "internal_error" },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
-    );
+    return apiErrorResponse(error);
   }
 }

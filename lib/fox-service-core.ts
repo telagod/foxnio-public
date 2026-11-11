@@ -50,7 +50,7 @@ export interface FoxTickInput {
   foxBusy: boolean;
 }
 
-export type FoxTickReason = "seeded" | "disabled" | "busy" | "quiet" | "cap" | "no-events" | "wake" | "wake-failed";
+export type FoxTickReason = "seeded" | "disabled" | "busy" | "quiet" | "cap" | "no-events" | "wake" | "wake-failed" | "wake-claimed" | "wake-uncertain";
 
 export interface FoxTickPlan {
   state: FoxServiceState;

@@ -84,6 +84,34 @@ v1-capable installations.
 - A live OMP process owns writes to its session file. foxnio routes supported
   live actions through RPC and never races a live file rewrite.
 
+### foxnio-owned metadata and read model
+
+`<getAgentDir()>/omp-web/app.db` owns project registration/presentation/launch
+configuration, pins, notification history/read state, the FOX conversation pointer
+and observation accounting. A bounded Node worker owns SQLite WAL connections
+and native session ingestion; the server thread never executes SQLite queries.
+Native JSONL, grants, goals, reports and execution permissions remain OMP-owned.
+Indexed rows locate candidates, never authorize execution or file access.
+
+Browsers share one durable snapshot store and follow `generation/revision` changes
+through the existing SSE transport. Snapshot pages stay on one read transaction;
+failed reads retain the last complete view. Explicit cursor rejection permits a
+full reset after pruning, rebuild or offline restore. Live RPC state uses its own
+sequence and is overlaid, not persisted in application snapshots.
+
+Existing installations require `foxnio data migrate --offline` after all old
+instances stop. Import is strict and transactional, retains original files, and
+publishes a fully committed staging database atomically. Receipt identity guards
+against silently recreating a lost database. Damaged historical migration copies
+produce health warnings without overriding a healthy committed database.
+`foxnio data backup` exports a consistent owner-only backup; generic file APIs
+deny the database, sidecars, staging files and backups. See README for recovery.
+
+Storage readiness gates resident ingestion, observation and server-owned
+`BRIEFING.md` updates. Failed startup retries without a browser. Shutdown stops
+producers and drains ordered notification writes before the server exits, with
+a bounded deadline and an explicit unsaved-data diagnostic on failure.
+
 ### Direct file access
 
 Session browsing is implemented in pure Node against OMP JSONL files. The

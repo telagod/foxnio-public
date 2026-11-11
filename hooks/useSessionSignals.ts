@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { openResilientEventStream } from "@/lib/event-stream";
-import type { NotificationEvent } from "@/lib/notification-events";
 import { notificationHistory } from "@/lib/notification-history";
 import { notificationClientId, OPEN_SESSION_EVENT } from "@/lib/notification-client";
 import { isRecord } from "@/lib/type-guards";
@@ -10,11 +9,7 @@ export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: str
   const openRef = useRef(onOpenSession);
   const seenGoalNotices = useRef(new Set<string>());
   useEffect(() => { openRef.current = onOpenSession; }, [onOpenSession]);
-  useEffect(() => {
-    const visible = () => { if (document.visibilityState === "visible") void notificationHistory.load(); };
-    document.addEventListener("visibilitychange", visible);
-    return () => document.removeEventListener("visibilitychange", visible);
-  }, []);
+  useEffect(() => notificationHistory.subscribe(() => {}), []);
   useEffect(() => { if (sessionId) notificationHistory.markSessionInputRead(sessionId); }, [sessionId]);
   useEffect(() => {
     const onOpen = (raw: Event) => {
@@ -41,14 +36,8 @@ export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: str
             id: notice.key,
             onClick: () => { openRef.current(ownerSessionId); },
           });
-        } else if (frame.kind === "signal" && isRecord(frame.event)) {
-          notificationHistory.add(frame.event as unknown as NotificationEvent);
         }
       } catch {}
-    }, {
-      // OPEN means the subscription is installed, including after reconnect.
-      // load() fences snapshots against signals arriving while it is in flight.
-      onOpen: () => { void notificationHistory.load(); },
     });
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);
     navigator.serviceWorker?.addEventListener("message", onWorkerMessage);

@@ -5,7 +5,8 @@ import { filePathApiSegments } from "./file-paths";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
 import { subscribeSessionFileChanges } from "./session-watcher";
-import { subscribeFoxReports } from "./fox-report-store";
+import { storageRequest, subscribeStorageChanges } from "./storage/client";
+import { StorageError, type DataCursor } from "./storage/protocol";
 import {
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
@@ -37,7 +38,7 @@ class Subscription {
   // other frame flushes this first so per-subscription order is preserved.
   pendingUpdate: unknown | null = null;
 
-  constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
+  constructor(readonly id: string, readonly coalescesMessageUpdates: boolean, readonly coalescesData: boolean) {}
 }
 
 /** What a channel opener may do with its subscription. */
@@ -122,7 +123,7 @@ export class EventStreamConnection {
   async subscribe(id: string, channel: EventStreamChannel): Promise<SubscribeResult> {
     if (this.closed) return { ok: false, status: 404, error: "Unknown event stream connection", code: UNKNOWN_CONNECTION_CODE };
     this.unsubscribe(id);
-    const subscription = new Subscription(id, channel.kind === "session");
+    const subscription = new Subscription(id, channel.kind === "session", channel.kind === "data");
     this.subscriptions.set(id, subscription);
     const handle: SubscriptionHandle = {
       get active() { return subscription.active; },
@@ -212,8 +213,8 @@ export class EventStreamConnection {
     if (!subscription.active || this.closed) return;
     const desiredSize = this.controller?.desiredSize ?? null;
     if (
-      subscription.coalescesMessageUpdates
-      && (data as { type?: unknown } | null)?.type === "message_update"
+      (subscription.coalescesData || (subscription.coalescesMessageUpdates
+      && (data as { type?: unknown } | null)?.type === "message_update"))
       && desiredSize !== null
       && desiredSize < 0
     ) {
@@ -229,6 +230,8 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
   switch (channel.kind) {
     case "running":
       return openRunningChannel(handle);
+    case "data":
+      return openDataChannel(handle);
     case "notifications":
       return openNotificationsChannel(channel.clientId, handle);
     case "session":
@@ -237,12 +240,43 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
       return openFileChannel(channel.path, channel.sessionId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
-    case "fox-reports":
-      handle.open();
-      handle.setDetach(subscribeFoxReports(() => handle.send({ type: "changed" })));
-      handle.send({ type: "connected" });
-      return SUBSCRIBED;
   }
+}
+
+/** Storage failure is channel data, never an HTTP refusal that drops the worker subscription. */
+function openDataChannel(handle: SubscriptionHandle): SubscribeResult {
+  handle.open();
+  let retry: NodeJS.Timeout | undefined;
+  let failures = 0;
+  let observed = 0;
+  let last: DataCursor | undefined;
+  const publish = (cursor: DataCursor) => {
+    if (!handle.active) return;
+    if (last?.generation === cursor.generation && last.revision > cursor.revision) return;
+    observed++;
+    last = cursor;
+    failures = 0;
+    clearTimeout(retry);
+    retry = undefined;
+    handle.send({ type: "data-head", cursor });
+  };
+  const check = async () => {
+    retry = undefined;
+    const before = observed;
+    try {
+      const cursor = await storageRequest({ operation: "head" });
+      if (before === observed) publish(cursor);
+    } catch (error) {
+      if (!handle.active || before !== observed) return;
+      handle.send({ type: "data-unavailable", code: error instanceof StorageError ? error.code : "storage_unavailable", message: error instanceof Error ? error.message : "Durable storage unavailable" });
+      retry = setTimeout(() => { void check(); }, Math.min(1_000 * 2 ** failures++, 30_000));
+      retry.unref?.();
+    }
+  };
+  const unsubscribe = subscribeStorageChanges(publish);
+  handle.setDetach(() => { unsubscribe(); clearTimeout(retry); });
+  void check();
+  return SUBSCRIBED;
 }
 
 // Running-session ids plus session-list refresh hints for the sidebar.

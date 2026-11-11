@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FoxGoalSnapshot } from "@/lib/fox-goal-types";
 import { REFRESH_BRIEFING_EVENT } from "@/lib/briefing-events";
 import { useI18n } from "@/lib/i18n";
+import { subscribeDataTopics } from "@/lib/data-store";
+import { openResilientEventStream } from "@/lib/event-stream";
 
 type GoalAction = "pause" | "resume" | "stop";
 
@@ -42,6 +44,7 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
   const revision = useRef(0);
   const reading = useRef<Promise<void> | null>(null);
   const controlling = useRef<number | null>(null);
+  const queuedHint = useRef(false);
 
   const refresh = useCallback((): Promise<void> => {
     if (controlling.current !== null) return Promise.resolve();
@@ -50,7 +53,7 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
     setRefreshing(true);
     const request = Promise.resolve().then(async () => {
       try {
-        const response = await fetch("/api/fox/goal", { cache: "no-store", headers: { accept: "application/json" } });
+        const response = await fetch("/api/fox/goal", { cache: "no-store", headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const next: unknown = await response.json();
         if (!isSnapshot(next)) throw new Error("Invalid FOX goal snapshot");
@@ -60,6 +63,10 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
       } finally {
         if (reading.current === request) reading.current = null;
         if (alive.current && current === revision.current) { setLoading(false); setRefreshing(false); }
+        if (alive.current && current === revision.current && queuedHint.current) {
+          queuedHint.current = false;
+          void refresh();
+        }
       }
     });
     reading.current = request;
@@ -92,6 +99,7 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
       if (controlling.current === current) controlling.current = null;
       if (alive.current && current === revision.current) {
         setPending(null);
+        if (queuedHint.current) { queuedHint.current = false; void refresh(); }
         // A failed Stop can still have revoked admission. Re-read, never undo it locally.
         if (!ok) void refresh();
       }
@@ -104,6 +112,7 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
     revision.current += 1;
     reading.current = null;
     controlling.current = null;
+    queuedHint.current = false;
     setPending(null);
     setSnapshot(null);
     setError(null);
@@ -114,9 +123,14 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
     const onVisible = () => { if (document.visibilityState === "visible") void refresh(); };
     const onRefresh = () => {
       if (wake) return;
-      wake = window.setTimeout(() => { wake = undefined; void refresh(); }, 100);
+      wake = window.setTimeout(() => {
+        wake = undefined;
+        if (reading.current || controlling.current !== null) queuedHint.current = true;
+        else void refresh();
+      }, 100);
     };
-    const timer = window.setInterval(onVisible, 15_000);
+    const durable = subscribeDataTopics(["sessions", "fox-pointer", "fox-observation", "fox-display", "operator-settings"], onRefresh);
+    const live = openResilientEventStream({ kind: "running" }, onRefresh, { onOpen: onRefresh });
     window.addEventListener(REFRESH_BRIEFING_EVENT, onRefresh);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -124,7 +138,9 @@ export function useFoxGoal(conversationId: string | null = null): FoxGoalState {
       revision.current += 1;
       reading.current = null;
       clearTimeout(wake);
-      window.clearInterval(timer);
+      durable();
+      live();
+      queuedHint.current = false;
       window.removeEventListener(REFRESH_BRIEFING_EVENT, onRefresh);
       document.removeEventListener("visibilitychange", onVisible);
     };

@@ -7,6 +7,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { createSessionStore } = await jiti.import("@/lib/session-store.ts");
+const { createDataStore } = await jiti.import("@/lib/data-store.ts");
 const { Sidebar } = await jiti.import("./Sidebar.tsx");
 
 // ---------------------------------------------------------------------------
@@ -30,7 +31,13 @@ const info = (id, overrides = {}) => ({
 });
 
 function createServer({ sessions, projects = [{ path: APP }], worktrees = { error: "Not a git repository" } }) {
-  const state = { sessions: [...sessions], projects: [...projects], pinned: [], calls: [], worktrees };
+  const state = {
+    sessions: [...sessions],
+    projects: projects.map((project) => ({ addedAt: "2026-01-01T00:00:00.000Z", hidden: false, ...project })),
+    pinned: [], calls: [], worktrees, revision: 1, changes: [],
+  };
+  const cursor = () => ({ generation: "sidebar-fixture", revision: state.revision });
+  const changed = (topic, keys) => state.changes.push({ revision: ++state.revision, topic, keys });
   const find = (method, path) => state.calls.filter((call) => call.method === method && call.path === path);
   const json = (body, status = 200) => Response.json(body, { status });
 
@@ -43,21 +50,30 @@ function createServer({ sessions, projects = [{ path: APP }], worktrees = { erro
     await Promise.resolve();
 
     const sessionRoute = /^\/api\/sessions\/([^/]+)(\/archive)?$/.exec(path);
-    if (method === "GET" && path === "/api/sessions") {
-      const ids = query.ids?.split(",");
-      const sessions = ids ? state.sessions.filter((entry) => ids.includes(entry.id)) : state.sessions;
-      const missing = ids ? ids.filter((id) => !sessions.some((entry) => entry.id === id)) : undefined;
-      return json({ sessions, missing, runningSessionIds: [], runningSessions: [], partial: Boolean(ids) });
+    if (path === "/api/data/snapshot") {
+      if (method === "DELETE") return json({ ok: true });
+      if (method === "GET") return json({
+        token: `reader-${state.revision}`, next: false, cursor: cursor(), complete: true, staleSources: [], warnings: [],
+        data: {
+          sessions: state.sessions, projects: state.projects, pins: state.pinned.map((id) => ({ id, at: 1 })),
+          notifications: [], foxWorkspace: "/w/fox", foxPointer: { sessionId: null, resetAt: null },
+          foxObservation: { version: 1, seeded: false, seen: {}, daily: {} },
+        },
+      });
+    }
+    if (method === "GET" && path === "/api/data/changes") {
+      const before = JSON.parse(query.cursor);
+      const through = query.through ? JSON.parse(query.through) : cursor();
+      if (before.generation !== through.generation || before.revision > through.revision) return json({ code: "reset_required" }, 409);
+      return json({ cursor: through, through, changes: state.changes.filter((change) => change.revision > before.revision && change.revision <= through.revision), hasMore: false });
     }
     if (method === "GET" && path === "/api/sessions/search") return new Response('{"scores":{}}\n', { headers: { "Content-Type": "application/x-ndjson" } });
-    if (method === "GET" && path === "/api/projects") return json({ projects: state.projects });
-    if (method === "GET" && path === "/api/session-ui") return json({ pinned: state.pinned.map((id) => ({ id, at: 1 })) });
     if (method === "PATCH" && path === "/api/session-ui") {
       state.pinned = state.pinned.filter((id) => !(body.unpin ?? []).includes(id));
       for (const id of body.pin ?? []) state.pinned.unshift(id);
+      changed("pins", [...(body.pin ?? []), ...(body.unpin ?? [])]);
       return json({ pinned: state.pinned.map((id) => ({ id, at: 1 })) });
     }
-    if (method === "GET" && path === "/api/notifications/history") return json({ entries: [] });
     if (method === "GET" && path === "/api/worktrees") return json(state.worktrees);
     if (method === "POST" && path === "/api/worktrees") {
       const created = `${body.cwd}-${body.branch}`;
@@ -69,23 +85,31 @@ function createServer({ sessions, projects = [{ path: APP }], worktrees = { erro
       state.worktrees.worktrees = state.worktrees.worktrees.filter((entry) => entry.path !== body.path);
       return json({});
     }
-    if (method === "POST" && path === "/api/projects") return json({ project: { path: body.cwd } });
+    if (method === "POST" && path === "/api/projects") {
+      const project = { path: body.cwd, addedAt: "2026-01-02T00:00:00.000Z", hidden: false };
+      state.projects = [project, ...state.projects.filter((entry) => entry.path !== body.cwd)];
+      changed("projects", [body.cwd]);
+      return json({ project });
+    }
     if (method === "DELETE" && path === "/api/projects") {
-      state.projects = state.projects.filter((project) => project.path !== body.cwd);
+      state.projects = state.projects.map((project) => project.path === body.cwd ? { ...project, hidden: true } : project);
+      changed("projects", [body.cwd]);
       return json({ success: true });
     }
     if (sessionRoute && method === "PATCH") {
       const target = state.sessions.find((entry) => entry.id === decodeURIComponent(sessionRoute[1]));
       if (target) target.name = body.name;
+      changed("sessions", [decodeURIComponent(sessionRoute[1])]);
       return json({ success: true });
     }
     if (sessionRoute && (method === "DELETE" || method === "POST")) {
       state.sessions = state.sessions.filter((entry) => entry.id !== decodeURIComponent(sessionRoute[1]));
+      changed("sessions", [decodeURIComponent(sessionRoute[1])]);
       return json({ success: true });
     }
     return json({ error: "not found" }, 404);
   }
-  return { state, fetchFn, find };
+  return { state, fetchFn, find, changed };
 }
 
 const noEnvironment = {
@@ -94,7 +118,11 @@ const noEnvironment = {
   onPageHide: () => () => {},
 };
 
-const fakeStream = (channel) => ({ channel, readyState: 1, onopen: null, onmessage: null, onerror: null, close() {} });
+const fakeStream = (channel) => {
+  const stream = { channel, readyState: 1, onopen: null, onmessage: null, onerror: null, close() { this.readyState = 2; } };
+  queueMicrotask(() => { if (stream.readyState === 1) stream.onopen?.(); });
+  return stream;
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -132,7 +160,8 @@ function mount({ sessions = [info("A"), info("B", { name: "Session B" })], serve
   const server = createServer({ sessions, ...serverInit });
   const previousFetch = globalThis.fetch;
   globalThis.fetch = server.fetchFn;
-  const store = createSessionStore({ fetch: server.fetchFn, openStream: fakeStream, storage: null, env: noEnvironment });
+  const dataStore = createDataStore({ fetch: server.fetchFn, openStream: fakeStream });
+  const store = createSessionStore({ dataStore, fetch: server.fetchFn, openStream: fakeStream, storage: null, env: noEnvironment });
   globalThis.__ompSessionStore = store;
   store.retain();
   cleanups.push(() => {
@@ -322,6 +351,7 @@ test("a session whose file appears a moment later is restored by the retry", asy
   await settle();
   assert.deepEqual(events.selected, []);
   server.state.sessions.push(info("NEW", { name: "Fresh" }));
+  server.changed("sessions", ["NEW"]);
   await until(() => events.selected.length === 1, "found on the 1 s retry", 4000);
   assert.deepEqual(events.selected[0], ["NEW", true]);
 });

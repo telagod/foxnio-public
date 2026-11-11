@@ -1,6 +1,9 @@
 import { comparableProjectPath } from "./comparable-path";
 import { EVENT_STREAM_CLOSED, openEventStream, reconnectDelayMs } from "./event-stream";
 import type { EventStream, EventStreamChannel } from "./event-stream";
+import { getDataStore, type DataStore } from "./data-store";
+import { mergeCanonicalProjects } from "./project-presentation";
+import type { DataSnapshot } from "./storage/protocol";
 import {
   loadRecentRuns,
   MAX_RECENT_COMPLETED_RUNS,
@@ -11,26 +14,13 @@ import {
 } from "./recent-runs";
 import type { RecentRunEntry } from "./recent-runs";
 import { publishSessionsChanged } from "./session-change-bus";
-import { isValidSessionId } from "./session-file-references-core";
 import { isRecord } from "./type-guards";
 import type { ExitedRpcSession, ManagedProject, SessionInfo } from "./types";
 
-/**
- * The single source of session and project data for the app: one fetcher for
- * /api/sessions (ETag, timeout, coalescing), one for /api/projects, one
- * subscription to the shared `running` event channel, and the state derived
- * from them (unread, recently completed, pins). Framework-free; React binds to
- * it through hooks/useSessionStore.ts.
- */
+/** Durable inventory comes from data-store; runtime/navigation state stays local. */
 
 /** A wedged-but-listening server accepts the connection and never answers; without a deadline the list would spin forever. */
 export const REQUEST_TIMEOUT_MS = 15_000;
-/** Automatic full reloads (structural hints, reconnects, coming back) run at most this often: one at once, one trailing. */
-export const FULL_REFRESH_MIN_INTERVAL_MS = 5_000;
-/** Delta requests for changed sessions start at most this often: one at once, then one trailing with the ids unioned. */
-export const DELTA_MIN_INTERVAL_MS = 1_500;
-/** The server answers at most this many ids per request; more changed sessions than this is a full reload. */
-export const MAX_DELTA_IDS = 100;
 export const PERSIST_DEBOUNCE_MS = 250;
 export const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
 
@@ -64,13 +54,10 @@ export interface SessionStoreSnapshot {
 }
 
 export interface RefreshOptions {
-  /** Bypass the ETag so the server always answers with a body. */
+  /** Request current durable data, including all related domains atomically. */
   force?: boolean;
-  /** Reload the session list (default true). */
   sessions?: boolean;
-  /** Reload the project list (default false: the server re-lists on every call). */
   projects?: boolean;
-  /** Reload the pinned sessions (default false; they are loaded on start and on focus). */
   pins?: boolean;
 }
 
@@ -117,6 +104,7 @@ export interface SessionStoreEnvironment {
 }
 
 export interface SessionStoreDeps {
+  dataStore: DataStore;
   fetch: FetchLike;
   openStream: (channel: EventStreamChannel) => EventStream;
   /** null disables persistence; omitted uses window.localStorage. */
@@ -272,89 +260,6 @@ export function computeRecentlyCompleted(
   return new Set(top.map(([id]) => id));
 }
 
-/**
- * The list with `changed` sessions replaced (or inserted when new) and
- * `removedIds` dropped. The server lists newest first by modification time,
- * so a changed session goes before the first session that is not newer;
- * every other session keeps its object and its place.
- */
-export function mergeSessionDelta(
-  list: readonly SessionInfo[],
-  changed: readonly SessionInfo[],
-  removedIds: ReadonlySet<string>,
-): SessionInfo[] {
-  const replaced = new Set(changed.map((session) => session.id));
-  const merged = list.filter((session) => !removedIds.has(session.id) && !replaced.has(session.id));
-  const stamp = (session: SessionInfo): number => modifiedMs(session) ?? 0;
-  for (const session of [...changed].sort((a, b) => stamp(b) - stamp(a))) {
-    const at = stamp(session);
-    let low = 0;
-    let high = merged.length;
-    while (low < high) {
-      const mid = (low + high) >> 1;
-      if (stamp(merged[mid]) > at) low = mid + 1;
-      else high = mid;
-    }
-    merged.splice(low, 0, session);
-  }
-  return merged;
-}
-
-interface Coalesced {
-  (force: boolean): Promise<void>;
-  isBusy(): boolean;
-  /** Drops the queued follow-up (resolving its waiters) so nothing starts after a stop. */
-  cancelQueued(): void;
-}
-
-/**
- * One run at a time. A call while a run is in flight does not start another;
- * it schedules exactly one follow-up (however many calls arrive) and returns
- * its promise, so the caller sees data newer than the call. `run` must not
- * reject. `onIdle` runs when a run ends and no follow-up is waiting.
- */
-function createCoalescer(run: (force: boolean) => Promise<void>, onIdle?: () => void): Coalesced {
-  let busy = false;
-  let queued: { promise: Promise<void>; resolve: () => void; force: boolean } | null = null;
-
-  const launch = async (force: boolean): Promise<void> => {
-    busy = true;
-    try {
-      await run(force);
-    } finally {
-      busy = false;
-      const next = queued;
-      queued = null;
-      if (next) void launch(next.force).then(next.resolve);
-      else onIdle?.();
-    }
-  };
-
-  const coalesced = ((force: boolean) => {
-    if (!busy) return launch(force);
-    if (!queued) {
-      let resolve!: () => void;
-      const promise = new Promise<void>((done) => { resolve = done; });
-      queued = { promise, resolve, force: false };
-    }
-    queued.force ||= force;
-    return queued.promise;
-  }) as Coalesced;
-  coalesced.isBusy = () => busy;
-  coalesced.cancelQueued = () => {
-    queued?.resolve();
-    queued = null;
-  };
-  return coalesced;
-}
-
-function errorDetail(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isAbortError(error: unknown): boolean {
-  return (error as { name?: unknown } | null)?.name === "AbortError";
-}
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -460,6 +365,7 @@ const SERVER_SNAPSHOT: SessionStoreSnapshot = Object.freeze({
 
 export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): SessionStore {
   const deps: Omit<SessionStoreDeps, "storage"> = {
+    dataStore: overrides.dataStore ?? getDataStore(),
     fetch: overrides.fetch ?? ((input, init) => globalThis.fetch(input, init)),
     openStream: overrides.openStream ?? openEventStream,
     timers: overrides.timers ?? {
@@ -489,16 +395,12 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
   };
   let snapshot: SessionStoreSnapshot = SERVER_SNAPSHOT;
   const listeners = new Set<() => void>();
+  let appliedData: DataSnapshot["data"] | undefined;
+  let appliedPins: DataSnapshot["data"] | undefined;
 
-  // Data sources.
-  let etag: string | null = null;
-  /** Once a `running` frame arrived the stream owns the running state; fetched snapshots only seed it. */
-  let authoritative = false;
   let frameCwds: ReadonlyMap<string, string> = NO_CWDS;
   /** Last known cwd per live session: a placeholder row needs it before the file exists. */
   const knownCwds = new Map<string, string>();
-  const probedRoots = new Set<string>();
-  let rootsBaselined = false;
 
   // Tracking.
   let viewedSessionId: string | null = null;
@@ -521,21 +423,10 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
 
   // Lifecycle.
   let retainCount = 0;
-  let epoch = 0;
-  const controllers = new Set<AbortController>();
   const removers: Array<() => void> = [];
   let stream: EventStream | null = null;
   let streamFailures = 0;
-  let streamResync = false;
   let reconnectTimer: unknown;
-  let fullTimer: unknown;
-  let lastFullStart = Number.NEGATIVE_INFINITY;
-  /** Set by the first successful full load; deltas only make sense on top of one. */
-  let everLoaded = false;
-  const pendingDeltaIds = new Set<string>();
-  let deltaInFlight = false;
-  let deltaTimer: unknown;
-  let lastDeltaStart = Number.NEGATIVE_INFINITY;
 
   // ---- publishing ----------------------------------------------------------
 
@@ -626,180 +517,38 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
 
   // ---- requests ------------------------------------------------------------
 
-  /** Run one request under the deadline. Cancelable ones are aborted when the store stops. */
-  async function request<T>(cancelable: boolean, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  /** Commands retain their deadline even when their originating view unmounts. */
+  async function request<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
-    if (cancelable) controllers.add(controller);
     const timeout = timers.setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), REQUEST_TIMEOUT_MS);
     try {
       return await run(controller.signal);
     } finally {
       timers.clearTimeout(timeout);
-      controllers.delete(controller);
     }
   }
 
-  /**
-   * Automatic full reloads: immediately when none ran in the last
-   * FULL_REFRESH_MIN_INTERVAL_MS, otherwise one trailing run when that interval
-   * is over. Explicit `refresh()` calls bypass this.
-   */
-  function requestFull(): void {
-    if (fullTimer !== undefined) return;
-    const wait = lastFullStart + FULL_REFRESH_MIN_INTERVAL_MS - deps.now();
-    if (wait <= 0) {
-      void fetchSessions(false);
-      return;
-    }
-    fullTimer = timers.setTimeout(() => {
-      fullTimer = undefined;
-      void fetchSessions(false);
-    }, wait);
-  }
-
-  const fetchSessions = createCoalescer(async (force) => {
-    // This run answers the reloads and deltas asked for so far.
-    if (fullTimer !== undefined) {
-      timers.clearTimeout(fullTimer);
-      fullTimer = undefined;
-    }
-    pendingDeltaIds.clear();
-    lastFullStart = deps.now();
-    const startedIn = epoch;
-    try {
-      const outcome = await request(true, async (signal) => {
-        const headers: Record<string, string> = {};
-        if (etag && !force) headers["If-None-Match"] = etag;
-        const res = await deps.fetch("/api/sessions", { headers, signal });
-        if (res.status === 304) return { notModified: true as const };
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const nextEtag = res.headers.get("ETag");
-        const data: unknown = await res.json();
-        if (!isRecord(data) || !Array.isArray(data.sessions)) throw new Error("Invalid session list response");
-        return { notModified: false as const, etag: nextEtag, data };
-      });
-      if (epoch !== startedIn) return;
-      if (!outcome.notModified) {
-        etag = outcome.etag;
-        const { data } = outcome;
-        const sessions = (data.sessions as unknown[]).filter((item): item is SessionInfo => isRecord(item) && typeof item.id === "string");
-        const runningSessions = parseCwdList(data.runningSessions);
-        rememberCwds(runningSessions);
-        applySessions(sessions);
-        // The fetched running set only seeds the state until the stream takes over.
-        if (!authoritative) applyRunning({ ids: stringList(data.runningSessionIds), cwds: runningSessions });
-      }
-      s.sessionsStatus = "ready";
-      s.sessionsError = null;
-      everLoaded = true;
-    } catch (error) {
-      if (epoch !== startedIn || isAbortError(error)) return;
-      s.sessionsStatus = "error";
-      s.sessionsError = errorDetail(error);
-    }
-    emit();
-    probeUnknownRoots();
-  }, () => pumpDelta());
-
-  /**
-   * Sessions the event stream reported as changed. They are fetched alone
-   * (`/api/sessions?ids=`), never as a whole list, so a session that is
-   * written to many times a second costs a few small requests, not megabytes.
-   * Anything a delta cannot express is a full reload.
-   */
-  function queueDelta(ids: readonly string[]): void {
-    if (ids.length === 0) return;
-    if (!everLoaded || !ids.every((id) => isValidSessionId(id))) {
-      requestFull();
-      return;
-    }
-    for (const id of ids) pendingDeltaIds.add(id);
-    if (pendingDeltaIds.size > MAX_DELTA_IDS) {
-      pendingDeltaIds.clear();
-      requestFull();
-      return;
-    }
-    pumpDelta();
-  }
-
-  /** Start the next delta request when allowed: none in flight, no full reload running, DELTA_MIN_INTERVAL_MS since the last start. */
-  function pumpDelta(): void {
-    if (pendingDeltaIds.size === 0 || deltaInFlight || deltaTimer !== undefined || fetchSessions.isBusy()) return;
-    const wait = lastDeltaStart + DELTA_MIN_INTERVAL_MS - deps.now();
-    if (wait > 0) {
-      deltaTimer = timers.setTimeout(() => {
-        deltaTimer = undefined;
-        pumpDelta();
-      }, wait);
-      return;
-    }
-    void runDelta();
-  }
-
-  async function runDelta(): Promise<void> {
-    const requested = [...pendingDeltaIds];
-    pendingDeltaIds.clear();
-    lastDeltaStart = deps.now();
-    deltaInFlight = true;
-    const startedIn = epoch;
-    try {
-      const data = await request(true, async (signal) => {
-        const res = await deps.fetch(`/api/sessions?ids=${requested.join(",")}`, { signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body: unknown = await res.json();
-        if (!isRecord(body) || !Array.isArray(body.sessions)) throw new Error("Invalid session delta response");
-        return body;
-      });
-      if (epoch === startedIn) applyDelta(requested, data);
-    } catch (error) {
-      // The held list may now be stale for these ids; a full reload also reports a failing server.
-      if (epoch === startedIn && !isAbortError(error)) requestFull();
-    } finally {
-      deltaInFlight = false;
-      pumpDelta();
-    }
-  }
-
-  const fetchProjects = createCoalescer(async () => {
-    const startedIn = epoch;
-    try {
-      const projects = await request(true, async (signal) => {
-        const res = await deps.fetch("/api/projects", { signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data: unknown = await res.json();
-        const list = isRecord(data) && Array.isArray(data.projects) ? data.projects : [];
-        return list.filter((item): item is ManagedProject => isRecord(item) && typeof item.path === "string");
-      });
-      if (epoch !== startedIn) return;
+  function applyDurable(): void {
+    const durable = deps.dataStore.getSnapshot();
+    const data = durable.snapshot?.data;
+    if (data && data !== appliedData) {
+      appliedData = data;
+      applySessions(data.sessions);
+      const foxRoot = comparableProjectPath(data.foxWorkspace);
+      const projects = mergeCanonicalProjects({ version: 1, projects: data.projects }, data.sessions.map((session) => session.projectRoot ?? session.cwd))
+        .filter((project) => comparableProjectPath(project.path) !== foxRoot);
       s.projects = mergeList(s.projects, projects, new Map(s.projects.map((project) => [project.path, project])), (project) => project.path);
-      s.projectsStatus = "ready";
-      s.projectsError = null;
-    } catch (error) {
-      if (epoch !== startedIn || isAbortError(error)) return;
-      s.projectsStatus = "error";
-      s.projectsError = errorDetail(error);
     }
+    if (data && data !== appliedPins && pendingPinOps === 0) {
+      appliedPins = data;
+      setPinned(data.pins.map((pin) => pin.id));
+    }
+    s.sessionsStatus = durable.status;
+    s.sessionsError = durable.error;
+    s.projectsStatus = durable.status;
+    s.projectsError = durable.error;
     emit();
-    probeUnknownRoots();
-  });
-
-  const fetchPins = createCoalescer(async () => {
-    const startedIn = epoch;
-    const mutationsAtStart = pinMutations;
-    try {
-      const ids = await request(true, async (signal) => {
-        const res = await deps.fetch("/api/session-ui", { signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return parsePinnedIds(await res.json());
-      });
-      // A local pin/unpin made meanwhile is newer than this answer.
-      if (epoch !== startedIn || pendingPinOps > 0 || pinMutations !== mutationsAtStart) return;
-      setPinned(ids);
-      emit();
-    } catch {
-      // Pins are best effort; the previous list stays.
-    }
-  });
+  }
 
   // ---- data ----------------------------------------------------------------
 
@@ -834,41 +583,6 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     pruneKnownCwds();
   }
 
-  function isKnownRoot(root: string): boolean {
-    return probedRoots.has(root) || s.projects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(root));
-  }
-
-  /**
-   * Merge a by-id answer into the list. A full reload follows when the change
-   * is more than replacing entries: a new session in a workspace the store has
-   * not seen (its siblings and grouping are unknown), or a removed session
-   * that other sessions list as their parent (the server re-links those).
-   */
-  function applyDelta(requested: readonly string[], data: Record<string, unknown>): void {
-    const asked = new Set(requested);
-    const fetched = (data.sessions as unknown[]).filter((item): item is SessionInfo => isRecord(item) && typeof item.id === "string" && asked.has(item.id));
-    const index = sessionIndex(s.sessions);
-    const changed: SessionInfo[] = [];
-    let needsFull = false;
-    for (const session of fetched) {
-      const old = index.get(session.id);
-      if (old && jsonEqual(old, session)) continue;
-      changed.push(session);
-      if (!old && !isKnownRoot(session.projectRoot ?? session.cwd)) needsFull = true;
-    }
-    const removed = new Set(stringList(data.missing).filter((id) => asked.has(id) && index.has(id)));
-    if (removed.size > 0 && s.sessions.some((session) => session.parentSessionId !== undefined && removed.has(session.parentSessionId))) needsFull = true;
-    if (changed.length > 0 || removed.size > 0) {
-      s.sessions = mergeSessionDelta(s.sessions, changed, removed);
-      onSessionsChanged();
-    }
-    const runningSessions = parseCwdList(data.runningSessions);
-    rememberCwds(runningSessions);
-    if (!authoritative) applyRunning({ ids: stringList(data.runningSessionIds), cwds: runningSessions });
-    emit();
-    probeUnknownRoots();
-    if (needsFull) requestFull();
-  }
 
   /** Persisted recents are re-seeded from disk when a session was active after the newest recorded run. */
   function reseedRecentRuns(): void {
@@ -883,24 +597,6 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     if (recentRuns.length === 0 || newestOnDisk > newestRecorded) setRecentRuns(seedRecentRuns([...s.sessions], recentLimit));
   }
 
-  /** A session in a directory the project list does not know yet (started elsewhere) needs the server to re-list projects. */
-  function probeUnknownRoots(): void {
-    if (s.projectsStatus !== "ready" || s.sessionsStatus !== "ready") return;
-    const known = new Set(s.projects.map((project) => comparableProjectPath(project.path)));
-    let unknown = false;
-    for (const session of s.sessions) {
-      const root = session.projectRoot ?? session.cwd;
-      if (!root || probedRoots.has(root)) continue;
-      probedRoots.add(root);
-      if (!known.has(comparableProjectPath(root))) unknown = true;
-    }
-    // Hidden projects have sessions but are not listed: the roots present at the first look are the baseline.
-    if (!rootsBaselined) {
-      rootsBaselined = true;
-      return;
-    }
-    if (unknown) void fetchProjects(false);
-  }
 
   interface RunningUpdate {
     ids: readonly string[];
@@ -952,16 +648,6 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     return [...completed, ...started];
   }
 
-  /**
-   * What each frame costs:
-   * - `sessions-changed` (a session file changed on disk; the ids say which): a delta for those ids.
-   * - `running` with `refreshSessionList`: a full reload. rpc-manager sets the flag for events that are
-   *   not appends to a known file: a run starting (a new session file may appear), a title change, a
-   *   session moving to a new file, a history edit. Plain file appends never carry it.
-   * - `running` whose set changed: a delta for the sessions that started or finished (their rows change;
-   *   a session whose file is not on disk yet is reported by the file watcher when it lands).
-   * While the first list is still loading, none of this is needed: that request includes it.
-   */
   function handleFrame(raw: string): void {
     let data: unknown;
     try {
@@ -970,22 +656,13 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
       return;
     }
     if (!isRecord(data)) return;
-    const listPending = s.sessionsStatus === "loading";
     if (data.type === "running") {
-      authoritative = true;
       const cwds = parseCwdList(data.runningSessions);
       rememberCwds(cwds);
-      const transitioned = applyRunning({ ids: stringList(data.runningSessionIds), cwds, exited: parseExitedList(data.exitedSessions) });
+      applyRunning({ ids: stringList(data.runningSessionIds), cwds, exited: parseExitedList(data.exitedSessions) });
       emit();
-      if (listPending) return;
-      if (data.refreshSessionList === true) requestFull();
-      else queueDelta(transitioned);
     } else if (data.type === "sessions-changed") {
       const ids = stringList(data.sessionIds);
-      if (data.refreshSessionList === true && !listPending) {
-        if (ids.length > 0) queueDelta(ids);
-        else requestFull();
-      }
       publishSessionsChanged(ids);
     }
   }
@@ -997,7 +674,7 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
   }
 
   function sendPin(body: { pin: string[] } | { unpin: string[] }): Promise<string[]> {
-    const task = pinQueue.then(() => request(false, async (signal) => {
+    const task = pinQueue.then(() => request(async (signal) => {
       const res = await deps.fetch("/api/session-ui", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1026,9 +703,11 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
         pendingPinOps -= 1;
         if (pinOpSeq.get(id) === seq) pinOpSeq.delete(id);
         if (pendingPinOps === 0) {
+          appliedPins = deps.dataStore.getSnapshot().snapshot?.data;
           setPinned(serverIds);
           emit();
         }
+        if (pendingPinOps === 0) void deps.dataStore.refresh();
         return true;
       },
       () => {
@@ -1042,6 +721,7 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
           setPinned(current);
           emit();
         }
+        if (pendingPinOps === 0) void deps.dataStore.refresh();
         return false;
       },
     );
@@ -1049,15 +729,6 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
 
   // ---- lifecycle -----------------------------------------------------------
 
-  /**
-   * Hand the running state back to fetched snapshots (stream error or stop). A 304 would confirm a body
-   * whose running set was ignored while the stream was in charge, so the ETag is dropped with it.
-   */
-  function releaseAuthority(): void {
-    if (!authoritative) return;
-    authoritative = false;
-    etag = null;
-  }
 
   function scheduleReconnect(): void {
     reconnectTimer = timers.setTimeout(connect, reconnectDelayMs(streamFailures));
@@ -1076,60 +747,38 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     stream = opened;
     opened.onopen = () => {
       streamFailures = 0;
-      // Whatever happened while the stream was down is only in the list, not in a frame.
-      if (streamResync) {
-        streamResync = false;
-        requestFull();
-      }
     };
     opened.onmessage = (event) => {
       if (stream === opened) handleFrame(event.data);
     };
     opened.onerror = () => {
       if (stream !== opened) return;
-      releaseAuthority();
-      streamResync = true;
       if (opened.readyState !== EVENT_STREAM_CLOSED) return;
       stream = null;
-      requestFull();
       scheduleReconnect();
     };
   }
 
-  // Long-idle recovery: the stream dies while the tab is hidden (sleep, network change, tab freeze) and its reconnect carries no list invalidation.
-  function resync(): void {
-    requestFull();
-    void fetchPins(false);
-  }
 
   function start(): void {
     hydrate();
     removers.push(
-      deps.env.onVisibilityChange((visible) => (visible ? resync() : flushPersist())),
-      deps.env.onOnline(resync),
+      deps.env.onVisibilityChange((visible) => { if (!visible) flushPersist(); }),
       deps.env.onPageHide(flushPersist),
     );
     connect();
-    void fetchSessions(false);
-    if (s.projectsStatus !== "ready") void fetchProjects(false);
-    void fetchPins(false);
+    removers.push(deps.dataStore.subscribe(applyDurable));
+    deps.dataStore.retain();
+    applyDurable();
   }
 
   function stop(): void {
-    epoch += 1;
-    for (const coalesced of [fetchSessions, fetchProjects, fetchPins]) coalesced.cancelQueued();
-    for (const controller of controllers) controller.abort();
-    controllers.clear();
     for (const remove of removers.splice(0)) remove();
     stream?.close();
     stream = null;
-    for (const timer of [reconnectTimer, fullTimer, deltaTimer]) if (timer !== undefined) timers.clearTimeout(timer);
+    if (reconnectTimer !== undefined) timers.clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
-    fullTimer = undefined;
-    deltaTimer = undefined;
-    pendingDeltaIds.clear();
-    releaseAuthority();
-    streamResync = false;
+    deps.dataStore.release();
     streamFailures = 0;
     flushPersist();
   }
@@ -1156,12 +805,9 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
       if (retainCount === 0) stop();
     },
 
-    refresh({ force = false, sessions = true, projects = false, pins = false } = {}) {
-      const tasks: Promise<void>[] = [];
-      if (sessions) tasks.push(fetchSessions(force));
-      if (projects) tasks.push(fetchProjects(force));
-      if (pins) tasks.push(fetchPins(force));
-      return Promise.all(tasks).then(() => undefined);
+    async refresh() {
+      await deps.dataStore.refresh();
+      applyDurable();
     },
 
     applyOptimisticSession(session) {
@@ -1201,7 +847,6 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
 
     removeSession(id) {
       hydrate();
-      etag = null;
       knownCwds.delete(id);
       if (sessionIndex(s.sessions).has(id)) s.sessions = s.sessions.filter((session) => session.id !== id);
       if (s.unread.has(id)) {
@@ -1226,7 +871,7 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     async ensureSession(id) {
       const known = selectSession(snapshot, id);
       if (known) return known;
-      await fetchSessions(false);
+      await store.refresh();
       return selectSession(snapshot, id) ?? null;
     },
   };

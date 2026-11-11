@@ -35,6 +35,10 @@ class FakeStream {
     if (this.closedByCaller) return;
     this.readyState = FakeStream.OPEN;
     this.deliver({ type: "open" });
+    if (this.channel.kind === "data") {
+      this.deliver({ type: "message", data: JSON.stringify({ type: "data-head", cursor: durableCursor() }) });
+      return;
+    }
     const sid = this.channel.sessionId;
     this.deliver({ type: "message", data: JSON.stringify({ type: "connected", web: world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 } }) });
   }
@@ -107,7 +111,31 @@ const world = {
   nativeHistories: new Map(), // isolated, parent-linked native history fixtures
   btwHistory: new Map(), // sid -> BtwRecord[] served by get_btw_history
   advisorDefault: null, // payload of /api/advisor-default; null answers 404
+  dataRevision: 0,
+  dataChanges: [],
+  foxPointer: { sessionId: null, resetAt: null },
 };
+
+function durableCursor() {
+  return { generation: "rpc-fixture", revision: world.dataRevision };
+}
+
+function durableSnapshot() {
+  return structuredClone({
+    token: `reader-${world.dataRevision}`, next: false, cursor: durableCursor(),
+    complete: true, staleSources: [], warnings: [],
+    data: {
+      sessions: [...world.sessions.keys()].map(sessionInfo), projects: [], pins: [], notifications: [],
+      foxWorkspace: "/workspace", foxPointer: world.foxPointer,
+      foxObservation: { version: 1, seeded: false, seen: {}, daily: {} },
+    },
+  });
+}
+
+function setFoxPointer(pointer) {
+  world.foxPointer = pointer;
+  world.dataChanges.push({ revision: ++world.dataRevision, topic: "fox-pointer", keys: [] });
+}
 
 async function fetchStub(url, init = {}) {
   const method = (init.method ?? "GET").toUpperCase();
@@ -124,6 +152,26 @@ async function fetchStub(url, init = {}) {
       return jsonResponse(status, value);
     }
   }
+  const target = new URL(u, "http://localhost");
+  if (target.pathname === "/api/data/snapshot") {
+    if (method === "DELETE") return jsonResponse(200, { ok: true });
+    if (method === "GET") return jsonResponse(200, durableSnapshot());
+  }
+  if (method === "GET" && target.pathname === "/api/data/changes") {
+    const before = JSON.parse(target.searchParams.get("cursor"));
+    const through = target.searchParams.has("through") ? JSON.parse(target.searchParams.get("through")) : durableCursor();
+    if (before.generation !== through.generation || before.revision > through.revision) return jsonResponse(409, { code: "reset_required" });
+    return jsonResponse(200, {
+      cursor: through, through, hasMore: false,
+      changes: world.dataChanges.filter((change) => change.revision > before.revision && change.revision <= through.revision),
+    });
+  }
+  if (method === "POST" && u === "/api/fox/session") {
+    if (body.expectedSessionId !== world.foxPointer.sessionId || body.resetAt !== world.foxPointer.resetAt) return jsonResponse(409, { error: "FOX conversation changed" });
+    setFoxPointer({ sessionId: body.sessionId, resetAt: body.resetAt });
+    return jsonResponse(200, { ...world.foxPointer });
+  }
+
 
   if (/^\/api\/advisor-default/.test(u)) {
     return world.advisorDefault ? jsonResponse(200, world.advisorDefault) : jsonResponse(404, {});
@@ -290,6 +338,7 @@ const jiti = createJiti(import.meta.url, {
 const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
 const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
 const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
+const { getDataStore } = await jiti.import("@/lib/data-store");
 const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
 const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
 const { toast, toastCalls } = await jiti.import("@/components/ui/toast");
@@ -371,6 +420,9 @@ function resetWorld() {
   world.btwHistory.clear();
   world.abortRestoreQueue = null;
   world.advisorDefault = null;
+  world.dataRevision++;
+  world.dataChanges = [];
+  world.foxPointer = { sessionId: null, resetAt: null };
 }
 
 function primeSession(sid, messages) {
@@ -5444,13 +5496,10 @@ test("FOX first send keeps its event connection through new-session promotion", 
   resetWorld();
   const sid = "fox-first-native";
   primeSession(sid, []);
-  for (const [url, value] of [
-    ["/api/fox/workspace", { cwd: "/workspace" }],
-    ["/api/fox/session", { sessionId: null, resetAt: "2026-01-01T00:00:00.000Z" }],
-    ["/api/fox/session", { sessionId: null, resetAt: "2026-01-01T00:00:00.000Z" }],
-  ]) world.holds.push({
-    match: (method, target) => method === "GET" && target === url,
-    produce: async () => ({ value }),
+  setFoxPointer({ sessionId: null, resetAt: "2026-01-01T00:00:00.000Z" });
+  world.holds.push({
+    match: (method, target) => method === "GET" && target === "/api/fox/workspace",
+    produce: async () => ({ value: { cwd: "/workspace" } }),
   });
   world.holds.push({
     match: (method, url) => method === "POST" && url === "/api/agent/new",
@@ -5460,6 +5509,10 @@ test("FOX first send keeps its event connection through new-session promotion", 
     onClose() {}, onOpenSession() {},
   }))));
   await settle();
+  await act(async () => {
+    world.esInstances.find((entry) => entry.channel.kind === "data").open();
+    await sleep(30);
+  });
   const textarea = view.container.querySelector("textarea");
   assert.ok(textarea);
   fireEvent.change(textarea, { target: { value: "First FOX question" } });
@@ -5474,7 +5527,7 @@ test("FOX first send keeps its event connection through new-session promotion", 
   assert.equal(prompts[0].body.message, "First FOX question");
 });
 
-test("a late FOX pointer poll cannot replace a first send still creating its native session", async () => {
+test("a late FOX pointer snapshot cannot replace a first send still creating its native session", { timeout: 10_000 }, async (t) => {
   resetWorld();
   const sid = "fox-pending-first-send";
   primeSession(sid, []);
@@ -5482,40 +5535,67 @@ test("a late FOX pointer poll cannot replace a first send still creating its nat
     match: (method, target) => method === "GET" && target === "/api/fox/workspace",
     produce: async () => ({ value: { cwd: "/workspace" } }),
   });
-  world.holds.push({
-    match: (method, target) => method === "GET" && target === "/api/fox/session",
-    produce: async () => ({ value: { sessionId: null, resetAt: null } }),
-  });
-  let releasePoll;
-  world.holds.push({
-    match: (method, target) => method === "GET" && target === "/api/fox/session",
-    produce: () => new Promise((resolve) => { releasePoll = resolve; }),
-  });
-  let releaseCreate;
-  world.holds.push({
-    match: (method, target) => method === "POST" && target === "/api/agent/new",
-    produce: () => new Promise((resolve) => { releaseCreate = resolve; }),
-  });
+  const holdReply = (match, value, label) => {
+    let release;
+    const pending = {
+      get started() { return Boolean(release); },
+      release() { release?.(); },
+    };
+    world.holds.push({
+      match,
+      produce: () => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${label} was not released within 2s`)), 2000);
+        release = () => { clearTimeout(timer); resolve({ value }); };
+      }),
+    });
+    t.after(() => pending.release());
+    return pending;
+  };
+  const creation = holdReply(
+    (method, target) => method === "POST" && target === "/api/agent/new",
+    { sessionId: sid }, "native session creation",
+  );
   const view = ownRoot(render(React.createElement(TestRoot, null, React.createElement(FoxPage, { onClose() {}, onOpenSession() {} }))));
-  await settle();
+  await until(() => view.container.querySelector("textarea"), "FOX bootstrap must expose its composer");
+  const dataStream = world.esInstances.find((entry) => entry.channel.kind === "data");
+  assert.ok(dataStream);
+  await act(async () => { dataStream.open(); });
+  await until(() => getDataStore().getSnapshot().snapshot?.cursor.revision === world.dataRevision, "the initial durable snapshot must be current");
+
+  setFoxPointer({ sessionId: "another-fox-session", resetAt: null });
+  const lateSnapshot = durableSnapshot();
+  const snapshot = holdReply(
+    (method, target) => method === "GET" && target === "/api/data/snapshot",
+    lateSnapshot, "late FOX pointer snapshot",
+  );
+  await act(async () => {
+    dataStream.deliver({ type: "message", data: JSON.stringify({ type: "data-head", cursor: lateSnapshot.cursor }) });
+  });
+  await until(() => snapshot.started, "the pointer snapshot must be awaiting its response");
   const textarea = view.container.querySelector("textarea");
+  assert.ok(textarea);
   fireEvent.change(textarea, { target: { value: "Preserve this first question" } });
   fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
-  await settle();
-  assert.ok(releasePoll && releaseCreate);
-  await act(async () => {
-    releasePoll({ value: { sessionId: "another-fox-session", resetAt: null } });
-    await sleep(30);
-    releaseCreate({ value: { sessionId: sid } });
-    await sleep(30);
-  });
+  await until(() => creation.started, "the first send must be awaiting native session creation");
+  // Sending leaves the empty-chat layout, which legitimately replaces ChatInput.
+  // Only a remount caused by the later durable pointer is a regression here.
+  const pendingComposer = view.container.querySelector("textarea");
+  assert.ok(pendingComposer);
+  await act(async () => { snapshot.release(); });
+  await until(() => getDataStore().getSnapshot().snapshot?.cursor.revision === lateSnapshot.cursor.revision, "the delayed pointer snapshot must commit before creation resolves");
+  assert.equal(getDataStore().getSnapshot().snapshot.data.foxPointer.sessionId, "another-fox-session", "the durable update actually lands while session creation is pending");
+  assert.ok(view.container.querySelector("textarea") === pendingComposer, "the late durable pointer must not remount the pending send");
+  await act(async () => { creation.release(); });
+  await until(() => world.esInstances.some((entry) => entry.channel.sessionId === sid), "the pending send must attach its own session stream");
   const stream = world.esInstances.find((entry) => entry.channel.sessionId === sid);
   assert.ok(stream);
-  await act(async () => { stream.open(); await sleep(60); });
+  await act(async () => { stream.open(); });
+  await until(() => callsTo("POST", `/api/agent/${sid}`).some((call) => call.body?.type === "prompt"), "the original question must reach its created session");
   assert.equal(stream.closedByCaller, false);
   const prompts = callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "prompt");
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0].body.message, "Preserve this first question");
+  assert.equal(callsTo("POST", "/api/agent/another-fox-session").length, 0, "the late pointer cannot redirect the first question");
 });
 
 test("a failed HTTP response overtaken by a completed turn and newer send is superseded, not rejected", async (t) => {

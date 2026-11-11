@@ -1,33 +1,28 @@
+import { randomUUID } from "node:crypto";
 import type { Briefing } from "./briefing";
 import type { FoxServiceConfig } from "./fox-service-config";
-import {
-  extractFoxEvents,
-  planFoxTick,
-  recordWakeFailure,
-  type FoxServiceState,
-  type FoxTickPlan,
-} from "./fox-service-core";
+import type { VersionedObservation } from "./storage/protocol";
+import type { FoxObservationClaimRequest, FoxObservationSettleRequest } from "./fox-service-state";
+import { extractFoxEvents, planFoxTick, recordWakeFailure, type FoxServiceState, type FoxTickPlan } from "./fox-service-core";
 
-/**
- * One single-flight tick. The production wrapper supplies the session/RPC,
- * file and config I/O; tests can run the same decision path with fakes.
- */
 export interface FoxServiceTarget {
   sessionId: string;
   resetAt?: string | null;
 }
 
+/** External native effects are never retried based on an expired DB lease. */
 export interface FoxServiceEngineDeps {
   now: () => number;
-  /** Read native attention and worker activity without writing a second ledger. */
   loadBriefing: () => Promise<Pick<Briefing, "needsYou" | "workers">>;
   loadConfig: () => FoxServiceConfig;
-  loadState: () => FoxServiceState;
-  saveState: (state: FoxServiceState) => void;
-  /** The current FOX conversation, or null when one must be created. */
+  loadState: () => Promise<VersionedObservation>;
+  saveState: (state: FoxServiceState, expectedVersion: number) => Promise<VersionedObservation>;
+  claimWake: (request: FoxObservationClaimRequest) => Promise<{ claimed: boolean; version: number }>;
+  settleWake: (request: FoxObservationSettleRequest) => Promise<VersionedObservation>;
   resolveTarget: () => Promise<FoxServiceTarget | null>;
   isBusy: (target: FoxServiceTarget) => boolean;
-  wake: (target: FoxServiceTarget | null, message: string) => Promise<void>;
+  /** Reject with outcome:not-submitted ONLY when no native prompt was submitted. */
+  wake: (target: FoxServiceTarget | null, message: string, wakeId: string) => Promise<void>;
   log?: (message: string, error?: unknown) => void;
 }
 
@@ -37,17 +32,25 @@ export interface FoxServiceEngine {
 }
 
 export function createFoxServiceEngine(deps: FoxServiceEngineDeps): FoxServiceEngine {
+  const owner = randomUUID();
   let running: Promise<FoxTickPlan | null> | null = null;
   let runtimeState: FoxServiceState | null = null;
-  const save = (state: FoxServiceState) => {
-    deps.saveState(state);
+  let runtimeVersion: number | null = null;
+
+  function remember(state: FoxServiceState, version: number): void {
     runtimeState = state;
-  };
+    runtimeVersion = version;
+  }
 
   async function run(now: number): Promise<FoxTickPlan | null> {
+    // Reread every tick: another process may have delivered a wake or claimed it.
+    const loaded = await deps.loadState();
+    if (loaded.claim) {
+      remember(loaded.state, loaded.version);
+      return { state: loaded.state, wake: null, reason: loaded.claim.status === "uncertain" ? "wake-uncertain" : "wake-claimed" };
+    }
+    const state = runtimeState && runtimeVersion === loaded.version ? runtimeState : loaded.state;
     const config = deps.loadConfig();
-    let state = runtimeState ?? deps.loadState();
-
     let briefing: Pick<Briefing, "needsYou" | "workers">;
     try {
       briefing = await deps.loadBriefing();
@@ -56,7 +59,6 @@ export function createFoxServiceEngine(deps: FoxServiceEngineDeps): FoxServiceEn
       return null;
     }
 
-    const events = extractFoxEvents(briefing);
     let target: FoxServiceTarget | null = null;
     let foxBusy = false;
     if (config.enabled) {
@@ -68,21 +70,42 @@ export function createFoxServiceEngine(deps: FoxServiceEngineDeps): FoxServiceEn
         return null;
       }
     }
-
-    const plan = planFoxTick({ events, state, config, now, foxBusy });
-    if (plan.wake) {
-      const wake = plan.wake;
-      try {
-        await deps.wake(target, wake.message);
-      } catch (error) {
-        state = recordWakeFailure(state, wake.events, now);
-        save(state);
-        deps.log?.("FOX wake failed; will retry", error);
-        return { ...plan, state, wake: null, reason: "wake-failed" };
-      }
+    const plan = planFoxTick({ events: extractFoxEvents(briefing), state, config, now, foxBusy });
+    if (!plan.wake) {
+      const saved = await deps.saveState(plan.state, loaded.version);
+      remember(plan.state, saved.version);
+      return plan;
     }
 
-    save(plan.state);
+    const wakeId = randomUUID();
+    const claim = await deps.claimWake({ expectedVersion: loaded.version, wakeId, targetSessionId: target?.sessionId, eventKeys: plan.wake.events.map((event) => event.key), owner, now, leaseMs: 60_000 });
+    if (!claim.claimed) {
+      runtimeState = null;
+      runtimeVersion = null;
+      return null;
+    }
+
+    let outcome: "delivered" | "not-submitted" | "uncertain" = "delivered";
+    let wakeError: unknown;
+    try {
+      await deps.wake(target, plan.wake.message, wakeId);
+    } catch (error) {
+      wakeError = error;
+      outcome = error && typeof error === "object" && "outcome" in error && error.outcome === "not-submitted" ? "not-submitted" : "uncertain";
+    }
+    const next = outcome === "not-submitted" ? recordWakeFailure(state, plan.wake.events, now) : plan.state;
+    // A settlement failure leaves the persistent claim blocking replay, including
+    // worker loss after COMMIT. Do not classify it as a failed native submission.
+    const settled = await deps.settleWake({ wakeId, owner, outcome, state: next });
+    remember(next, settled.version);
+    if (outcome === "not-submitted") {
+      deps.log?.("FOX wake was not submitted; will retry", wakeError);
+      return { ...plan, state: next, wake: null, reason: "wake-failed" };
+    }
+    if (outcome === "uncertain") {
+      deps.log?.("FOX wake outcome unknown; awaiting native evidence", wakeError);
+      return { ...plan, state: next, wake: null, reason: "wake-uncertain" };
+    }
     return plan;
   }
 
@@ -90,9 +113,7 @@ export function createFoxServiceEngine(deps: FoxServiceEngineDeps): FoxServiceEn
     pendingCount: () => runtimeState?.pending.length ?? 0,
     tick(now = deps.now()): Promise<FoxTickPlan | null> {
       if (running) return running;
-      running = run(now).finally(() => {
-        running = null;
-      });
+      running = run(now).finally(() => { running = null; });
       return running;
     },
   };

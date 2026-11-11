@@ -88,6 +88,31 @@ foxnio
 
 foxnio 会在浏览器中打开 <http://127.0.0.1:30177>。也可以用 `npx @telagod/foxnio@latest` 免安装直接运行。
 
+### 应用数据迁移与恢复
+
+项目元数据、置顶、通知历史和 FOX 指针/观察记录统一保存在
+`<PI_CODING_AGENT_DIR>/omp-web/app.db`（默认 `~/.omp/agent/omp-web/app.db`）。
+OMP 会话、凭据和 operator settings 保留原位置。旧安装遇到
+`migration_required` 时，先停止**所有**旧版桌面与服务进程，再执行：
+
+```bash
+foxnio data status
+foxnio data migrate --offline
+foxnio data backup
+```
+
+`--offline` 表示你已确认旧进程全部停止，不是工具自动证明。迁移整批提交并
+保留源文件；损坏的必要数据会中止整个迁移，修复报错来源后重试。只有派生的
+观察记录可通过 `--discard-observation` 显式舍弃，这会重置已观察事件和每日计数。
+`foxnio data rebuild-index` 只重建原生展示索引，不删除应用元数据。
+
+出现 `restore_required` 时，不要删除 receipt 来强制空库初始化。停止所有
+server、desktop 和 data CLI 进程，另行保留损坏的 `app.db`、`-wal`/`-shm`
+及 receipt，再以 `data backup` 生成的同安装一致备份恢复 `app.db`，保持仅 owner
+可访问；不得混用旧 sidecar 或其他安装的 receipt。恢复后重启进程，浏览器通过
+完整 snapshot 收敛。历史迁移副本损坏只产生告警，不覆盖健康的已提交数据库。
+
+
 ### 桌面应用
 
 每个[发布版本](https://github.com/telagod/foxnio-public/releases/latest)都附带 Windows（安装包和便携版 `.exe`）、macOS（DMG 和 ZIP，支持 Apple silicon 和 Intel）、Linux（AppImage 和 `.deb`）的安装包。应用会在 30177 端口启动自己的 foxnio 服务，该端口被占用时改用下一个空闲端口。它不包含 `omp`，请另外安装。
