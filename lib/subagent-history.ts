@@ -10,7 +10,8 @@
 
 import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "fs";
 import { basename, dirname, join } from "path";
-import { getSessionEntries, entryToUiMessage } from "./session-reader";
+import { entryToUiMessage } from "./session-context";
+import { requestSessionHistory } from "./session-history-queue";
 import { parseJsonlLenient } from "./omp/session-files";
 import { asAgentSource, parseSubagentProgress, SUBAGENT_ID_RE } from "./subagent-types";
 import type { SubagentHistoryEntry, SubagentHistoryResult } from "./subagent-types";
@@ -103,13 +104,12 @@ function progressUpsertBlocked(existing: SubagentHistoryEntry): boolean {
  * toolResults, merging `progress` (live-snapshot fields) with `results`
  * (settled per-subagent telemetry), then resolves sibling transcript files.
  */
-export function extractSubagentHistory(sessionFilePath: string): SubagentHistoryEntry[] {
-  let entries: SessionEntry[];
-  try {
-    entries = getSessionEntries(sessionFilePath);
-  } catch {
-    return [];
-  }
+export async function extractSubagentHistory(sessionFilePath: string): Promise<SubagentHistoryEntry[]> {
+  return requestSessionHistory({ operation: "subagents", filePath: sessionFilePath });
+}
+
+/** Worker-side projection: do not transfer the parent's full raw transcript. */
+export function extractSubagentHistoryFromEntries(sessionFilePath: string, entries: SessionEntry[]): SubagentHistoryEntry[] {
 
   const byId = new Map<string, SubagentHistoryEntry>();
   // Authoritative launch order: the assistant message that spawns a batch lists

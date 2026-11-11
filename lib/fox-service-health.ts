@@ -6,12 +6,13 @@
  * only the service-state mapping remains.
  */
 export function foxServiceHealth(
-  status: { config: { enabled: boolean }; lastTickAt: string | null } | null,
+  status: { config: { enabled: boolean }; lastTickAt: string | null; lastRunError: string | null } | null,
   failed: boolean,
   now: number,
-): "loading" | "unavailable" | "manual" | "starting" | "checking" | "stale" {
+): "loading" | "unavailable" | "manual" | "starting" | "checking" | "stale" | "error" {
   if (failed) return "unavailable";
   if (!status) return "loading";
+  if (status.lastRunError) return "error";
   if (!status.config.enabled) return "manual";
   if (!status.lastTickAt) return "starting";
   const at = Date.parse(status.lastTickAt);

@@ -402,6 +402,7 @@ export function FoxPage({
         </div>
       </header>
 
+      {service.health === "error" && <div className="fox-native-capability-note" role="status" data-health="error"><AlertCircle size={15} /><span>{t("notifications.typeError")}: {service.status?.lastRunError}</span></div>}
       {service.status?.capabilities?.agentTools === false && <div className="fox-native-capability-note" role="status"><AlertCircle size={15} />{t("fox.native.toolsDisabled")}</div>}
       {sessionProblem && <div className="fox-native-capability-note" role="status"><AlertCircle size={15} /><span>{t(`fox.session.${sessionProblem}`)}</span><button type="button" className="fox-native-text-button" onClick={() => void loadWorkspace()}>{t("fox.retry")}</button></div>}
         {workspaceError ? (

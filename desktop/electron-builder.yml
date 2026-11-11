@@ -47,7 +47,7 @@ files:
   - "!node_modules/caniuse-lite/**/*"
   - "!node_modules/prismjs/**/*"
   - "!node_modules/mammoth/**/*"
-  - "!node_modules/jiti/**/*"
+  # jiti is a runtime dependency of the unbundled session-history worker.
   - "!node_modules/yaml/**/*"
   - package.json
 extraResources:

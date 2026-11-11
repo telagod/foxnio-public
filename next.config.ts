@@ -32,6 +32,11 @@ const nextConfig = (phase: string): NextConfig => {
     // root, Next can choose a parent lockfile on Windows and traverse protected
     // user-profile junctions while compiling.
     outputFileTracingRoot: process.cwd(),
+    // The Node history worker loads the shipped TS engine through jiti rather
+    // than a Next chunk. Preserve those runtime assets in traced deployments.
+    outputFileTracingIncludes: {
+      "/*": ["./lib/**/*.ts", "./lib/session-history-worker.mjs", "./node_modules/jiti/**/*"],
+    },
     // undici is loaded from a runtime dependency (lib/http-dispatcher.ts) to
     // honor HTTP(S)_PROXY for server-side fetch; keep it external so the
     // bundler does not inline a second copy next to the global dispatcher.

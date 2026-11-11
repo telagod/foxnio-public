@@ -1433,11 +1433,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   };
 
   /** Answer a host_tool_call with a toolResult payload. */
-  const respondHostTool = useCallback(async (sid: string, id: string, text: string, isError = false) => {
+  const respondHostTool = useCallback(async (sid: string, id: string, claimToken: string, text: string, isError = false) => {
     try {
       await sendAgentCommand(sid, {
         type: "host_tool_result",
         id,
+        claimToken,
         isError,
         result: { content: [{ type: "text", text }] },
       });
@@ -1449,6 +1450,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleHostToolCall = useCallback(async (id: string, toolName: string, args: Record<string, unknown>) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
+    let token: string | null;
+    try {
+      ({ token } = await sendAgentCommand<{ token: string | null }>(sid, { type: "claim_host_tool", id }));
+    } catch { return; }
+    if (!token) return;
     const { text, isError } = await runHostTool(toolName, args, {
       openUrl: onOpenUrl ?? ((url) => {
         window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
@@ -1456,7 +1462,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }),
       openFile: onOpenFile ? (path, name) => onOpenFile(path, name, sid) : undefined,
     });
-    await respondHostTool(sid, id, text, isError);
+    await respondHostTool(sid, id, token, text, isError);
   }, [onOpenFile, onOpenUrl, respondHostTool]);
 
   /** Answer a host_uri_request (agent read/write of a registered scheme). */

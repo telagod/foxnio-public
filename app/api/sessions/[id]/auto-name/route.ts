@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
+import { scanSessionInfo } from "@/lib/omp/session-files";
+import { mutateSession, SessionMutationError } from "@/lib/omp/session-mutation";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
 import { getRpcSession, resolveSpawnCwdResult, startRpcSession, isWebRpcError } from "@/lib/rpc-manager";
 import { invalidateSessionCaches, readSessionHeader } from "@/lib/session-reader";
@@ -77,18 +78,18 @@ export async function POST(
       return NextResponse.json({ error: "Wait for the history edit to finish", code: "session_busy" }, { status: 409 });
     }
 
-    // Save title both to disk and through the live process so it persists immediately.
-    setSessionTitle(filePath, derived, "auto");
-    if (rpc?.isAlive?.()) {
-      try {
-        await rpc.send({ type: "set_session_name", name: derived });
-      } catch {
-        // Saved on disk; ignore RPC sync failure.
-      }
+    // Native live writes and offline lease-protected writes are exclusive paths.
+    const live = getRpcSession(id);
+    if (live?.isAlive?.()) {
+      await live.send({ type: "set_session_name", name: derived });
+    } else {
+      const header = readSessionHeader(filePath);
+      await mutateSession({ action: "rename", sessionId: header?.id ?? id, filePath, name: derived, source: "auto" });
     }
     invalidateSessionCaches(filePath);
     return NextResponse.json({ title: derived, generated: false, usage: null });
   } catch (error) {
+    if (error instanceof SessionMutationError || isWebRpcError(error)) return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },

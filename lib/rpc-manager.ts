@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync } from "fs";
-import { homedir } from "os";
+import { existsSync, realpathSync, statSync } from "fs";
 import { join } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
@@ -150,6 +149,7 @@ const WEB_RPC_ERROR_STATUS: Record<string, number> = {
   session_busy: 409,
   session_restarting: 409,
   session_changed: 409,
+  session_cwd_unavailable: 409,
   mcp_list_loading: 409,
   session_unresponsive: 504,
   session_state_timeout: 504,
@@ -309,33 +309,12 @@ function toImageContents(value: unknown): Array<{ type: "image"; data: string; m
   return images?.length ? images : undefined;
 }
 
-/**
- * Pick a spawn cwd that actually exists. A session records the directory it was
- * created in, but that directory may have been deleted since: spawn() would
- * fail with ENOENT and `omp --cwd <missing>` throws in setProjectDir. omp's own
- * resume path skips the chdir when the recorded project dir is gone and keeps
- * the launch cwd (main.ts), so hand it a live directory and let it decide.
- */
-export function resolveSpawnCwd(recordedCwd?: string | null): string {
-  return resolveSpawnCwdResult(recordedCwd).cwd;
-}
-
-/**
- * Resolve a spawn cwd and report whether it differs from the session's recorded
- * directory. Callers that surface a UI (the SSE resume paths) use the result to
- * emit a notice so the user knows the agent is running somewhere other than the
- * directory the sidebar/header still advertises — a silent wrong-tree fallback
- * would let file tool calls edit an unexpected repo with no signal.
- */
-export function resolveSpawnCwdResult(recordedCwd?: string | null): { cwd: string; fellBack: boolean } {
-  if (recordedCwd && existsSync(recordedCwd)) return { cwd: recordedCwd, fellBack: false };
+/** A resumed conversation must never execute in a substituted workspace. */
+export function resolveSpawnCwdResult(recordedCwd?: string | null): { cwd: string } {
   try {
-    const serverCwd = process.cwd();
-    if (serverCwd && existsSync(serverCwd)) return { cwd: serverCwd, fellBack: true };
-  } catch {
-    // process.cwd() itself throws when the server's own cwd was removed.
-  }
-  return { cwd: homedir(), fellBack: true };
+    if (recordedCwd && statSync(recordedCwd).isDirectory()) return { cwd: recordedCwd };
+  } catch { /* Missing or inaccessible is not permission to choose another cwd. */ }
+  throw new WebRpcError("This session's working directory is unavailable. Restore the original directory or start a new session in the intended workspace; history remains readable.", "session_cwd_unavailable");
 }
 
 /** omp's CompactionResult historically omitted any post-compaction token
@@ -379,6 +358,7 @@ export class AgentSessionWrapper {
   private unpersistedFoxWorkerId: string | null = null;
   private foxReportCalls = new Map<string, Promise<FoxWorkerReport>>();
   private foxReportInbox: Promise<void> | null = null;
+  private hostToolClaims = new Map<string, { token: string; timer: NodeJS.Timeout }>();
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private extensionStatuses = new Map<string, string>();
@@ -467,9 +447,7 @@ export class AgentSessionWrapper {
   private _toolPreset: ToolPresetStatus | null;
   /** Original requested tool names; null means a resumed session's preset is unknown. */
   private readonly _toolNames: readonly string[] | null | undefined;
-  /** The cwd recorded in the session file header; null for brand-new sessions
-   * or when the header lacks one. Used to detect a spawn fallback so a notice
-   * can warn the user the agent is running in a different directory. */
+  /** Original workspace for validating cold resumes before the handshake. */
   private readonly recordedCwd: string | null;
 
   // Plain field assignments (not TS parameter properties) keep this module
@@ -663,6 +641,7 @@ export class AgentSessionWrapper {
     // reports a real error), never by the reaper.
     this.handshaking = true;
     try {
+      if (this.recordedCwd) resolveSpawnCwdResult(this.recordedCwd);
       const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
       await this.proc.negotiateProtocol(ready);
       // Subscribe to subagent lifecycle/progress/event frames so the UI can show
@@ -682,19 +661,6 @@ export class AgentSessionWrapper {
       this.applyIdentity(state);
       const catalog = await this.proc.sendCommand<{ commands?: RpcAvailableSlashCommand[] }>({ type: "get_available_commands" }, GET_STATE_TIMEOUT_MS).catch(() => null);
       this.foxReportingAvailable ||= Boolean(Array.isArray(catalog?.commands) && catalog.commands.some((command) => command.name === FOX_REPORT_COMMAND && command.source === "extension"));
-      // Warn when the spawn cwd differs from the session's recorded directory.
-      // This happens when the recorded cwd was deleted (removed worktree, moved
-      // repo, different machine): resolveSpawnCwd silently substituted a live
-      // directory so omp can spawn, but without a notice the user would see the
-      // sidebar/header still advertise the (gone) recorded path while file tool
-      // calls operate on a different tree.
-      if (this.recordedCwd && this.recordedCwd !== this.cwd) {
-        this.emit({
-          type: "notice",
-          level: "warning",
-          message: `This session's working directory no longer exists; the agent is running in ${this.cwd}.`,
-        });
-      }
     } finally {
       this.handshaking = false;
       // The handshake is real activity, so the reap clock restarts from here
@@ -1106,6 +1072,7 @@ export class AgentSessionWrapper {
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
         if (targetId && this.pendingHostTools.delete(targetId)) {
+          this.releaseHostToolClaim(targetId);
           this.emit(event);
           notifyRunningChange();
           return;
@@ -1272,6 +1239,12 @@ export class AgentSessionWrapper {
     this.emit({ type: "notice", level: "warning", message: `Rejected unavailable host tool: ${toolName}` });
   }
 
+  private releaseHostToolClaim(id: string): void {
+    const claim = this.hostToolClaims.get(id);
+    if (claim) clearTimeout(claim.timer);
+    this.hostToolClaims.delete(id);
+  }
+
   /**
    * Reject outstanding host tool calls (browser disconnected / destroy): "own" ones went to this session's
    * stream, "cross" ones to other open tabs (see subscribeHostToolCalls).
@@ -1281,6 +1254,7 @@ export class AgentSessionWrapper {
       const cross = event.webCrossSession === true;
       if ((which === "own" && cross) || (which === "cross" && !cross)) continue;
       this.pendingHostTools.delete(id);
+      this.releaseHostToolClaim(id);
       this.proc.sendFrame({
         type: "host_tool_result",
         id,
@@ -2084,6 +2058,7 @@ export class AgentSessionWrapper {
       // Calls the old child made can never be answered: its pipes are gone. Left
       // in place they would keep isRunning() true for the new child.
       this.pendingHostTools.clear();
+      for (const id of this.hostToolClaims.keys()) this.releaseHostToolClaim(id);
       this.pendingHostUris.clear();
       this.promptRunning = false;
       this.promptDispatchPendingCount = 0;
@@ -2158,6 +2133,7 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (["prompt", "steer", "follow_up", "abort_and_prompt", "bash"].includes(String(command.type))) resolveSpawnCwdResult(this.cwd);
     if (typeof command.type === "string" && command.type.startsWith("abort")) {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
@@ -2519,9 +2495,32 @@ export class AgentSessionWrapper {
         return null;
       }
 
+      case "claim_host_tool": {
+        const id = typeof command.id === "string" ? command.id : "";
+        if (!this.pendingHostTools.has(id) || this.hostToolClaims.has(id)) return { token: null };
+        const token = randomUUID();
+        // Never hand the same side effect to another tab after an uncertain
+        // delivery. A disappeared claimant fails the call rather than replaying.
+        const timer = setTimeout(() => {
+          this.releaseHostToolClaim(id);
+          if (!this.pendingHostTools.delete(id)) return;
+          this.proc.sendFrame({ type: "host_tool_result", id, isError: true, result: { content: [{ type: "text", text: "The browser did not confirm this action; it was not retried." }] } });
+          notifyRunningChange();
+        }, 30_000);
+        timer.unref?.();
+        this.hostToolClaims.set(id, { token, timer });
+        return { token };
+      }
+
       case "host_tool_result": {
-        if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
-        this.proc.sendFrame(command as { type: string; [key: string]: unknown });
+        const id = typeof command.id === "string" ? command.id : "";
+        const claim = this.hostToolClaims.get(id);
+        if (!claim || command.claimToken !== claim.token || !this.pendingHostTools.delete(id)) return null;
+        this.releaseHostToolClaim(id);
+        const result = { ...command };
+        delete result.claimToken;
+        this.proc.sendFrame(result as { type: string; [key: string]: unknown });
+        notifyRunningChange();
         return null;
       }
 
@@ -2629,6 +2628,7 @@ export class AgentSessionWrapper {
     const disposed = this.proc.dispose().catch(() => {});
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
+    for (const id of this.hostToolClaims.keys()) this.releaseHostToolClaim(id);
     this.hostToolNames.clear();
     this.hostToolDefinitions = [];
     this.pendingHostUris.clear();
@@ -3073,6 +3073,8 @@ export async function startRpcSession(
    * the user is never stuck on the unrestorable model. */
   spawnModel?: string,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  resolveSpawnCwdResult(cwd);
+  if (sessionFile && recordedCwd && !samePath(cwd, recordedCwd)) throw new WebRpcError("The session workspace changed; refusing to execute in another directory", "session_cwd_unavailable");
   const registry = getRegistry();
   const locks = getLocks();
   launchConfig = launchConfig ?? launchConfigForCwd(cwd);

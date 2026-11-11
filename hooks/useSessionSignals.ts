@@ -9,7 +9,6 @@ export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: str
   const openRef = useRef(onOpenSession);
   useEffect(() => { openRef.current = onOpenSession; }, [onOpenSession]);
   useEffect(() => {
-    void notificationHistory.load();
     const visible = () => { if (document.visibilityState === "visible") void notificationHistory.load(); };
     document.addEventListener("visibilitychange", visible);
     return () => document.removeEventListener("visibilitychange", visible);
@@ -31,6 +30,10 @@ export function useSessionSignals({ sessionId, onOpenSession }: { sessionId: str
         if (!isRecord(frame) || frame.type !== "notification" || frame.kind !== "signal" || !isRecord(frame.event)) return;
         notificationHistory.add(frame.event as unknown as NotificationEvent);
       } catch {}
+    }, {
+      // OPEN means the subscription is installed, including after reconnect.
+      // load() fences snapshots against signals arriving while it is in flight.
+      onOpen: () => { void notificationHistory.load(); },
     });
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);
     navigator.serviceWorker?.addEventListener("message", onWorkerMessage);

@@ -105,7 +105,7 @@ test("settings use native policies, distinguish same-named projects, and resolve
     ],
     service: {
       status: { config: { enabled: false, quietStart: "22:00", quietEnd: "08:00", maxDailyMessages: 3, dispatchPolicies: { "/real/app": "auto", "/two/app": "observe" } } },
-      saving: false, failed: false, refresh: noop, update: async (patch) => { updates.push(patch); return true; },
+      saving: false, failed: false, health: "manual", refresh: noop, update: async (patch) => { updates.push(patch); return true; },
     },
     onClose: noop,
   }));
@@ -114,4 +114,20 @@ test("settings use native policies, distinguish same-named projects, and resolve
   assert.equal(screen.getByRole("combobox", { name: "Delegation permission for /two/app" }).value, "observe");
   fireEvent.change(first, { target: { value: "confirm" } });
   assert.deepEqual(updates, [{ dispatchPolicies: { "/one/app": "confirm" } }]);
+});
+
+test("settings render native execution failure distinctly from healthy automatic checks", () => {
+  const service = {
+    status: { config: { enabled: true, quietStart: "22:00", quietEnd: "08:00", maxDailyMessages: 3 }, lastRunError: "Provider unavailable" },
+    health: "error", saving: false, failed: false, refresh: noop, update: async () => true,
+  };
+  const view = render(React.createElement(FoxSettings, { service, projects: [], onClose: noop }));
+  assert.match(screen.getByRole("status").textContent, /Run failed/);
+  assert.match(screen.getByRole("status").textContent, /Provider unavailable/);
+  assert.equal(screen.queryByText("Automatic checks enabled"), null);
+  view.rerender(React.createElement(FoxSettings, {
+    service: { ...service, health: "checking", status: { ...service.status, lastRunError: null } }, projects: [], onClose: noop,
+  }));
+  assert.equal(screen.queryByText(/Provider unavailable/), null);
+  assert.match(screen.getByRole("status").textContent, /Automatic checks enabled/);
 });

@@ -1599,6 +1599,11 @@ export function AppShell({ appName }: { appName: string }) {
   }, [openUrlAutomatically]);
   const handleSessionOpenUrl = useCallback((url: string) => requestOpenUrl(url, selectedSession?.id ?? "", false), [requestOpenUrl, selectedSession?.id]);
   const handleCrossSessionHostTool = useCallback(async (call: CrossSessionHostToolCall) => {
+    let token: string | null;
+    try {
+      ({ token } = await sendAgentCommand<{ token: string | null }>(call.sessionId, { type: "claim_host_tool", id: call.id }));
+    } catch { return; }
+    if (!token) return;
     // Full-page Settings hides the chat, so its session counts as not viewed.
     const viewing = call.sessionId === selectedSession?.id && !settingsTab;
     const { text, isError } = await runHostTool(call.toolName, call.arguments, {
@@ -1613,6 +1618,7 @@ export function AppShell({ appName }: { appName: string }) {
       await sendAgentCommand(call.sessionId, {
         type: "host_tool_result",
         id: call.id,
+        claimToken: token,
         isError,
         result: { content: [{ type: "text", text }] },
       });

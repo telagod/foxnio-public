@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getSessionEntries } from "@/lib/session-reader";
+import { requestSessionHistory } from "@/lib/session-history-queue";
+import { SessionHistoryWorkerError } from "@/lib/session-history-errors";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { isRecord } from "@/lib/type-guards";
 
@@ -20,7 +21,7 @@ export async function GET(
     const filePath = resolved.filePath;
 
     // Lenient JSONL parsing keeps omp's malformed-line tolerance.
-    const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
+    const entry = await requestSessionHistory({ operation: "entry", filePath, entryId });
     if (!entry || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "assistant") {
       return NextResponse.json({ error: "Assistant message not found", code: "assistant_message_not_found" }, { status: 404 });
     }
@@ -32,6 +33,9 @@ export async function GET(
 
     return NextResponse.json({ thinking: block.thinking });
   } catch (error) {
+    if (error instanceof SessionHistoryWorkerError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 503 });
+    }
     return apiErrorResponse(error);
   }
 }

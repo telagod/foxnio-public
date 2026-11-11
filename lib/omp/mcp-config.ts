@@ -1,7 +1,7 @@
 import { execFileSync } from "child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeSync } from "fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, readdirSync, statSync, unlinkSync, writeSync } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, relative, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { stripAnsi } from "../ansi";
 import { writeFileAtomic } from "../fs-atomic";
 import { createChildProcessEnvironment } from "../project-command-env";
@@ -109,20 +109,25 @@ function readTomlMcpServers(path: string, source: string, disabledNames: Set<str
 /** Read installed provider configs by MCP schema, never by individual server name. */
 export function readDiscoveredMcpServers(cwd?: string, disabled = [] as string[]): McpLiveServer[] {
   const disabledNames = new Set(disabled);
-  const paths = new Set(discoverMcpConfigPaths(homedir()));
-  if (cwd) for (const path of discoverMcpConfigPaths(cwd)) paths.add(path);
+  const paths = new Map(discoverMcpConfigPaths(homedir()).map((path) => [path, path]));
+  if (cwd) {
+    const workspace = realpathSync(cwd);
+    const root = realpathSync(projectRoot(workspace));
+    assertCwdWithinRoot(workspace, root);
+    for (const path of discoverMcpConfigPaths(workspace)) paths.set(path, canonicalMcpTarget(root, path));
+  }
   const servers: McpLiveServer[] = [];
   const seen = new Set<string>();
-  for (const path of paths) {
+  for (const [path, target] of paths) {
     const source = sourceName(path);
     if (path.endsWith(".toml")) {
-      for (const server of readTomlMcpServers(path, source, disabledNames)) {
+      for (const server of readTomlMcpServers(target, source, disabledNames)) {
         const key = `${server.source}:${server.name}`;
         if (!seen.has(key)) { seen.add(key); servers.push(server); }
       }
       continue;
     }
-    const config = readMcpUserConfig(path);
+    const config = readMcpUserConfig(target);
     for (const server of config.servers) {
       if (disabledNames.has(server.name)) continue;
       const key = `${source}:${server.name}`;
@@ -199,18 +204,72 @@ function projectRoot(cwd: string): string {
 
 function assertCwdWithinRoot(cwd: string, root: string): void {
   const path = relative(root, cwd);
-  if (path === ".." || path.startsWith(`..${sep}`)) throw new Error("Project root does not contain workspace");
+  if (isAbsolute(path) || path === ".." || path.startsWith(`..${sep}`)) throw new Error("Project root does not contain workspace");
+}
+
+/** realpath for a not-yet-created config, including dangling file/dir links.
+ * Resolve a link relative to its physical parent, not the lexical .omp alias. */
+function realPathWithMissingTail(path: string, links = 0): string {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    let symbolicLink = false;
+    try {
+      symbolicLink = lstatSync(path).isSymbolicLink();
+    } catch (statError) {
+      if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+    }
+    const parent = dirname(path);
+    if (parent === path) throw error;
+    const realParent = realPathWithMissingTail(parent, links);
+    if (!symbolicLink) return join(realParent, basename(path));
+    if (links >= 32) throw new Error("Too many symbolic links in MCP configuration path");
+    return realPathWithMissingTail(resolve(realParent, readlinkSync(path)), links + 1);
+  }
+}
+
+function canonicalMcpTarget(root: string, path: string): string {
+  const parent = realPathWithMissingTail(dirname(path));
+  const target = realPathWithMissingTail(path);
+  for (const candidate of [parent, target]) {
+    const remainder = relative(root, candidate);
+    if (isAbsolute(remainder) || remainder === ".." || remainder.startsWith(`..${sep}`)) {
+      throw new Error("MCP configuration path resolves outside the project root");
+    }
+  }
+  return target;
+}
+
+function assertCanonicalMcpTarget(resolved: { root: string; path: string }): void {
+  if (canonicalMcpTarget(resolved.root, resolved.path) !== resolved.path) {
+    throw new Error("MCP configuration path changed while waiting for its lock; retry the operation");
+  }
 }
 
 export function resolveMcpConfig(cwd: string): { root: string; path: string } {
-  const root = projectRoot(cwd);
-  assertCwdWithinRoot(cwd, root);
-  const existing = MCP_FILENAMES.map((filename) => join(root, filename)).find(existsSync);
-  return { root, path: existing ?? join(root, MCP_FILENAMES[0]) };
+  const workspace = realpathSync(cwd);
+  const root = realpathSync(projectRoot(workspace));
+  assertCwdWithinRoot(workspace, root);
+  let defaultPath: string | undefined;
+  for (const filename of MCP_FILENAMES) {
+    const candidate = join(root, filename);
+    const target = canonicalMcpTarget(root, candidate);
+    defaultPath ??= target;
+    try {
+      // lstat includes dangling links: never silently choose another config
+      // merely because an existing link's destination has not been created.
+      lstatSync(candidate);
+      return { root, path: target };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return { root, path: defaultPath! };
 }
 
-export function readMcpConfig(cwd: string): { root: string; path: string; config: McpFile; exists: boolean } {
-  const resolved = resolveMcpConfig(cwd);
+function readResolvedMcpConfig(resolved: { root: string; path: string }): { root: string; path: string; config: McpFile; exists: boolean } {
+  assertCanonicalMcpTarget(resolved);
   if (!existsSync(resolved.path)) return { ...resolved, config: { mcpServers: {} }, exists: false };
   if (statSync(resolved.path).size > MAX_MCP_CONFIG_BYTES) throw new Error("MCP configuration is too large to edit in foxnio");
   let config: unknown;
@@ -222,6 +281,10 @@ export function readMcpConfig(cwd: string): { root: string; path: string; config
   if (!isRecord(config)) throw new Error(`${resolved.path} must contain a JSON object`);
   if (config.mcpServers !== undefined && !isRecord(config.mcpServers)) throw new Error("mcpServers must be an object");
   return { ...resolved, config: config as McpFile, exists: true };
+}
+
+export function readMcpConfig(cwd: string): { root: string; path: string; config: McpFile; exists: boolean } {
+  return readResolvedMcpConfig(resolveMcpConfig(cwd));
 }
 
 export function validateMcpServer(name: unknown, server: unknown): asserts server is McpServer {
@@ -267,13 +330,15 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(sab), 0, 0, ms);
 }
 
-function withMcpConfigLock<T>(configPath: string, fn: () => T): T {
-  const lockPath = `${configPath}.lock`;
+function withMcpConfigLock<T>(resolved: { root: string; path: string }, fn: () => T): T {
+  assertCanonicalMcpTarget(resolved);
+  const lockPath = `${resolved.path}.lock`;
   const deadline = Date.now() + MCP_LOCK_TIMEOUT_MS;
   // The config file may not exist yet (first write) — the lockfile needs its
   // parent dir to exist before exclusive-create can succeed.
   mkdirSync(dirname(lockPath), { recursive: true });
   for (;;) {
+    assertCanonicalMcpTarget(resolved);
     let fd: number | null = null;
     try {
       fd = openSync(lockPath, "wx");
@@ -317,9 +382,10 @@ export function writeMcpServer(cwd: string, name: string, server: McpServer, pre
   validateMcpServer(name, server);
   if (previousName !== undefined && !SERVER_NAME.test(previousName)) throw new Error("Invalid previous server name");
   const current = readMcpConfig(cwd);
-  return withMcpConfigLock(current.path, () => {
-    // Re-read INSIDE the lock so a concurrent writer's mutation is not lost.
-    const locked = readMcpConfig(cwd);
+  return withMcpConfigLock(current, () => {
+    // Pin the canonical target and re-read INSIDE its lock. Rediscovering a
+    // different filename here could mutate a file whose lock we do not hold.
+    const locked = readResolvedMcpConfig(current);
     const servers = { ...(locked.config.mcpServers ?? {}) };
     // Capture the old entry before deleting it: a rename must retain credentials
     // that the browser intentionally redacts from its payload.
@@ -343,8 +409,8 @@ export function writeMcpServer(cwd: string, name: string, server: McpServer, pre
 export function deleteMcpServer(cwd: string, name: string): { path: string } {
   if (!SERVER_NAME.test(name)) throw new Error("Invalid server name");
   const current = readMcpConfig(cwd);
-  return withMcpConfigLock(current.path, () => {
-    const locked = readMcpConfig(cwd);
+  return withMcpConfigLock(current, () => {
+    const locked = readResolvedMcpConfig(current);
     const servers = { ...(locked.config.mcpServers ?? {}) };
     if (!(name in servers)) throw new Error("MCP server was not found");
     delete servers[name];

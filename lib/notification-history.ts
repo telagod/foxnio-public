@@ -4,7 +4,7 @@ import { isRecord } from "./type-guards";
 
 /**
  * Browser mirror of server-side session signals used by navigation state.
- * Local changes apply immediately; failed writes and visibility changes reload.
+ * Local changes apply immediately; failed writes, stream opens and visibility changes reload.
  */
 
 const HISTORY_URL = "/api/notifications/history";
@@ -17,9 +17,9 @@ function set(next: NotificationHistoryEntry[]) {
   for (const listener of listeners) listener();
 }
 
-// A load's snapshot is stale if a local change happened while it was in flight,
-// or a change request has not reached the server yet; it is then fetched again
-// once those requests settle, so a removed entry never comes back.
+// A load's snapshot is stale if a local change or live signal arrived while it
+// was in flight, or a change request has not reached the server yet. Refetch
+// after pending writes settle so reconnect snapshots cannot undo newer state.
 let changes = 0;
 let requestsInFlight = 0;
 let loads = 0;

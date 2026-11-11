@@ -3,7 +3,7 @@ import { apiErrorResponse } from "@/lib/api-utils";
 import { getContentDisposition } from "@/lib/content-disposition";
 import fs from "fs";
 import path from "path";
-import { getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
+import { getAllowedUploadRoots, isFilePathAllowed, isFileUploadPathProtected } from "@/lib/file-access";
 import { authorizeFileAccess, filePathFromSegments } from "@/lib/file-authorization";
 import {
   DOCX_PREVIEW_MAX_BYTES,
@@ -77,8 +77,8 @@ async function getUploadDirectory(segments: string[]): Promise<
   // out over the allowed roots, which would turn "pick me a directory" into
   // "write anywhere any allowed root points at" (#135).
   const directory = filePathFromSegments(segments);
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isFilePathAllowed(directory, allowedRoots)) {
+  const allowedRoots = await getAllowedUploadRoots();
+  if (isFileUploadPathProtected(directory) || !isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 }) };
   }
 
@@ -103,11 +103,22 @@ async function getUploadDirectory(segments: string[]): Promise<
       // Ignore stale session roots that no longer exist.
     }
   }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
+  if (isFileUploadPathProtected(realDirectory) || !isFilePathAllowed(realDirectory, realRoots)) {
     return { response: NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 }) };
   }
 
   return { directory: realDirectory };
+}
+
+function uploadDirectoryAccessError(directory: string): NextResponse | null {
+  try {
+    // Body reads yield to other work. Do not use a once-authorized path after
+    // a directory/ancestor was replaced with a symlink while bytes arrived.
+    if (fs.realpathSync(directory) === directory && !isFileUploadPathProtected(directory)) return null;
+  } catch {
+    // A removed directory is no longer the authorized write target either.
+  }
+  return NextResponse.json({ error: "Upload directory changed or access denied", code: "access_denied" }, { status: 403 });
 }
 
 function parseUploadFileNames(value: unknown): string[] | null {
@@ -142,6 +153,8 @@ export async function POST(
       if (validationError) {
         return NextResponse.json({ error: validationError }, { status: 400 });
       }
+      const accessError = uploadDirectoryAccessError(directory);
+      if (accessError) return accessError;
       return NextResponse.json(inspectUploadTargets(directory, fileNames));
     }
 
@@ -175,6 +188,8 @@ export async function POST(
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
+    const accessError = uploadDirectoryAccessError(directory);
+    if (accessError) return accessError;
 
     const inspection = inspectUploadTargets(directory, fileNames);
     if (strategy === "error" && inspection.conflicts.length > 0) {
@@ -213,6 +228,8 @@ export async function POST(
         recordError(file, error);
         continue;
       }
+      const accessError = uploadDirectoryAccessError(directory);
+      if (accessError) return accessError;
 
       if (conflictSet.has(file.name)) {
         try {

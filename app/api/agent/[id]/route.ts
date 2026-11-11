@@ -19,6 +19,8 @@ const NO_SPAWN_REPLIES: Record<string, unknown> = {
   predict_word_feedback: null,
   get_btw_history: { records: [] },
   btw_cancel: { cancelled: false },
+  claim_host_tool: { token: null },
+  host_tool_result: null,
 };
 
 // Live diagnostics of a skill-resolving omp. A saved or exited session has none,

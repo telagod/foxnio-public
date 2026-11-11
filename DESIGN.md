@@ -91,15 +91,25 @@ reader tolerates the fixed title slot and older session shapes, resolves blob
 references when needed, and builds the active branch context from the entry
 tree.
 
-Direct session mutation is deliberately narrow and explicit: rename/title,
-archive, deletion, and required branch-parent maintenance. These writes are
-atomic where possible; archive or deletion stops the associated live process
-first. foxnio does not provide a general editor for session JSONL or opaque OMP
-state.
+Session mutation is deliberately narrow: rename/title, archive and deletion.
+Live renames go through RPC without a direct-file fallback. Offline mutations
+run in an ephemeral, no-tools OMP maintenance process that holds OMP's native
+session ownership lease throughout the read/write operation. Unsupported
+native lease APIs fail closed; a lease probe followed by an unprotected write
+is not sufficient. Archive/deletion stop the local child first and refuse
+parents with children in any project directory; they never silently reparent
+FOX workers. foxnio provides no general editor for session JSONL or opaque OMP state.
+
+A missing or invalid recorded cwd blocks execution with `session_cwd_unavailable`,
+including automatic restart recovery and cross-session delivery. It never
+substitutes the server cwd or home. History remains readable; restore the
+original directory or start a new conversation in the intended workspace.
 
 Models and allow-listed OMP settings use surgical YAML updates that preserve
 unrelated content. Plugin operations run the installed `omp plugin` CLI. MCP
 configuration is project-local, validated before writing, and saved atomically.
+Its final canonical file and parent directory must remain inside the canonical
+project root. Internal symlinks remain supported; external targets are rejected.
 
 ### Reconnect and foreground catch-up
 
@@ -162,11 +172,26 @@ an append: the same inode can be rewritten and then extended, so any file
 version change invalidates offsets rather than trusting an unchecked prefix.
 Failed reads never advance the confirmed cursor.
 
+Scanning, parsing, branch/tree projection and page hydration run in one Node
+worker, not the HTTP/SSE event loop. The worker alone owns those cache budgets;
+one request runs at a time and at most 32 wait. Identical in-flight reads coalesce.
+Overload or worker failure rejects reads without advancing history; a later
+request can recreate a failed worker. Idle workers do not keep the process alive.
+
 File-only catch-up also refreshes model and thinking metadata without replacing
 newer or pending RPC choices. Replacement observer connections restore browser
 registrations and the subagent roster only after successfully connecting.
 
-Deploy the frontend and API support together; no native OMP upgrade is required.
+Notification streams reconcile the persisted snapshot after every successful
+OPEN, including reconnect, with revision fencing against newer live signals.
+Browser host actions must obtain a server-issued single-use claim before any
+side effect. Only that claim can settle the pending call; duplicates and late
+results are ignored. An uncertain claimant timeout fails instead of replaying
+the action into another tab.
+
+Deploy the frontend and API support together. History catch-up needs no native
+OMP upgrade; offline mutations require native session-lease support and fail
+closed with an upgrade message when it is unavailable.
 
 ## Security contract
 
@@ -194,14 +219,18 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
   environment through `createChildProcessEnvironment`
   (`lib/project-command-env.ts`). `OMP_WEB_*` values that are configuration
   rather than secrets (`OMP_WEB_PACKAGE_DIR`, `OMP_WEB_OMP_BIN`, ...) are kept.
-- API requests are origin-checked. Do not add browser-to-host execution paths
-  that bypass this boundary.
-- OMP RPC host tools are intentionally not registered. A browser request must
-  not become arbitrary host command execution through an extension callback.
+- Browser API requests compare the full normalized Origin, including non-default
+  ports. Proxies must preserve Origin/Host; there is no implicit same-host
+  default-port exception. Do not bypass this boundary for host execution.
+- Browser host tools (`open_file`, `open_url`) and the scoped cross-session
+  bridges are explicit integrations, not arbitrary browser-provided host code.
 - File APIs are not a general filesystem browser. They are restricted to
   selected workspaces, valid Git worktrees, session-referenced directories, and
   explicitly selected roots. Paths are canonicalized to reject traversal and
   symlink escapes.
+  Global config/rule roots are readable only where permitted; they do not grant
+  generic upload authority. Config/agent/native data roots remain upload-protected
+  even when a broad workspace (such as home) contains them.
 - Secrets, raw API keys, and auth database contents never appear in API
   responses, logs, or the browser.
 
@@ -249,6 +278,10 @@ coalesces native attention and worker activity, respects quiet hours and daily
 limits, and wakes the current conversation. Pending retries stay in memory;
 unreported signals are reconstructed after restart. The observer never edits
 OMP todos or reads worker transcripts; FOX reviews the evidence itself.
+An idle FOX's last run error is not busy and does not prevent the next normal
+wake. Service health surfaces that native error separately from tick freshness;
+only native recovery clears it. Running work and pending human input still block
+wakes under the existing quiet-hour and daily-budget policy.
 
 Historical `chief.db`, `dispatches.json` and preference files remain untouched.
 A one-time read-only migration copies only autonomy policy; old tickets and

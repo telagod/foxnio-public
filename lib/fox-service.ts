@@ -47,6 +47,8 @@ export interface FoxServiceStatus {
   seeded: boolean;
   lastTickAt: string | null;
   lastWakeAt: string | null;
+  /** Native failure of the current FOX run; clears on native recovery, not a tick. */
+  lastRunError: string | null;
   pending: number;
   dailyCount: number;
   capabilities?: { agentTools: boolean; memoryTools: boolean | null };
@@ -93,7 +95,6 @@ function isFoxTargetBusy(target: FoxServiceTarget): boolean {
   return Boolean(wrapper?.isAlive() && (
     wrapper.isRunning()
     || wrapper.pendingHumanRequests() > 0
-    || wrapper.lastRunErrorMessage()
   ));
 }
 
@@ -173,6 +174,10 @@ export function foxServiceStatus(): FoxServiceStatus {
   const config = readFoxServiceConfig();
   const state = readFoxServiceState();
   const today = localDayKey(Date.now());
+  const sessionId = readFoxSessionRecord().sessionId;
+  const wrapper = sessionId ? getRpcSession(sessionId) : undefined;
+  const lastRunError = wrapper && comparableProjectPath(wrapper.cwd) === foxCwdKey()
+    ? wrapper.lastRunErrorMessage() : null;
   let memoryTools: boolean | null = null;
   try {
     const backend = readNativeSettings().settings.memory?.backend;
@@ -183,6 +188,7 @@ export function foxServiceStatus(): FoxServiceStatus {
     seeded: Boolean(state.seededAt),
     lastTickAt: state.lastTickAt,
     lastWakeAt: state.lastWakeAt,
+    lastRunError,
     pending: globalThis.__foxnioFoxService?.engine.pendingCount() ?? 0,
     dailyCount: state.daily.date === today ? state.daily.count : 0,
     capabilities: { agentTools: loadWebServerSettings().agentToolsEnabled, memoryTools },

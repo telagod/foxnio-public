@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { getAgentDir, getConfigRoot } from "./omp/paths";
+import { getAgentDir, getConfigRoot, getSessionsDir } from "./omp/paths";
 import { isWindowsAbsolutePath } from "./paths";
 import { listAllSessions } from "./session-reader";
 
@@ -136,6 +136,22 @@ export function isConfigRootCredentialPath(filePath: string): boolean {
     .some((candidate) => isUnderConfigRoot(candidate, roots) && isConfigRootDeniedFile(candidate));
 }
 
+/** Generic uploads never mutate native state, even when home is a workspace.
+ * Include the native data root: XDG can move sessions outside the config tree.
+ * Check physical roots as well as names so dotfile-manager links stay protected. */
+export function isFileUploadPathProtected(filePath: string): boolean {
+  const sessionsDir = getSessionsDir();
+  const configRoots = new Set([...getConfigAgentRoots(), path.dirname(sessionsDir), sessionsDir]);
+  const roots = [...configRoots];
+  for (const root of configRoots) {
+    const resolved = realPathOrNull(root);
+    if (resolved) roots.push(resolved);
+  }
+  const resolvedTarget = realPathOrNull(filePath);
+  return isUnderConfigRoot(filePath, roots)
+    || (resolvedTarget !== null && isUnderConfigRoot(resolvedTarget, roots));
+}
+
 export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();
   const cached = globalThis.__piAllowedRootsCache;
@@ -153,6 +169,12 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   for (const root of getConfigAgentRoots()) roots.add(root);
   globalThis.__piAllowedRootsCache = { roots, expiresAt: now + ALLOWED_ROOTS_TTL_MS };
   return roots;
+}
+
+/** Read-only config/rule roots must never grant generic write authority.
+ * Broad workspace roots still need isFileUploadPathProtected at the target. */
+export async function getAllowedUploadRoots(): Promise<Set<string>> {
+  return new Set([...await getAllowedFileRoots()].filter((root) => !isFileUploadPathProtected(root)));
 }
 
 export function isPathWithinRoots(target: string, roots: Set<string>): boolean {

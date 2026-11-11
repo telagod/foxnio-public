@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
-import { loadSessionFile } from "@/lib/omp/session-files";
-import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileTooLargeError } from "@/lib/session-reader";
+import { buildSessionContext, getSessionContextBoundary, getSessionContextForDisplay, getSessionHistoryPage, getSessionLoadError, readSessionHeader, SessionFileTooLargeError, SessionHistoryWorkerError } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
@@ -11,6 +10,9 @@ import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type Sessi
  * as the same 413 the null-header path returns — not a 500 so the frontend
  * does not treat history as gone. */
 function contextErrorResponse(error: unknown): NextResponse {
+  if (error instanceof SessionHistoryWorkerError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 503 });
+  }
   if (error instanceof SessionFileTooLargeError) {
     return NextResponse.json(
       { error: "Session file is too large to open in foxnio", code: "session_file_too_large" },
@@ -87,8 +89,7 @@ export async function GET(
 
     const header = readSessionHeader(filePath);
     if (header === null) {
-      const loaded = loadSessionFile(filePath, { resolveBlobs: false });
-      if (loaded.error === "too_large") {
+      if (await getSessionLoadError(filePath) === "too_large") {
         return NextResponse.json(
           { error: "Session file is too large to open in foxnio", code: "session_file_too_large" },
           { status: 413 },
@@ -97,7 +98,7 @@ export async function GET(
       return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
     if (boundary === "1") {
-      return NextResponse.json(getSessionContextBoundary(filePath), { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json(await getSessionContextBoundary(filePath), { headers: { "Cache-Control": "no-store" } });
     }
     if (sync === "1") {
       const page = await getSessionHistoryPage(filePath, cursor, limit, leafId, {
@@ -114,9 +115,7 @@ export async function GET(
       const response: SessionSyncResponse = { ...page.history, sessionId: id, leafId: page.leafId, live };
       return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
     }
-    // Deduplicated cached read; blob resolution on per-entry deep copies.
-    const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
-    const context = buildSessionContext(entries, leafId, {
+    const context = await getSessionContextForDisplay(filePath, leafId, {
       deferThinking,
       deferToolResultImages,
       includePreCompaction,

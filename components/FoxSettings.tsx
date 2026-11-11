@@ -25,6 +25,11 @@ export function FoxSettings({ service, projects, onClose }: {
           <DialogClose className="fox-button fox-icon-button" disabled={service.saving} aria-label={t("fox.detail.close")}><X size={18} /></DialogClose>
         </div>
         <p className="fox-settings-description">{t("fox.settings.description")}</p>
+        {service.status && <p className={service.health === "error" ? "fox-inline-warning" : "fox-service-status"} role="status" data-health={service.health}>
+          {service.health === "error"
+            ? <span>{t("notifications.typeError")}: {service.status.lastRunError}</span>
+            : t(`fox.service.${service.health}`)}
+        </p>}
         {!service.status ? (
           <div className="fox-inline-warning" role="status">
             <span>{t(service.failed ? "fox.service.unavailable" : "fox.overview.loading")}</span>

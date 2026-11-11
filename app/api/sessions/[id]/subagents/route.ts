@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { extractSubagentHistory } from "@/lib/subagent-history";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { SessionHistoryWorkerError } from "@/lib/session-history-errors";
 
 export const dynamic = "force-dynamic";
 
@@ -29,9 +30,12 @@ export async function GET(
       return resolved.response;
     }
     const filePath = resolved.filePath;
-    const subagents = extractSubagentHistory(filePath);
+    const subagents = await extractSubagentHistory(filePath);
     return NextResponse.json({ subagents });
   } catch (error) {
+    if (error instanceof SessionHistoryWorkerError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 503 });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },

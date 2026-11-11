@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { archiveSessionFileWithArtifacts } from "@/lib/omp/session-files";
+import { mutateSession, SessionMutationError } from "@/lib/omp/session-mutation";
 import {
   invalidateSessionListCache,
   invalidateSessionPathCache,
   listAllSessions,
+  readSessionHeader,
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
@@ -33,13 +34,15 @@ export async function POST(
     // OMP owns writes while a child is live; wait for its final flush before
     // moving the file so the archive contains the complete native transcript.
     await getRpcSession(id)?.destroyAndWait?.();
-    const archivedPath = archiveSessionFileWithArtifacts(filePath);
+    const header = readSessionHeader(filePath);
+    const { archivedPath } = await mutateSession({ action: "archive", sessionId: header?.id ?? id, filePath });
     clearExitedRpcSession(id);
     invalidateSessionPathCache(id);
     // The file is gone: full flush is correct (drops its caches + refreshes list).
     invalidateSessionListCache();
     return NextResponse.json({ ok: true, archived: true, archivedPath });
   } catch (error) {
+    if (error instanceof SessionMutationError) return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message, code: "session_archive_failed" }, { status: 500 });
   }
