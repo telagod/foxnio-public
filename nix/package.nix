@@ -131,7 +131,7 @@ buildNpmPackage (finalAttrs: {
     cp ${geist} app/fonts/Geist.ttf
   '';
 
-  npmDepsHash = "sha256-/xbEloZ+yTCLYtfjDp/H8GYPqOPKN/V+Ea8WKlbtH0E=";
+  npmDepsHash = "sha256-/4W9ty2px2Kml75OgkVxSZjQ+vBSnMupiIJZ0TlG5jo=";
 
   # electron is a dev dependency of the desktop build only; its postinstall must not
   # download a binary inside the sandbox.

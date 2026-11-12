@@ -112,6 +112,36 @@ Storage readiness gates resident ingestion, observation and server-owned
 producers and drains ordered notification writes before the server exits, with
 a bounded deadline and an explicit unsaved-data diagnostic on failure.
 
+### Adding a project directory
+
+All add-workspace entry points share `DirectoryPicker`: breadcrumbs and an
+editable path navigate one Miller view (current level, selected folder's
+children). Clearing the selected row falls back to the listed level. Navigation
+is latest-intent-wins; pending scans and unapplied path drafts cannot be confirmed.
+
+Picker viewport bounds divide by the existing `--ui-scale`, including Large
+(120%). The middle path/browser/options region scrolls locally on constrained
+windows without collapsing the two panes or pushing the footer out of view;
+long-parent create dialogs scroll within the same compensated bounds.
+
+Focus capture/restoration stays local to the picker: initial path focus follows
+the shared modal hook's opener capture, nested dismissal restores New folder,
+and successful creation uses the enabled path field while navigation is pending.
+Closing the parent returns to its original opener when it remains available;
+the shared modal stack, IME guards and global scale behavior are unchanged.
+
+`POST /api/cwd/browse { parent, name }` creates one empty direct child of an
+existing canonical directory, without recursive creation, overwrites, Git init
+or project registration. The nested create dialog names its parent explicitly,
+keeps errors recoverable, and selects the created directory on success. Cancelling
+the picker never registers a project and does not delete a folder already created.
+
+Only final confirmation calls the existing `/api/projects` registration flow,
+then refreshes and selects its returned project path (including existing Git
+worktree normalization). Git clone and profile/advisor/extra arguments are
+separate optional disclosures; clone uses the selected directory as its parent
+and retains its existing stream and cancellation/cleanup protocol.
+
 ### Direct file access
 
 Session browsing is implemented in pure Node against OMP JSONL files. The

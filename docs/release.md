@@ -53,6 +53,12 @@ access in the package's GitHub settings.
 
 ## Before each release
 
+Never run `npm ci`, `npm run build`, `npm run release:check` or `npm pack`
+in a checkout used by a running foxnio instance. These commands replace
+dependencies or `.next`, leaving the live process with stale manifests and
+missing chunks. Prepare the release in a separate checkout/worktree with its
+own dependencies and build output; keep the serving checkout untouched.
+
 - `bin/omp-web-tray.exe` is a committed build of `native/tray`; the workflows
   do not build it. After changing `native/tray`, rebuild it with the .NET 8 SDK
   and commit the result. The project sets `EnableWindowsTargeting`, so a Linux

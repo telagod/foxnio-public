@@ -4,12 +4,20 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ---
 
-## [Unreleased]
+## [0.7.2] - 2026-11-13
 
 ### Fixes & Improvements
 
+- **Adding a project now uses one directory flow.** Breadcrumbs, direct path entry and a two-column folder browser keep the current level, chosen directory and children clear. New folders are created inside the chosen directory (or the current level), automatically selected, and registered only after final confirmation; conflicts, invalid names and permission errors stay recoverable without overwriting content or initializing Git. Git clone and launch configuration remain separate optional sections. Dialog bounds respect Interface Scale, including Large (120%); short-window content scrolls without displacing confirmation/cancellation, and nested creation restores keyboard focus to the parent.
 - **FOX can dispatch immediately after goal authorization.** The host binds and resumes the exact native goal before returning a successful authorization result, instead of exposing its temporary setup pause to the same model turn. Native RPC continuation still starts after settlement, and Pause/Stop and scoped admission checks remain enforced. Regression coverage now dispatches without an artificial post-authorization yield and verifies cancellation during binding.
 - **Failed FOX activation stays fail-closed.** If the post-resume native state read fails, the host closes admission and pauses only the proven same goal, reporting any unconfirmed pause. An error cannot leave a claimed successful activation or silently permit dispatch.
+
+> Upgrades from 0.6.x still require all old instances stopped and
+> `foxnio data migrate --offline`; 0.7.x databases do not need reimport.
+>
+> Desktop installers are unsigned. Windows SmartScreen may show a warning;
+> on macOS, use right-click **Open** or run
+> `xattr -dr com.apple.quarantine /Applications/foxnio.app`.
 
 ## [0.7.1] - 2026-11-12
 
