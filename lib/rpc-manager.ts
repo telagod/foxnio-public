@@ -59,7 +59,7 @@ import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, Extensio
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 import type { AdvisorChoice } from "./advisor-default";
 import type { FoxGoalSnapshot, FoxGoalCoordination, NativeGoal, NativeGoalModeState } from "./fox-goal-types";
-import { FOX_GOAL_TOOL, FOX_GOAL_TOOL_DEFINITION, FOX_GOAL_COMMAND, FOX_GOAL_REPLY_PREFIX, FOX_GOAL_EVENT_PREFIX, parseFoxGoalCoordination, validateFoxGoalDispatch } from "./omp/fox-goals.mjs";
+import { FOX_GOAL_TOOL, FOX_GOAL_TOOL_DEFINITION, FOX_GOAL_COMMAND, FOX_GOAL_REPLY_PREFIX, FOX_GOAL_EVENT_PREFIX, assertFoxGoalGrant, parseFoxGoalCoordination, validateFoxGoalDispatch } from "./omp/fox-goals.mjs";
 import { readFoxGoalJournal } from "./fox-goal-journal";
 
 interface FoxHostAdmission {
@@ -1632,13 +1632,6 @@ export class AgentSessionWrapper {
           if (native.hostControlVersion !== this.foxGoalControlVersion
             || this.foxGoalAdmissionClosed && this.foxGoalDurableControlVersion !== this.foxGoalControlVersion) throw new Error("A pending or newer FOX control cancelled this consent");
           this.foxGoalAdmissionClosed = false;
-          if (this.foxGoalContinuation) {
-            // A queued human request can authorize the next delivery before
-            // the old [rpc] child settles. Create only after a [] restart.
-            this.foxGoalActivationPending = true;
-            sendResult(JSON.stringify(native.snapshot));
-            return;
-          }
           const bound = await this.withFoxGoalEffect(async () => {
             const current = await this.nativeGoal("get");
             if (current.goal && (native.snapshot.inheritedGoalIds?.includes(current.goal.id) || grant.replacesGoalId === current.goal.id)) await this.nativeGoal("drop");
@@ -1648,8 +1641,29 @@ export class AgentSessionWrapper {
             if (this.foxGoalAdmissionClosed || !created.goal || created.goal.objective !== grant.terms.objective) throw new Error("Native objective does not exactly match confirmed scope; goal remains paused");
             const snapshot = await this.foxGoalCommand("bind", { grantEntryId: grant.id, goalId: created.goal.id, objective: created.goal.objective });
             if (snapshot.grant?.goalId !== created.goal.id || snapshot.grant.revoked || this.foxGoalAdmissionClosed) throw new Error("Native grant binding was not persisted or was revoked");
-            this.foxGoalActivationPending = true;
-            return snapshot;
+            // The authorizing turn may dispatch immediately. Only enabling RPC
+            // continuation needs a settled child; the bound goal must be active now.
+            const activationProc = this.proc;
+            const activationSessionId = this.sessionId;
+            try {
+              await this.nativeGoal("resume");
+              const active = await this.getFoxGoalSnapshot();
+              if (this.foxGoalAdmissionClosed || active.grant?.id !== grant.id || active.grant.goalId !== created.goal.id) throw new Error("Native goal authority changed during activation");
+              assertFoxGoalGrant(active);
+              this.foxGoalActivationPending = !this.foxGoalContinuation;
+              return active;
+            } catch (error) {
+              this.closeFoxGoalAdmission();
+              if (this.proc === activationProc && this.sessionId === activationSessionId && this.nativeGoalState?.goal.id === created.goal.id) {
+                try {
+                  const paused = await this.nativeGoal("pause");
+                  if (paused.goal?.id !== created.goal.id || paused.goal.status !== "paused" || paused.state?.enabled !== false) throw new Error("Native goal pause was not confirmed");
+                } catch (pauseError) {
+                  throw new Error(`Native goal activation failed: ${error instanceof Error ? error.message : String(error)}; admission is closed but pause could not be confirmed: ${pauseError instanceof Error ? pauseError.message : String(pauseError)}`);
+                }
+              }
+              throw error;
+            }
           });
           sendResult(JSON.stringify(bound));
         } else sendResult(JSON.stringify(await this.getFoxGoalSnapshot()));
@@ -1783,7 +1797,6 @@ export class AgentSessionWrapper {
   private async sendNativeGoal(op: "get" | "create" | "pause" | "resume" | "drop", args: Record<string, unknown> = {}): Promise<{ goal: NativeGoal | null; state: NativeGoalModeState | null }> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!isFoxWorkspacePath(this.cwd) || !this.isAlive()) throw new Error("Native goal controls require the live FOX conversation");
-    if (op === "create" && this.foxGoalContinuation) throw new Error("Goal setup requires continuation disabled");
     if ((op === "create" || op === "resume") && this.foxGoalAdmissionClosed) throw new Error("FOX goal admission is closed");
     const proc = this.proc;
     const identity = this.sessionId;

@@ -313,6 +313,16 @@ dispatches and three rework attempts per item, until delivery or revocation;
 expiry and native token budget are optional. Native goal accounting is not a
 total spend cap for separate top-level workers. Workers are not a shell sandbox.
 
+A successful `fox_goal authorize` reply includes the exact bound, active native
+goal. Setup pauses only while binding consent, then resumes before returning to
+the authorizing model turn, so that turn can dispatch immediately. If RPC
+continuation still needs enabling, the child restarts after native settlement;
+this does not gate same-turn dispatch. User/resource pauses and revocation remain
+authoritative, and Resume does not automatically clear native todo blockers.
+If activation cannot be verified after resume, admission closes and the same
+native goal is paused when its runtime identity is still proven; a failed pause
+is reported explicitly rather than leaving a claimed successful activation.
+
 Received reports and completed worker turns are not acceptance. FOX reviews
 criterion-specific evidence, settles assignments and updates native todo;
 `goal complete` is blocked by unresolved work, stale or missing evidence and

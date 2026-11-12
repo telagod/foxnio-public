@@ -4,6 +4,13 @@ This changelog tracks **foxnio** (`@telagod/foxnio`). Entries before `v0.6.2` ar
 
 ---
 
+## [Unreleased]
+
+### Fixes & Improvements
+
+- **FOX can dispatch immediately after goal authorization.** The host binds and resumes the exact native goal before returning a successful authorization result, instead of exposing its temporary setup pause to the same model turn. Native RPC continuation still starts after settlement, and Pause/Stop and scoped admission checks remain enforced. Regression coverage now dispatches without an artificial post-authorization yield and verifies cancellation during binding.
+- **Failed FOX activation stays fail-closed.** If the post-resume native state read fails, the host closes admission and pauses only the proven same goal, reporting any unconfirmed pause. An error cannot leave a claimed successful activation or silently permit dispatch.
+
 ## [0.7.1] - 2026-11-12
 
 ### Fixes & Improvements
